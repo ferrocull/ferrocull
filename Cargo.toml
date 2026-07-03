@@ -1,0 +1,101 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/ferrocull",
+  "crates/ferrocull-core",
+  "crates/ferrocull-devices",
+  "crates/ferrocull-media",
+  "crates/ferrocull-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+chrono = "0.4"
+dirs = "6"
+ferrocull-core = { path = "crates/ferrocull-core" }
+ferrocull-devices = { path = "crates/ferrocull-devices" }
+ferrocull-media = { path = "crates/ferrocull-media" }
+ferrocull-ui = { path = "crates/ferrocull-ui" }
+iced = { version = "0.14", features = ["tokio"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+kamadak-exif = "0.6"
+plist = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync"] }
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+# -- Pedantic suppressions --
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+too_many_lines = "allow"
+
+# -- Cherry-picked nursery --
+collection_is_never_read = "warn"
+fallible_impl_from = "warn"
+needless_collect = "warn"
+option_if_let_else = "warn"
+or_fun_call = "warn"
+path_buf_push_overwrite = "warn"
+redundant_clone = "warn"
+unnecessary_struct_initialization = "warn"
+use_self = "warn"
+useless_let_if_seq = "warn"
+needless_continue = "warn"
+
+# -- Cherry-picked restriction --
+clone_on_ref_ptr = "warn"
+dbg_macro = "warn"
+infinite_loop = "warn"
+integer_division = "warn"
+mod_module_files = "deny"
+multiple_inherent_impl = "warn"
+partial_pub_fields = "warn"
+pathbuf_init_then_push = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+redundant_type_annotations = "warn"
+shadow_unrelated = "warn"
+todo = "warn"
+try_err = "warn"
+unneeded_field_pattern = "warn"
+unwrap_used = "warn"
+if_then_some_else_none = "warn"
+
+[workspace.lints.rust]
+exported_private_dependencies = "deny"
+unused_crate_dependencies = "warn"
+unused_extern_crates = "warn"
+unused_import_braces = "warn"
+explicit_outlives_requirements = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
+redundant_lifetimes = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+variant_size_differences = "warn"
+absolute_paths_not_starting_with_crate = "warn"
+let_underscore_drop = "warn"
+meta_variable_misuse = "warn"
+non_ascii_idents = "warn"
+unreachable_pub = "warn"
+
+[profile.release]
+strip = "symbols"
+# lto = true          # expensive to compile
+panic = "abort"
+# codegen-units = 1   # expensive to compile
