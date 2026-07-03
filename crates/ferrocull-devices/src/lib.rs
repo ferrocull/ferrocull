@@ -3,6 +3,8 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod scanner;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod statvfs;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -10,6 +12,8 @@ use std::{
     io,
     path::{Path, PathBuf},
 };
+
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ScanError {
@@ -120,7 +124,7 @@ pub enum MountError {
     Failed(String),
 }
 
-#[derive(Default, serde::Serialize)]
+#[derive(Clone, Default, serde::Serialize)]
 #[cfg_attr(target_os = "linux", derive(zbus::zvariant::Type))]
 #[cfg_attr(target_os = "linux", zvariant(signature = "a{sv}"))]
 pub struct MountOptions {
@@ -130,7 +134,7 @@ pub struct MountOptions {
     pub options: Option<String>,
 }
 
-#[derive(Default, serde::Serialize)]
+#[derive(Clone, Default, serde::Serialize)]
 #[cfg_attr(target_os = "linux", derive(zbus::zvariant::Type))]
 #[cfg_attr(target_os = "linux", zvariant(signature = "a{sv}"))]
 pub struct UnmountOptions {
@@ -138,7 +142,7 @@ pub struct UnmountOptions {
     pub force: Option<bool>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 pub enum FsType {
     #[serde(rename = "vfat")]
     Vfat,
@@ -170,9 +174,100 @@ impl MountFlag {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{mount, scan_cameras, scan_storage, unmount, watch};
+pub use linux::scan_cameras;
 #[cfg(target_os = "macos")]
-pub use macos::{mount, scan_cameras, scan_storage, unmount, watch};
+pub use macos::scan_cameras;
 pub use scanner::{ScannedFile, scan_camera_folders, scan_directory};
 #[cfg(target_os = "windows")]
-pub use windows::{mount, scan_cameras, scan_storage, unmount, watch};
+pub use windows::scan_cameras;
+
+/// Runs a blocking platform call on a dedicated thread. A panic in `f` is a bug
+/// in the platform backend, so the join failure is a broken invariant, not a
+/// runtime error.
+#[cfg(not(target_os = "linux"))]
+async fn run_blocking<T, F>(f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .expect("device backend task panicked")
+}
+
+/// Enumerates currently attached removable storage devices, one per drive.
+#[cfg(target_os = "linux")]
+pub async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
+    linux::scan_storage().await
+}
+
+#[cfg(target_os = "macos")]
+pub async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
+    run_blocking(macos::scan_storage).await
+}
+
+#[cfg(target_os = "windows")]
+pub async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
+    run_blocking(windows::scan_storage).await
+}
+
+/// Mounts `device`'s filesystem, returning the resulting mount point.
+#[cfg(target_os = "linux")]
+pub async fn mount(device: &StorageDevice, options: &MountOptions) -> Result<PathBuf, MountError> {
+    linux::mount(device, options).await
+}
+
+#[cfg(target_os = "macos")]
+pub async fn mount(device: &StorageDevice, options: &MountOptions) -> Result<PathBuf, MountError> {
+    let device = device.clone();
+    let options = options.clone();
+    run_blocking(move || macos::mount(&device, &options)).await
+}
+
+#[cfg(target_os = "windows")]
+pub async fn mount(device: &StorageDevice, options: &MountOptions) -> Result<PathBuf, MountError> {
+    let device = device.clone();
+    let options = options.clone();
+    run_blocking(move || windows::mount(&device, &options)).await
+}
+
+/// Unmounts `device`'s filesystem.
+#[cfg(target_os = "linux")]
+pub async fn unmount(device: &StorageDevice, options: &UnmountOptions) -> Result<(), UnmountError> {
+    linux::unmount(device, options).await
+}
+
+#[cfg(target_os = "macos")]
+pub async fn unmount(device: &StorageDevice, options: &UnmountOptions) -> Result<(), UnmountError> {
+    let device = device.clone();
+    let options = options.clone();
+    run_blocking(move || macos::unmount(&device, &options)).await
+}
+
+#[cfg(target_os = "windows")]
+pub async fn unmount(device: &StorageDevice, options: &UnmountOptions) -> Result<(), UnmountError> {
+    let device = device.clone();
+    let options = options.clone();
+    run_blocking(move || windows::unmount(&device, &options)).await
+}
+
+/// Streams [`DeviceEvent`]s into `tx`. The returned future stays pending for the
+/// watcher's lifetime, so every platform drives it as one long-lived task.
+#[cfg(target_os = "linux")]
+pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
+    linux::watch(tx).await
+}
+
+#[cfg(target_os = "macos")]
+pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
+    let handle = run_blocking(move || macos::watch(tx)).await?;
+    run_blocking(move || drop(handle.join())).await;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
+    let handle = run_blocking(move || windows::watch(tx)).await?;
+    run_blocking(move || drop(handle.join())).await;
+    Ok(())
+}

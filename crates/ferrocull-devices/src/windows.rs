@@ -50,7 +50,7 @@ fn disk_space(mount_point: &Path) -> Option<(u64, u64)> {
     Some((total, used))
 }
 
-pub fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
+pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
     let drive_mask = unsafe { GetLogicalDrives() };
     if drive_mask == 0 {
         return Err(ScanError::Backend(
@@ -100,7 +100,7 @@ pub const fn scan_cameras() -> Vec<Camera> {
 /// TODO: Propagate per-poll scan failures (currently `scan_current_removable_drives`
 /// silently degrades to empty on a `scan_storage` error, which can produce spurious
 /// `Removed` events). Requires extending the channel payload to carry errors.
-pub fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, WatchError> {
+pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, WatchError> {
     Ok(thread::spawn(move || {
         let mut known_drives = scan_current_removable_drives();
 
@@ -191,14 +191,20 @@ fn volume_name(root_wide: &[u16]) -> Option<String> {
 }
 
 /// Windows auto-mounts devices -- manual mount is not supported.
-pub fn mount(_device: &StorageDevice, _options: &MountOptions) -> Result<PathBuf, MountError> {
+pub(crate) fn mount(
+    _device: &StorageDevice,
+    _options: &MountOptions,
+) -> Result<PathBuf, MountError> {
     Err(MountError::Failed(String::from(
         "Windows auto-mounts devices — manual mount not supported",
     )))
 }
 
 /// Unmount via `mountvol /P` (dismounts the volume and takes it offline).
-pub fn unmount(device: &StorageDevice, _options: &UnmountOptions) -> Result<(), UnmountError> {
+pub(crate) fn unmount(
+    device: &StorageDevice,
+    _options: &UnmountOptions,
+) -> Result<(), UnmountError> {
     let target = mountvol_target(&device.device_path);
     let output = Command::new("mountvol")
         .arg(&target)

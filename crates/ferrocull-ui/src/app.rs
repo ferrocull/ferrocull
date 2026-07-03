@@ -706,18 +706,11 @@ fn device_events() -> impl iced::futures::Stream<Item = Message> {
             let (tx, mut rx) =
                 tokio::sync::mpsc::unbounded_channel::<ferrocull_devices::DeviceEvent>();
 
-            // The Linux watcher is an async task; the macOS/Windows watchers run on
-            // their own OS thread and return immediately.
-            #[cfg(target_os = "linux")]
             let _watcher = tokio::spawn(async move {
                 if let Err(e) = ferrocull_devices::watch(tx).await {
                     tracing::error!("device watch ended: {e}");
                 }
             });
-            #[cfg(not(target_os = "linux"))]
-            if let Err(e) = ferrocull_devices::watch(tx) {
-                tracing::error!("device watch failed to start: {e}");
-            }
 
             while rx.recv().await.is_some() {
                 if output
