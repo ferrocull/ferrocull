@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use ferrocull_core::{
     ColorLabel, FileCategory, Hook, JobCodeHistory, NamedProfile, load_profiles,
     media::{CaptureTime, DateSelection, FilterMode, SortOrder},
+    metadata_store,
     persistence::MediaDatabase,
     profiles_dir,
     thumbnail::parse_exif_from_bytes,
@@ -201,10 +202,10 @@ struct Ferrocull {
     profile_name_input: String,
     hooks: Vec<Hook>,
     delete_after_download: bool,
-    /// Persistent database connection for sync reads and writes. Sync is
-    /// acceptable: `SQLite` WAL writes are sub-ms for local storage, well under
-    /// iced's 16ms frame budget.
-    db: MediaDatabase,
+    /// The seam for culling metadata (rating, color label) and download history.
+    /// Sync reads and writes are acceptable: `SQLite` WAL writes are sub-ms for
+    /// local storage, well under iced's 16ms frame budget.
+    metadata: metadata_store::Store,
     sections: SectionState,
     expanded_years: BTreeSet<i32>,
     expanded_months: BTreeSet<(i32, u32)>,
@@ -287,7 +288,7 @@ impl Default for Ferrocull {
             profile_name_input: String::new(),
             hooks: Vec::new(),
             delete_after_download: false,
-            db,
+            metadata: metadata_store::Store::new(db),
             sections: SectionState::with_defaults(),
             expanded_years: BTreeSet::new(),
             expanded_months: BTreeSet::new(),

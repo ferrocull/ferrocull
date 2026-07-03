@@ -7,7 +7,8 @@ use std::{
 use crate::{
     FileCategory, MediaFile,
     copy::{self, copy_with_checksum, hash_file},
-    xmp::{Metadata, write_sidecar},
+    metadata_store,
+    xmp::write_sidecar,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -63,25 +64,11 @@ pub struct Failure {
 /// just surface a warning. XMP carries user-authored data (ratings, labels), so silent
 /// loss is worth flagging up-stack.
 fn write_xmp_sidecar(media_file: &MediaFile, dest: &Path) -> io::Result<()> {
-    if media_file.rating == 0 && media_file.color_label.is_none() {
+    let Some(payload) = metadata_store::ingest_payload(media_file) else {
         return Ok(());
-    }
-
-    let xmp_metadata = Metadata {
-        rating: media_file.rating,
-        color_label: media_file.color_label,
-        original_filename: Some(
-            media_file
-                .path
-                .file_name()
-                .expect("scanned file has filename")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        capture_date: Some(media_file.datetime),
     };
 
-    write_sidecar(dest, &xmp_metadata)
+    write_sidecar(dest, &payload)
 }
 
 /// Delete the source file and its paired/sidecar files.

@@ -295,16 +295,9 @@ impl Ferrocull {
             |p| p.to_string_lossy().into_owned(),
         );
 
-        let is_downloaded = self
-            .db
-            .is_downloaded(&source_id)
-            .expect("is_downloaded query failed");
+        let is_downloaded = self.metadata.is_downloaded(&source_id);
 
-        let (rating, color_label) = self
-            .db
-            .rating_and_color(&source_id)
-            .expect("rating_and_color query failed")
-            .unwrap_or_else(|| xmp_metadata.map_or((0, None), |x| (x.rating, x.color_label)));
+        let (rating, color_label) = self.metadata.load(&source_id, xmp_metadata);
 
         let item = Item {
             path,

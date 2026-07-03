@@ -159,9 +159,7 @@ impl Ferrocull {
         self.reconcile_selection();
 
         for source_id in source_ids {
-            self.db
-                .set_rating(&source_id, rating)
-                .expect("set_rating query failed");
+            self.metadata.set_rating(&source_id, rating);
         }
     }
 
@@ -183,9 +181,7 @@ impl Ferrocull {
         self.reconcile_selection();
 
         for source_id in source_ids {
-            self.db
-                .set_color_label(&source_id, color_label)
-                .expect("set_color_label query failed");
+            self.metadata.set_color_label(&source_id, color_label);
         }
     }
 

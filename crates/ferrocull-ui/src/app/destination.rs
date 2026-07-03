@@ -309,9 +309,8 @@ impl Ferrocull {
                 .mutate_item(idx, &self.config.params(), |item| item.is_downloaded = true);
             let source_id = self.media.item(idx).source_id.clone();
 
-            self.db
-                .record_download(&source_id, &success.checksum, &success.destination)
-                .expect("record_download query failed");
+            self.metadata
+                .record_download(&source_id, &success.checksum, &success.destination);
         }
         if !result.successes.is_empty() {
             self.status_message = None;
