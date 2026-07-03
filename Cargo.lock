@@ -1310,6 +1310,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "quick-xml 0.40.1",
+ "rayon",
  "rusqlite",
  "serde",
  "serde_json",
