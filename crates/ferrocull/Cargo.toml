@@ -1,0 +1,16 @@
+[package]
+name = "ferrocull"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ferrocull"
+path = "src/main.rs"
+
+[dependencies]
+ferrocull-ui.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,42 @@
+[package]
+name = "ferrocull-devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+ferrocull-media = { workspace = true }
+thiserror = { workspace = true }
+tracing.workspace = true
+walkdir = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-util = { version = "0.3", default-features = false }
+gphoto2 = "3"
+nix = { version = "0.31", features = ["fs"] }
+tokio = { workspace = true, features = ["macros"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { version = "0.31", features = ["fs"] }
+objc2-core-foundation = { version = "0.3", features = [
+  "CFDictionary",
+  "CFNumber",
+  "CFRunLoop",
+  "CFString",
+  "CFURL"
+] }
+objc2-disk-arbitration = "0.3"
+plist = { workspace = true }
+tokio = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true }
+windows = { version = "0.62", features = [
+  "Win32_Storage_FileSystem",
+  "Win32_System_WindowsProgramming"
+] }
+
+[lints]
+workspace = true

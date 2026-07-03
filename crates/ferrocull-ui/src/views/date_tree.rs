@@ -1,0 +1,193 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use chrono::{Datelike, Local};
+use ferrocull_core::media::{DateSelection, Item};
+use iced::{
+    Element, Fill,
+    widget::{Space, button, column, container, lazy, row, text},
+};
+
+use crate::{styles, theme::spacing};
+
+#[derive(Debug, Clone)]
+pub(crate) enum Event {
+    DateToggled(DateSelection),
+    YearExpanded(i32),
+    MonthExpanded(i32, u32),
+}
+
+type DateCounts = BTreeMap<i32, BTreeMap<u32, BTreeMap<u32, usize>>>;
+
+fn date_counts(items: &[Item]) -> DateCounts {
+    let mut counts: DateCounts = BTreeMap::new();
+
+    for item in items {
+        let local = item.capture_time.second.with_timezone(&Local);
+        *counts
+            .entry(local.year())
+            .or_default()
+            .entry(local.month())
+            .or_default()
+            .entry(local.day())
+            .or_default() += 1;
+    }
+
+    counts
+}
+
+const fn month_name(month: u32) -> &'static str {
+    match month {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => unreachable!(),
+    }
+}
+
+const fn expand_icon(expanded: bool) -> &'static str {
+    if expanded { "▼" } else { "▶" }
+}
+
+/// Cache key for `lazy` — stores actual values for exact equality (no hash collisions).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    /// Monotonic counter — bumped on any item change. O(1) instead of O(n) hash.
+    item_version: u64,
+    selected_date: Option<DateSelection>,
+    expanded_years: BTreeSet<i32>,
+    expanded_months: BTreeSet<(i32, u32)>,
+}
+
+pub(crate) fn date_tree<'a>(
+    items: &'a [Item],
+    item_version: u64,
+    selected_date: Option<DateSelection>,
+    expanded_years: &'a BTreeSet<i32>,
+    expanded_months: &'a BTreeSet<(i32, u32)>,
+) -> Element<'a, Event> {
+    let key = CacheKey {
+        item_version,
+        selected_date,
+        expanded_years: expanded_years.clone(),
+        expanded_months: expanded_months.clone(),
+    };
+
+    let exp_years = expanded_years.clone();
+    let exp_months = expanded_months.clone();
+
+    lazy(key, move |_| {
+        let counts = date_counts(items);
+
+        if counts.is_empty() {
+            return Element::from(
+                container(text("No dates available").size(12)).padding(spacing::SM),
+            );
+        }
+
+        let mut rows: Vec<Element<'static, Event>> = Vec::new();
+
+        for &year in counts.keys().rev() {
+            let months = &counts[&year];
+            let year_total: usize = months.values().flat_map(BTreeMap::values).sum();
+            let is_expanded = exp_years.contains(&year);
+            let is_selected = selected_date == Some(DateSelection::year_only(year));
+
+            rows.push(
+                button(
+                    row![
+                        button(text(expand_icon(is_expanded)).size(10))
+                            .padding([2, 4])
+                            .style(button::text)
+                            .on_press(Event::YearExpanded(year)),
+                        text(format!("{year} ({year_total})")).size(12),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding([2, 6])
+                .width(Fill)
+                .style(styles::date_tree_item(is_selected))
+                .on_press(Event::DateToggled(DateSelection::year_only(year)))
+                .into(),
+            );
+
+            if is_expanded {
+                push_month_rows(&mut rows, months, year, selected_date, &exp_months);
+            }
+        }
+
+        let header = container(text("Filter by Date").size(13))
+            .padding([spacing::SM, 0.0])
+            .width(Fill);
+
+        Element::from(column![header, column(rows)].spacing(spacing::XS))
+    })
+    .into()
+}
+
+fn push_month_rows(
+    rows: &mut Vec<Element<'static, Event>>,
+    months: &BTreeMap<u32, BTreeMap<u32, usize>>,
+    year: i32,
+    selected_date: Option<DateSelection>,
+    exp_months: &BTreeSet<(i32, u32)>,
+) {
+    for &month in months.keys().rev() {
+        let days = &months[&month];
+        let month_count: usize = days.values().sum();
+        let is_expanded = exp_months.contains(&(year, month));
+        let is_selected = selected_date == Some(DateSelection::year_month(year, month));
+
+        rows.push(
+            button(
+                row![
+                    Space::new().width(16.0),
+                    button(text(expand_icon(is_expanded)).size(10))
+                        .padding([2, 4])
+                        .style(button::text)
+                        .on_press(Event::MonthExpanded(year, month)),
+                    text(format!("{} ({month_count})", month_name(month))).size(11),
+                ]
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([2, 6])
+            .width(Fill)
+            .style(styles::date_tree_item(is_selected))
+            .on_press(Event::DateToggled(DateSelection::year_month(year, month)))
+            .into(),
+        );
+
+        if is_expanded {
+            for &day in days.keys().rev() {
+                let count = days[&day];
+                let is_day_selected =
+                    selected_date == Some(DateSelection::year_month_day(year, month, day));
+
+                rows.push(
+                    button(
+                        row![
+                            Space::new().width(44.0),
+                            text(format!("{day} ({count})")).size(11),
+                        ]
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .padding([2, 6])
+                    .width(Fill)
+                    .style(styles::date_tree_item(is_day_selected))
+                    .on_press(Event::DateToggled(DateSelection::year_month_day(
+                        year, month, day,
+                    )))
+                    .into(),
+                );
+            }
+        }
+    }
+}
