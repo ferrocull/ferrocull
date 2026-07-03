@@ -1,0 +1,28 @@
+[package]
+name = "ferrocull-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+dark-light = "2.0"
+dirs.workspace = true
+iced = { workspace = true, features = [
+  "advanced",
+  "fira-sans",
+  "image",
+  "lazy",
+  "sipper"
+] }
+iced_aw = { version = "0.14", default-features = false, features = ["spinner"] }
+rayon = "1.12"
+rfd = "0.17"
+ferrocull-core.workspace = true
+ferrocull-devices.workspace = true
+sipper = "0.1"
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
