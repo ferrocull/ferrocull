@@ -9,6 +9,7 @@ pub mod metadata_store;
 pub mod pattern;
 pub mod persistence;
 pub mod profiles;
+pub mod scan;
 pub(crate) mod settings;
 pub mod thumbnail;
 pub mod xmp;

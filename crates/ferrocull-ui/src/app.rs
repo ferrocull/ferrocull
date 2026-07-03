@@ -11,15 +11,14 @@ use std::{
     path::PathBuf,
 };
 
-use chrono::{DateTime, Utc};
 use ferrocull_core::{
-    ColorLabel, FileCategory, Hook, JobCodeHistory, NamedProfile, load_profiles,
-    media::{CaptureTime, DateSelection, FilterMode, SortOrder},
+    ColorLabel, FileCategory, Hook, JobCodeHistory, NamedProfile,
+    cache::ThumbnailCache,
+    load_profiles,
+    media::{DateSelection, FilterMode, SortOrder},
     metadata_store,
     persistence::MediaDatabase,
-    profiles_dir,
-    thumbnail::parse_exif_from_bytes,
-    xmp::{self, Metadata},
+    profiles_dir, scan,
 };
 use ferrocull_devices::{ScannedFile, Source};
 use iced::{
@@ -611,129 +610,51 @@ fn handle_arrow_key(key: &Key, in_preview: bool) -> Task<Message> {
     Task::done(msg)
 }
 
-/// Result type for sipper: either EXIF data or disk cache signal.
-enum SipperResult {
-    Exif(ScannedFile, CaptureTime, Option<Metadata>),
-    ThumbnailCached(PathBuf, Result<(), String>),
+/// Adapts a [`ScannedFile`] to the core scan pipeline's input contract and
+/// carries it back through [`scan::Event::ExifLoaded`] for item construction.
+struct ScanFile(ScannedFile);
+
+impl scan::Input for ScanFile {
+    fn path(&self) -> &std::path::Path {
+        &self.0.path
+    }
+
+    fn category(&self) -> FileCategory {
+        self.0.media_type
+    }
+
+    fn xmp_sidecar(&self) -> Option<&std::path::Path> {
+        self.0.xmp_sidecar.as_deref()
+    }
 }
 
 /// Spawn sipper that extracts EXIF first (creating items), then generates thumbnails.
 fn spawn_thumbnail_sipper(files: Vec<ScannedFile>) -> Task<Message> {
-    use std::io::Read;
-
-    use ferrocull_core::{
-        cache::{ThumbnailCache, cache_key_from_disk},
-        thumbnail::{generate_raw_with_preread, generate_thumbnail_from_bytes},
-    };
-    use rayon::prelude::*;
-
-    const INITIAL_READ: usize = 2 * 1024 * 1024;
-
     let thumb_sipper = sipper(move |mut sender| async move {
         let cache = ThumbnailCache::open().ok();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         rayon::spawn(move || {
-            files.into_par_iter().for_each(|scanned| {
-                let path = scanned.path.clone();
-
-                let file_result = (|| -> Result<(Vec<u8>, std::fs::File), std::io::Error> {
-                    let mut file = std::fs::File::open(&path)?;
-                    let len = file.metadata()?.len();
-                    let initial = usize::try_from(len)
-                        .unwrap_or(usize::MAX)
-                        .min(INITIAL_READ);
-                    let mut data = vec![0u8; initial];
-                    file.read_exact(&mut data)?;
-                    Ok((data, file))
-                })();
-
-                let (data, mut file) = match file_result {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(path = %path.display(), error = %e, "failed to read file, skipping");
-                        return;
-                    }
-                };
-
-                // Fall back to file modification time if EXIF has no date.
-                let capture_time = parse_exif_from_bytes(&data).unwrap_or_else(|| {
-                    let mtime = file.metadata()
-                        .expect("file already opened")
-                        .modified()
-                        .expect("modification time available");
-                    CaptureTime::new(DateTime::<Utc>::from(mtime), 0)
-                });
-                let xmp_metadata = scanned
-                    .xmp_sidecar
-                    .as_ref()
-                    .and_then(|xmp_path| xmp::read_sidecar(xmp_path).ok());
-                let media_type = scanned.media_type;
-
-                drop(tx.send(SipperResult::Exif(
-                    scanned,
-                    capture_time,
-                    xmp_metadata,
-                )));
-
-                let key = match cache_key_from_disk(&path) {
-                    Ok(k) => Some(k),
-                    Err(e) => {
-                        tracing::warn!(path = %path.display(), error = %e, "cache key derivation failed, bypassing cache");
-                        None
-                    }
-                };
-                if let Some(ref k) = key
-                    && let Some(ref c) = cache
-                    && let Ok(Some(_)) = c.load(k)
-                {
-                    drop(tx.send(SipperResult::ThumbnailCached(path, Ok(()))));
-                    return;
-                }
-
-                let mut data = data;
-                let thumb_result = match media_type {
-                    FileCategory::Photo => {
-                        if let Err(e) = file.read_to_end(&mut data) {
-                            Err(e.to_string())
-                        } else {
-                            generate_thumbnail_from_bytes(&data, &path, THUMBNAIL_SIZE)
-                                .map(|r| r.jpeg)
-                                .map_err(|e| e.to_string())
-                        }
-                    }
-                    FileCategory::Raw => {
-                        generate_raw_with_preread(data, &mut file, THUMBNAIL_SIZE, &path)
-                            .map_err(|e| e.to_string())
-                    }
-                    _ => Err("unsupported format".to_owned()),
-                };
-
-                if let Ok(ref img) = thumb_result
-                    && let Some(ref k) = key
-                    && let Some(ref c) = cache
-                {
-                    drop(c.put(k, img));
-                }
-
-                // Signal completion — no pixel data sent to UI
-                drop(tx.send(SipperResult::ThumbnailCached(
-                    path,
-                    thumb_result.map(|_| ()),
-                )));
+            let inputs = files.into_iter().map(ScanFile).collect();
+            scan::run(inputs, THUMBNAIL_SIZE, cache.as_ref(), |event| {
+                drop(tx.send(event));
             });
         });
 
-        while let Some(item) = rx.recv().await {
-            sender.send(item).await;
+        while let Some(event) = rx.recv().await {
+            sender.send(event).await;
         }
     });
 
     Task::sip(
         thumb_sipper,
-        |result| match result {
-            SipperResult::Exif(scanned, time, xmp) => Message::ExifLoaded(scanned, time, xmp),
-            SipperResult::ThumbnailCached(path, res) => Message::ThumbnailCached(path, res),
+        |event| match event {
+            scan::Event::ExifLoaded {
+                file,
+                capture_time,
+                xmp,
+            } => Message::ExifLoaded(file.0, capture_time, xmp),
+            scan::Event::ThumbnailReady { path, result } => Message::ThumbnailCached(path, result),
         },
         |()| Message::ThumbnailsComplete,
     )

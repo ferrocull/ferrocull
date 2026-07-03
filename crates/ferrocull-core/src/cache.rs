@@ -35,6 +35,14 @@ impl ThumbnailCache {
     /// or `Error::Io` if directory creation fails.
     pub fn open() -> Result<Self, Error> {
         let cache_dir = cache_dir().ok_or(Error::NoCacheDir)?;
+        Self::open_at(cache_dir)
+    }
+
+    /// Opens or creates a thumbnail cache rooted at `cache_dir`.
+    ///
+    /// # Errors
+    /// Returns `Error::Io` if directory creation fails.
+    pub fn open_at(cache_dir: PathBuf) -> Result<Self, Error> {
         fs::create_dir_all(&cache_dir).map_err(|source| Error::Io {
             path: cache_dir.clone(),
             source,
