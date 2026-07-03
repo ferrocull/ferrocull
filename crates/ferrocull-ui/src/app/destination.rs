@@ -229,7 +229,7 @@ impl Ferrocull {
         let selected: Vec<MediaFile> = self
             .selected
             .iter()
-            .map(|&idx| &self.items[idx])
+            .map(|&idx| self.media.item(idx))
             .filter(|item| seen_paths.insert(item.path.clone()))
             .map(|item| {
                 item_to_media_file(
@@ -303,15 +303,14 @@ impl Ferrocull {
         self.download_progress = None;
         self.last_download_failures = result.failure_count;
         for success in &result.successes {
-            let idx = *self
-                .item_index
-                .get(&success.source)
-                .expect("downloaded path is in item_index");
+            let idx = self
+                .media
+                .index_of(&success.source)
+                .expect("a downloaded file's path must resolve to a media item");
             self.selected.remove(&idx);
-            let item = &mut self.items[idx];
-            item.is_downloaded = true;
-            self.item_version += 1;
-            let source_id = item.source_id.clone();
+            self.media
+                .mutate_item(idx, &self.config.params(), |item| item.is_downloaded = true);
+            let source_id = self.media.item(idx).source_id.clone();
 
             self.db
                 .record_download(&source_id, &success.checksum, &success.destination)
@@ -319,8 +318,9 @@ impl Ferrocull {
         }
         if !result.successes.is_empty() {
             self.status_message = None;
-            let outcome = self.rebuild_sorted_view();
-            self.report_focus_loss(outcome);
+            // Reconcile selection/focus: a now-downloaded file may leave a
+            // "new only" filter.
+            self.reconcile_selection();
         }
 
         if result.successes.is_empty() || self.hooks.is_empty() {

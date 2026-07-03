@@ -3,7 +3,7 @@ use std::{collections::HashSet, path::Path};
 use ferrocull_core::{ColorLabel, media::Item};
 use iced::Task;
 
-use super::{Ferrocull, PreviewState, ViewMode, toggle_set};
+use super::{Ferrocull, PreviewState, ViewMode};
 use crate::messages::{Message, grid};
 
 pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message> {
@@ -15,13 +15,13 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
             return state.load_thumbnail(item_idx);
         }
         grid::Message::ThumbnailHidden(item_idx) => {
-            state.loaded_thumbs.remove(&state.items[item_idx].path);
+            state.loaded_thumbs.remove(&state.media.item(item_idx).path);
         }
         grid::Message::FileFocused(path) => {
-            let idx = *state
-                .item_index
-                .get(&path)
-                .expect("rendered path is in item_index");
+            let idx = state
+                .media
+                .index_of(&path)
+                .expect("a rendered grid path must resolve to a media item");
             state.focused_index = Some(idx);
         }
         grid::Message::FileSelectionToggled(path) => state.handle_file_toggled(&path),
@@ -33,7 +33,8 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
         }
         grid::Message::SelectAll => {
             state.selected = state
-                .sorted_view
+                .media
+                .sorted_view()
                 .values()
                 .flat_map(|&idx| state.target_indices(idx))
                 .collect();
@@ -41,10 +42,11 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
         grid::Message::SelectNone => state.selected.clear(),
         grid::Message::RejectFile(path) => state.handle_reject_file(&path),
         grid::Message::BurstToggled(second) => {
-            toggle_set(&mut state.expanded_bursts, second);
-            let outcome = state.rebuild_sorted_view();
-            state.report_focus_loss(outcome);
-            state.item_version += 1;
+            state
+                .media
+                .toggle_burst_expansion(second, &state.config.params());
+            // Collapsing hides members → reconcile selection/focus.
+            state.reconcile_selection();
         }
         grid::Message::ThumbnailHover(idx, is_entering) => {
             state.hovered_thumbnail = is_entering.then_some(idx);
@@ -83,27 +85,27 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
 
 impl Ferrocull {
     fn handle_file_toggled(&mut self, path: &Path) {
-        let idx = *self
-            .item_index
-            .get(path)
-            .expect("rendered path is in item_index");
+        let idx = self
+            .media
+            .index_of(path)
+            .expect("a rendered grid path must resolve to a media item");
         let is_selected = self.selected.contains(&idx);
         self.set_selection_for_file(idx, !is_selected);
     }
 
     fn handle_file_selected(&mut self, path: &Path) {
-        let idx = *self
-            .item_index
-            .get(path)
-            .expect("rendered path is in item_index");
+        let idx = self
+            .media
+            .index_of(path)
+            .expect("a rendered grid path must resolve to a media item");
         self.set_selection_for_file(idx, true);
     }
 
     fn handle_file_deselected(&mut self, path: &Path) {
-        let idx = *self
-            .item_index
-            .get(path)
-            .expect("rendered path is in item_index");
+        let idx = self
+            .media
+            .index_of(path)
+            .expect("a rendered grid path must resolve to a media item");
         self.set_selection_for_file(idx, false);
     }
 
@@ -115,22 +117,26 @@ impl Ferrocull {
     }
 
     fn handle_reject_file(&mut self, path: &Path) {
-        let idx = *self
-            .item_index
-            .get(path)
-            .expect("rendered path is in item_index");
-        let new_rating: i8 = if self.items[idx].rating == -1 { 0 } else { -1 };
+        let idx = self
+            .media
+            .index_of(path)
+            .expect("a rendered grid path must resolve to a media item");
+        let new_rating: i8 = if self.media.item(idx).rating == -1 {
+            0
+        } else {
+            -1
+        };
         self.update_rating(path, new_rating);
     }
 
     /// Update rating for an item and its burst/pair members.
     fn update_rating(&mut self, path: &Path, rating: i8) {
-        let idx = *self
-            .item_index
-            .get(path)
-            .expect("rendered path is in item_index");
+        let idx = self
+            .media
+            .index_of(path)
+            .expect("a rendered grid path must resolve to a media item");
 
-        if self.items[idx].rating == rating {
+        if self.media.item(idx).rating == rating {
             return;
         }
 
@@ -144,8 +150,8 @@ impl Ferrocull {
                 self.selected.remove(&target_idx);
             }
         }
-        let outcome = self.rebuild_sorted_view();
-        self.report_focus_loss(outcome);
+        // Reconcile selection/focus in case the rating change hid an item.
+        self.reconcile_selection();
 
         for source_id in source_ids {
             self.db
@@ -156,12 +162,12 @@ impl Ferrocull {
 
     /// Update color label for an item and its burst/pair members.
     fn update_color_label(&mut self, path: &Path, color_label: Option<ColorLabel>) {
-        let idx = *self
-            .item_index
-            .get(path)
-            .expect("rendered path is in item_index");
+        let idx = self
+            .media
+            .index_of(path)
+            .expect("a rendered grid path must resolve to a media item");
 
-        if self.items[idx].color_label == color_label {
+        if self.media.item(idx).color_label == color_label {
             return;
         }
 
@@ -169,8 +175,7 @@ impl Ferrocull {
         let source_ids = self.apply_to_targets(&targets, |item| {
             item.color_label = color_label;
         });
-        let outcome = self.rebuild_sorted_view();
-        self.report_focus_loss(outcome);
+        self.reconcile_selection();
 
         for source_id in source_ids {
             self.db
@@ -179,8 +184,9 @@ impl Ferrocull {
         }
     }
 
-    /// Apply mutation to target items plus their JPEG pairs (when grouping is on).
-    /// Returns unique `source_ids` of mutated items for persistence.
+    /// Apply `mutate` to each target plus its JPEG pair (when grouping is on),
+    /// reconciling the view per item. Returns the unique `source_ids` mutated,
+    /// for persistence.
     fn apply_to_targets<F>(&mut self, targets: &[usize], mut mutate: F) -> Vec<String>
     where
         F: FnMut(&mut Item),
@@ -192,12 +198,14 @@ impl Ferrocull {
                 to_mutate.push(target_idx);
             }
             let jpeg_idx = self
+                .config
                 .group_raw_jpeg
                 .then(|| {
-                    self.items[target_idx]
+                    self.media
+                        .item(target_idx)
                         .jpeg_pair
                         .as_ref()
-                        .and_then(|jpeg| self.item_index.get(jpeg).copied())
+                        .and_then(|jpeg| self.media.index_of(jpeg))
                 })
                 .flatten();
             if let Some(jpeg_idx) = jpeg_idx
@@ -207,18 +215,13 @@ impl Ferrocull {
             }
         }
 
-        let source_ids = to_mutate
+        let params = self.config.params();
+        to_mutate
             .iter()
             .map(|&idx| {
-                let item = &mut self.items[idx];
-                mutate(item);
-                item.source_id.clone()
+                self.media.mutate_item(idx, &params, &mut mutate);
+                self.media.item(idx).source_id.clone()
             })
-            .collect();
-
-        if !to_mutate.is_empty() {
-            self.item_version += 1;
-        }
-        source_ids
+            .collect()
     }
 }

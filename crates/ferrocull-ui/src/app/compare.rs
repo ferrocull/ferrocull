@@ -180,7 +180,7 @@ impl Ferrocull {
 
         let paths: HashSet<PathBuf> = [cmp.select_index, cmp.candidate_index]
             .into_iter()
-            .map(|i| self.items[i].path.clone())
+            .map(|i| self.media.item(i).path.clone())
             .collect();
 
         self.load_previews_for_paths(paths)

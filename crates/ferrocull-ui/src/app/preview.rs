@@ -79,7 +79,7 @@ impl Ferrocull {
         let paths: HashSet<PathBuf> = indices
             .into_iter()
             .flatten()
-            .map(|i| self.items[i].path.clone())
+            .map(|i| self.media.item(i).path.clone())
             .collect();
 
         self.load_previews_for_paths(paths)
@@ -131,7 +131,7 @@ impl Ferrocull {
     pub(super) fn load_thumbnail(&self, item_idx: usize) -> Task<Message> {
         use ferrocull_core::cache::{ThumbnailCache, cache_key_from_disk};
 
-        let item = &self.items[item_idx];
+        let item = self.media.item(item_idx);
         if self.loaded_thumbs.contains_key(&item.path) {
             return Task::none();
         }

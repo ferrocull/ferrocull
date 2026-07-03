@@ -141,16 +141,7 @@ fn group_by_date_indexed(
     }
 }
 
-/// Info about a burst group for display purposes, keyed by item index.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct BurstDisplayInfo {
-    /// Number of photos in this burst.
-    pub count: usize,
-    /// Key for expand/collapse toggle (first item's timestamp).
-    pub burst_key: DateTime<Utc>,
-}
-
-/// Burst badge data (non-generic replacement for the old `BurstInfo<M>`).
+/// Burst badge data resolved per rendered cell (count via `burst_map` length).
 #[derive(Clone, Copy)]
 struct BurstBadgeInfo {
     count: usize,
@@ -165,20 +156,23 @@ struct CellState {
     is_focused: bool,
 }
 
-/// Renders a thumbnail grid with lazy caching based on derived cache key.
+/// Renders a thumbnail grid, rebuilding only when `cache_key` changes.
 ///
-/// The grid only rebuilds when the cache key changes (items, selection, filters, etc).
-/// `sorted_view` contains pre-filtered, pre-sorted indices - grid just renders them.
-/// `burst_info_by_idx` maps item index to burst display info (owned for lazy closure).
-///
-/// Click always emits `Event::CellClicked(path)`. The caller decides whether that means
-/// focus or selection toggle based on modifier state (via `.map()` in app.rs).
+/// `sorted_view` holds pre-filtered, pre-sorted indices. The badge count is
+/// resolved from `burst_map`'s member-list length (no per-member count stored).
+/// Click always emits `Event::CellClicked(path)`; the caller decides whether
+/// that means focus or selection toggle based on modifier state.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "grid needs items + view + burst indices + date; a param bag would just relocate them"
+)]
 pub(crate) fn thumbnail_grid<'a>(
     items: &'a [Item],
     sorted_view: &'a BTreeMap<SortKey, usize>,
     selected: &'a BTreeSet<usize>,
     loaded_thumbs: &'a HashMap<PathBuf, image::Handle>,
-    burst_info_by_idx: &'a HashMap<usize, BurstDisplayInfo>,
+    burst_of: &'a HashMap<usize, DateTime<Utc>>,
+    burst_map: &'a HashMap<DateTime<Utc>, Vec<usize>>,
     today: NaiveDate,
     cache_key: GridCacheKey,
 ) -> Element<'a, Event> {
@@ -218,7 +212,15 @@ pub(crate) fn thumbnail_grid<'a>(
         };
 
         let selected = selected.clone();
-        let burst_info = burst_info_by_idx.clone();
+        // Resolve each burst member's badge count here, so the hot
+        // incremental-insert path never stores per-member counts.
+        let burst_info: HashMap<usize, BurstBadgeInfo> = burst_of
+            .iter()
+            .map(|(&idx, &burst_key)| {
+                let count = burst_map.get(&burst_key).map_or(0, Vec::len);
+                (idx, BurstBadgeInfo { count, burst_key })
+            })
+            .collect();
 
         let build_cell = move |indexed: IndexedItem| -> Element<'static, Event> {
             let idx = indexed.idx;
@@ -231,10 +233,7 @@ pub(crate) fn thumbnail_grid<'a>(
                 is_focused: focused_index == Some(idx),
             };
             let show_pair = group_raw_jpeg && indexed.item.jpeg_pair.is_some();
-            let burst = burst_info.get(&idx).map(|info| BurstBadgeInfo {
-                count: info.count,
-                burst_key: info.burst_key,
-            });
+            let burst = burst_info.get(&idx).copied();
 
             let path = indexed.item.path.clone();
             let cell = thumbnail_card(

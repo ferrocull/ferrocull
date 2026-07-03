@@ -7,15 +7,14 @@ mod profile;
 mod sources;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    ops::Bound,
+    collections::{BTreeSet, HashMap, HashSet},
     path::PathBuf,
 };
 
 use chrono::{DateTime, Utc};
 use ferrocull_core::{
     ColorLabel, FileCategory, Hook, JobCodeHistory, NamedProfile, load_profiles,
-    media::{CaptureTime, DateSelection, FilterMode, Item, SortKey, SortOrder},
+    media::{CaptureTime, DateSelection, FilterMode, SortOrder},
     persistence::MediaDatabase,
     profiles_dir,
     thumbnail::parse_exif_from_bytes,
@@ -33,6 +32,7 @@ use iced::{
 use sipper::sipper;
 
 use crate::{
+    media_view::{MediaView, ViewParams},
     messages::{
         Message, Panel, Section, compare as compare_msg, destination as destination_msg,
         filters as filters_msg, grid as grid_msg, preview as preview_msg, profile as profile_msg,
@@ -40,7 +40,7 @@ use crate::{
     },
     styles,
     theme::spacing,
-    views::{self, BurstDisplayInfo, GRID_SCROLLABLE_ID, GridCacheKey, collapsible_section},
+    views::{self, GRID_SCROLLABLE_ID, GridCacheKey, collapsible_section},
 };
 
 /// Tracks which config panel sections are expanded (present = expanded).
@@ -79,13 +79,6 @@ struct DownloadProgress {
     files_completed: usize,
 }
 
-/// Info about a burst group (photos taken within burst threshold of each other).
-#[derive(Debug, Clone, Default)]
-struct BurstInfo {
-    count: usize,
-    members: Vec<usize>,
-}
-
 /// State for full-screen preview mode. Created on enter, dropped on exit.
 struct PreviewState {
     index: usize,
@@ -113,6 +106,62 @@ enum ViewMode {
     Compare(CompareState),
 }
 
+/// The user's filter/sort/grouping choices — the source of truth for what the
+/// grid shows. A distinct struct so `config.params()` borrows only these
+/// fields, leaving `&mut self.media` free at rebuild/insert sites.
+///
+/// Burst *expansion* is not here — `MediaView` owns it, since only its burst
+/// re-keying logic can keep it consistent.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent user-toggle flags for the view configuration"
+)]
+struct ViewConfig {
+    sort_order: SortOrder,
+    /// Display direction (applied at read time, so not part of `ViewParams`).
+    ascending: bool,
+    filter_mode: FilterMode,
+    hide_rejected: bool,
+    group_raw_jpeg: bool,
+    group_bursts: bool,
+    selected_sources: BTreeSet<PathBuf>,
+    selected_dates: Option<DateSelection>,
+    selected_ratings: BTreeSet<i8>,
+    selected_color_labels: BTreeSet<Option<ColorLabel>>,
+}
+
+impl ViewConfig {
+    fn with_defaults() -> Self {
+        Self {
+            sort_order: SortOrder::default(),
+            ascending: true,
+            filter_mode: FilterMode::default(),
+            hide_rejected: false,
+            group_raw_jpeg: true,
+            group_bursts: true,
+            selected_sources: BTreeSet::new(),
+            selected_dates: None,
+            selected_ratings: BTreeSet::new(),
+            selected_color_labels: BTreeSet::new(),
+        }
+    }
+
+    /// Borrow the config as [`ViewParams`] for a `MediaView` operation.
+    fn params(&self) -> ViewParams<'_> {
+        ViewParams {
+            sort_order: self.sort_order,
+            filter_mode: self.filter_mode,
+            hide_rejected: self.hide_rejected,
+            group_raw_jpeg: self.group_raw_jpeg,
+            group_bursts: self.group_bursts,
+            selected_sources: &self.selected_sources,
+            selected_dates: self.selected_dates,
+            selected_ratings: &self.selected_ratings,
+            selected_color_labels: &self.selected_color_labels,
+        }
+    }
+}
+
 #[expect(
     clippy::struct_excessive_bools,
     reason = "TEA pattern requires flat state struct with independent toggle flags"
@@ -122,16 +171,14 @@ enum ViewMode {
     reason = "impl blocks split across feature child modules (grid, sources, filters, etc.)"
 )]
 struct Ferrocull {
-    items: Vec<Item>,
-    item_index: HashMap<PathBuf, usize>,
-    sorted_view: BTreeMap<SortKey, usize>,
-    /// For O(1) lookup in `adjacent_index`.
-    sort_key_by_idx: HashMap<usize, SortKey>,
-    /// Monotonic counter for grid cache invalidation.
-    item_version: u64,
+    /// Owns the media items and every index derived from them (sorted view,
+    /// bursts, burst expansion, RAW+JPEG hiding, render-cache version).
+    media: MediaView,
+    /// The user's filter/sort/grouping choices, passed to `MediaView` as
+    /// [`ViewParams`].
+    config: ViewConfig,
     selected: BTreeSet<usize>,
     sources: Vec<Source>,
-    selected_sources: BTreeSet<PathBuf>,
     photos_dest: String,
     videos_dest: String,
     photo_pattern: String,
@@ -145,11 +192,6 @@ struct Ferrocull {
     scan_jobs_in_flight: usize,
     thumbnail_jobs_in_flight: usize,
     scanning: bool,
-    sort_order: SortOrder,
-    ascending: bool,
-    filter_mode: FilterMode,
-    group_raw_jpeg: bool,
-    hide_rejected: bool,
     job_code: String,
     job_code_history: JobCodeHistory,
     jobcode_path: PathBuf,
@@ -159,24 +201,13 @@ struct Ferrocull {
     profile_name_input: String,
     hooks: Vec<Hook>,
     delete_after_download: bool,
-    /// Persistent database connection for sync reads and writes.
-    /// Sync is acceptable: `SQLite` WAL mode writes are sub-ms for local storage,
-    /// well under iced's 16ms frame budget. Reads (~0.1ms) are similarly fast.
+    /// Persistent database connection for sync reads and writes. Sync is
+    /// acceptable: `SQLite` WAL writes are sub-ms for local storage, well under
+    /// iced's 16ms frame budget.
     db: MediaDatabase,
     sections: SectionState,
-    selected_dates: Option<DateSelection>,
     expanded_years: BTreeSet<i32>,
     expanded_months: BTreeSet<(i32, u32)>,
-    group_bursts: bool,
-    expanded_bursts: BTreeSet<DateTime<Utc>>,
-    selected_ratings: BTreeSet<i8>,
-    selected_color_labels: BTreeSet<Option<ColorLabel>>,
-    burst_map: HashMap<DateTime<Utc>, BurstInfo>,
-    burst_membership: HashMap<usize, DateTime<Utc>>,
-    /// Precomputed burst display info per item index (rebuilt with `burst_map`).
-    burst_display: HashMap<usize, BurstDisplayInfo>,
-    /// Paths hidden by RAW+JPEG grouping (the JPEG side). O(1) lookup instead of O(n) scan.
-    hidden_jpeg_paths: HashSet<PathBuf>,
     loaded_thumbs: HashMap<PathBuf, iced::widget::image::Handle>,
     grid_viewport_width: f32,
     hovered_thumbnail: Option<usize>,
@@ -226,14 +257,10 @@ impl Default for Ferrocull {
         });
 
         Self {
-            items: Vec::new(),
-            item_index: HashMap::new(),
-            sorted_view: BTreeMap::new(),
-            sort_key_by_idx: HashMap::new(),
-            item_version: 0,
+            media: MediaView::new(),
+            config: ViewConfig::with_defaults(),
             selected: BTreeSet::new(),
             sources,
-            selected_sources: BTreeSet::new(),
             photos_dest: dirs::picture_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .to_string_lossy()
@@ -251,11 +278,6 @@ impl Default for Ferrocull {
             scan_jobs_in_flight: 0,
             thumbnail_jobs_in_flight: 0,
             scanning: false,
-            sort_order: SortOrder::default(),
-            ascending: true,
-            filter_mode: FilterMode::default(),
-            group_raw_jpeg: true,
-            hide_rejected: false,
             job_code: String::new(),
             job_code_history: jobcode_history,
             jobcode_path,
@@ -267,17 +289,8 @@ impl Default for Ferrocull {
             delete_after_download: false,
             db,
             sections: SectionState::with_defaults(),
-            selected_dates: None,
             expanded_years: BTreeSet::new(),
             expanded_months: BTreeSet::new(),
-            group_bursts: true,
-            expanded_bursts: BTreeSet::new(),
-            selected_ratings: BTreeSet::new(),
-            selected_color_labels: BTreeSet::new(),
-            burst_map: HashMap::new(),
-            burst_membership: HashMap::new(),
-            burst_display: HashMap::new(),
-            hidden_jpeg_paths: HashSet::new(),
             loaded_thumbs: HashMap::new(),
             grid_viewport_width: 0.0,
             hovered_thumbnail: None,
@@ -305,42 +318,32 @@ fn toggle_set<T: Ord>(set: &mut BTreeSet<T>, item: T) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Cross-feature navigation primitives
-// ---------------------------------------------------------------------------
-
 impl Ferrocull {
-    /// Returns the first item index in display order.
     fn first_index(&self) -> Option<usize> {
-        if self.ascending {
-            self.sorted_view.values().next().copied()
-        } else {
-            self.sorted_view.values().next_back().copied()
-        }
+        self.media.first_index(self.config.ascending)
     }
 
-    /// Returns the last item index in display order.
     fn last_index(&self) -> Option<usize> {
-        if self.ascending {
-            self.sorted_view.values().next_back().copied()
-        } else {
-            self.sorted_view.values().next().copied()
-        }
+        self.media.last_index(self.config.ascending)
     }
 
     /// Produce a task that scrolls the grid so `target_idx` is visible.
-    /// Uses `snap_to` with a `RelativeOffset` based on the item's ordinal
-    /// position in the sorted view.
     fn scroll_grid_to_item(&self, target_idx: usize) -> Task<Message> {
-        if !self.sort_key_by_idx.contains_key(&target_idx) {
+        let Some(position) = self.ordinal_position(target_idx) else {
             return Task::none();
-        }
-        let position = self.ordinal_position(target_idx);
+        };
+        let len = self.media.visible_len();
         #[expect(
             clippy::cast_precision_loss,
             reason = "scroll position as float is fine"
         )]
-        let fraction = position as f32 / self.sorted_view.len() as f32;
+        // Divide by the last index, not the count, so the final item snaps to the
+        // viewport bottom (offset 1.0) rather than being clipped off it.
+        let fraction = if len <= 1 {
+            0.0
+        } else {
+            position as f32 / (len - 1) as f32
+        };
         iced::widget::operation::snap_to(
             GRID_SCROLLABLE_ID,
             scrollable::RelativeOffset {
@@ -350,57 +353,23 @@ impl Ferrocull {
         )
     }
 
-    /// Navigate to adjacent item in sorted view. Returns new index or `None` if at boundary.
-    /// O(1) reverse lookup via `sort_key_by_idx`; falls back to a computed key when
-    /// current item is filtered out but still being viewed.
     fn adjacent_index(&self, current: usize, forward: bool) -> Option<usize> {
-        let current_key = self
-            .sort_key_by_idx
-            .get(&current)
-            .cloned()
-            .unwrap_or_else(|| SortKey::from_item(&self.items[current], self.sort_order));
-
-        if forward == self.ascending {
-            self.sorted_view
-                .range((Bound::Excluded(&current_key), Bound::Unbounded))
-                .next()
-                .map(|(_, &idx)| idx)
-        } else {
-            self.sorted_view
-                .range((Bound::Unbounded, Bound::Excluded(&current_key)))
-                .next_back()
-                .map(|(_, &idx)| idx)
-        }
+        self.media.adjacent_index(
+            current,
+            forward,
+            self.config.ascending,
+            self.config.sort_order,
+        )
     }
 
-    /// Ordinal position (0-based) of an item index within the sorted view.
-    fn ordinal_position(&self, item_idx: usize) -> usize {
-        let Some(key) = self.sort_key_by_idx.get(&item_idx) else {
-            return 0;
-        };
-        if self.ascending {
-            self.sorted_view.range(..key).count()
-        } else {
-            self.sorted_view
-                .range((Bound::Excluded(key), Bound::Unbounded))
-                .count()
-        }
+    fn ordinal_position(&self, item_idx: usize) -> Option<usize> {
+        self.media.ordinal_position(item_idx, self.config.ascending)
     }
 
-    fn burst_members_if_collapsed(&self, idx: usize) -> Option<&[usize]> {
-        if !self.group_bursts {
-            return None;
-        }
-        let burst_key = self.burst_membership.get(&idx)?;
-        if self.expanded_bursts.contains(burst_key) {
-            return None;
-        }
-        Some(self.burst_map[burst_key].members.as_slice())
-    }
-
-    /// Get indices to operate on: burst members if collapsed, otherwise just the single index.
+    /// Indices to operate on: burst members if collapsed, else just `idx`.
     fn target_indices(&self, idx: usize) -> Vec<usize> {
-        self.burst_members_if_collapsed(idx)
+        self.media
+            .collapsed_burst_members(idx, self.config.group_bursts)
             .map_or_else(|| vec![idx], <[usize]>::to_vec)
     }
 
@@ -412,14 +381,16 @@ impl Ferrocull {
             self.selected.remove(&idx);
         }
 
-        if !self.group_raw_jpeg {
+        if !self.config.group_raw_jpeg {
             return;
         }
 
-        if let Some(jpeg_idx) = self.items[idx]
+        if let Some(jpeg_idx) = self
+            .media
+            .item(idx)
             .jpeg_pair
             .as_ref()
-            .and_then(|jpeg| self.item_index.get(jpeg).copied())
+            .and_then(|jpeg| self.media.index_of(jpeg))
         {
             if select {
                 self.selected.insert(jpeg_idx);
@@ -438,10 +409,6 @@ impl Ferrocull {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Cross-feature keyboard router
-// ---------------------------------------------------------------------------
 
 impl Ferrocull {
     fn handle_key_press(&mut self, key: &Key, modifiers: Modifiers) -> Task<Message> {
@@ -620,7 +587,7 @@ impl Ferrocull {
         let Some(idx) = target_idx else {
             return Task::none();
         };
-        let action = Task::done(make_msg(self.items[idx].path.clone()));
+        let action = Task::done(make_msg(self.media.item(idx).path.clone()));
 
         if advance {
             let Some(next_idx) = self.adjacent_index(idx, true) else {
@@ -641,10 +608,6 @@ impl Ferrocull {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Free functions: folder picker, arrow keys, thumbnail sipper
-// ---------------------------------------------------------------------------
 
 /// Open folder picker and map result to message.
 fn pick_folder<F>(mapper: F) -> Task<Message>
@@ -803,10 +766,6 @@ fn spawn_thumbnail_sipper(files: Vec<ScannedFile>) -> Task<Message> {
     )
 }
 
-// ---------------------------------------------------------------------------
-// TEA: boot, run, subscription, update
-// ---------------------------------------------------------------------------
-
 fn boot() -> (Ferrocull, Task<Message>) {
     // Seed the theme cache synchronously so the first frame uses the correct
     // OS preference rather than the Light fallback.
@@ -893,7 +852,6 @@ fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
         Message::Preview(msg) => preview::update(state, msg),
         Message::Profile(msg) => profile::update(state, msg),
 
-        // App-level UI state
         Message::ToggleSection(section) => {
             state.sections.toggle(section);
             Task::none()
@@ -911,15 +869,14 @@ fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
             Task::none()
         }
 
-        // Async results
         Message::ExifLoaded(scanned, time, xmp) => {
             state.handle_exif_loaded(scanned, time, xmp.as_ref());
             Task::none()
         }
         Message::ThumbnailCached(_path, _result) => {
             state.handle_thumbnail_cached();
-            // Bump version so lazy grid rebuilds → sensors re-fire for newly cached thumbs
-            state.item_version += 1;
+            // Dirty the grid so its sensors re-fire for newly cached thumbs.
+            state.media.mark_dirty();
             Task::none()
         }
         Message::ScanComplete(files) => state.handle_scan_complete(files),
@@ -928,8 +885,7 @@ fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
             if state.thumbnail_jobs_in_flight == 0 {
                 state.thumbnail_progress = None;
             }
-            let outcome = state.rebuild_sorted_view();
-            state.report_focus_loss(outcome);
+            state.rebuild_view();
             Task::none()
         }
         Message::DownloadProgressUpdate(n) => {
@@ -976,12 +932,12 @@ fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
         }
         Message::ThumbnailLoaded(path, handle) => {
             state.loaded_thumbs.insert(path, handle);
-            state.item_version += 1;
+            state.media.mark_dirty();
             Task::none()
         }
         Message::Tick => {
             state.today = chrono::Local::now().date_naive();
-            // Storage device changes now arrive via the `device_events`
+            // Storage device changes arrive via the `device_events`
             // subscription; the tick only refreshes the date and OS theme.
             Task::perform(
                 tokio::task::spawn_blocking(crate::theme::detect_os_is_dark),
@@ -1015,10 +971,6 @@ fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// View functions
-// ---------------------------------------------------------------------------
 
 fn view(state: &Ferrocull) -> Element<'_, Message> {
     let mut main_row = row![].height(Fill);
@@ -1069,8 +1021,8 @@ fn map_item_event(path: PathBuf, event: views::rating::ItemEvent) -> Message {
 }
 
 fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Message> {
-    let select_item = &state.items[cmp.select_index];
-    let candidate_item = &state.items[cmp.candidate_index];
+    let select_item = state.media.item(cmp.select_index);
+    let candidate_item = state.media.item(cmp.candidate_index);
     let active_pane = cmp.active_pane;
     let active_item = match active_pane {
         compare_msg::Pane::Select => select_item,
@@ -1089,7 +1041,7 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
         select_item,
         candidate_item,
         state.ordinal_position(cmp.select_index),
-        state.sorted_view.len(),
+        state.media.visible_len(),
         active_pane,
         cmp.lock_scroll,
     );
@@ -1140,7 +1092,7 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
 }
 
 fn preview_overlay(state: &Ferrocull, p: &PreviewState) -> Element<'static, Message> {
-    let item = &state.items[p.index];
+    let item = state.media.item(p.index);
     let item_path = item.path.clone();
 
     let item_ctrl = views::rating::item_controls(item.rating, item.color_label, state.hovered_star)
@@ -1149,7 +1101,7 @@ fn preview_overlay(state: &Ferrocull, p: &PreviewState) -> Element<'static, Mess
     let top = views::preview::top_bar(
         item,
         state.ordinal_position(p.index),
-        state.sorted_view.len(),
+        state.media.visible_len(),
     );
     let image = views::preview::image_area(
         state
@@ -1214,28 +1166,30 @@ fn sources_panel(state: &Ferrocull) -> Element<'_, Message> {
         .width(Fill);
 
     let sources_view =
-        views::sources::sources_panel(&state.sources, &state.selected_sources).map(|e| match e {
-            views::sources::Event::Toggle(path) => {
-                Message::Sources(sources_msg::Message::SourceToggled(path))
-            }
-            views::sources::Event::Mount(path) => {
-                Message::Sources(sources_msg::Message::MountStorage(path))
-            }
-            views::sources::Event::Unmount(path) => {
-                Message::Sources(sources_msg::Message::UnmountStorage(path))
-            }
-            views::sources::Event::AddDirectory => {
-                Message::Sources(sources_msg::Message::AddDirectoryClicked)
-            }
-            views::sources::Event::Refresh => {
-                Message::Sources(sources_msg::Message::RefreshSources)
+        views::sources::sources_panel(&state.sources, &state.config.selected_sources).map(|e| {
+            match e {
+                views::sources::Event::Toggle(path) => {
+                    Message::Sources(sources_msg::Message::SourceToggled(path))
+                }
+                views::sources::Event::Mount(path) => {
+                    Message::Sources(sources_msg::Message::MountStorage(path))
+                }
+                views::sources::Event::Unmount(path) => {
+                    Message::Sources(sources_msg::Message::UnmountStorage(path))
+                }
+                views::sources::Event::AddDirectory => {
+                    Message::Sources(sources_msg::Message::AddDirectoryClicked)
+                }
+                views::sources::Event::Refresh => {
+                    Message::Sources(sources_msg::Message::RefreshSources)
+                }
             }
         });
 
     let dates = views::date_tree::date_tree(
-        &state.items,
-        state.item_version,
-        state.selected_dates,
+        state.media.items(),
+        state.media.version(),
+        state.config.selected_dates,
         &state.expanded_years,
         &state.expanded_months,
     )
@@ -1271,15 +1225,15 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
     let palette = crate::theme::palette();
 
     let filters_view = views::filters::filter_bar(
-        views::filters::sort_controls(state.sort_order, state.ascending),
-        views::filters::filter_mode_controls(state.filter_mode),
+        views::filters::sort_controls(state.config.sort_order, state.config.ascending),
+        views::filters::filter_mode_controls(state.config.filter_mode),
         views::filters::grouping_controls(
-            state.group_raw_jpeg,
-            state.group_bursts,
-            state.hide_rejected,
+            state.config.group_raw_jpeg,
+            state.config.group_bursts,
+            state.config.hide_rejected,
         ),
-        views::filters::rating_filter(&state.selected_ratings),
-        views::filters::color_label_filter(&state.selected_color_labels),
+        views::filters::rating_filter(&state.config.selected_ratings),
+        views::filters::color_label_filter(&state.config.selected_color_labels),
     )
     .map(|event| match event {
         views::filters::Event::SortChanged(order) => {
@@ -1314,14 +1268,14 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
 
     let grid = thumbnail_grid(state);
 
-    let has_filters_active = !state.selected_ratings.is_empty()
-        || !state.selected_color_labels.is_empty()
-        || state.selected_dates.is_some()
-        || state.filter_mode != FilterMode::default()
-        || state.hide_rejected;
+    let has_filters_active = !state.config.selected_ratings.is_empty()
+        || !state.config.selected_color_labels.is_empty()
+        || state.config.selected_dates.is_some()
+        || state.config.filter_mode != FilterMode::default()
+        || state.config.hide_rejected;
 
     let content: Element<'_, Message> =
-        if state.sorted_view.is_empty() && !state.items.is_empty() && has_filters_active {
+        if state.media.is_view_empty() && !state.media.is_empty() && has_filters_active {
             let empty_state = column![
                 text("No photos match current filters")
                     .size(14)
@@ -1363,31 +1317,32 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
 
     let cache_key = GridCacheKey {
         viewport_width_bits: state.grid_viewport_width.to_bits(),
-        item_count: state.items.len(),
-        item_content_version: state.item_version,
+        item_count: state.media.len(),
+        item_content_version: state.media.version(),
         selected: state.selected.clone(),
-        filter_mode: state.filter_mode,
-        group_raw_jpeg: state.group_raw_jpeg,
-        hide_rejected: state.hide_rejected,
-        sort_order: state.sort_order,
-        ascending: state.ascending,
-        selected_dates: state.selected_dates,
-        selected_sources: state.selected_sources.clone(),
-        group_bursts: state.group_bursts,
-        expanded_bursts: state.expanded_bursts.clone(),
-        selected_ratings: state.selected_ratings.clone(),
-        selected_color_labels: state.selected_color_labels.clone(),
+        filter_mode: state.config.filter_mode,
+        group_raw_jpeg: state.config.group_raw_jpeg,
+        hide_rejected: state.config.hide_rejected,
+        sort_order: state.config.sort_order,
+        ascending: state.config.ascending,
+        selected_dates: state.config.selected_dates,
+        selected_sources: state.config.selected_sources.clone(),
+        group_bursts: state.config.group_bursts,
+        expanded_bursts: state.media.expanded_bursts().clone(),
+        selected_ratings: state.config.selected_ratings.clone(),
+        selected_color_labels: state.config.selected_color_labels.clone(),
         hovered_thumbnail: state.hovered_thumbnail,
         hovered_star: state.hovered_star,
         focused_index: state.focused_index,
     };
 
     views::thumbnail_grid(
-        &state.items,
-        &state.sorted_view,
+        state.media.items(),
+        state.media.sorted_view(),
         &state.selected,
         &state.loaded_thumbs,
-        &state.burst_display,
+        state.media.burst_of(),
+        state.media.burst_map(),
         state.today,
         cache_key,
     )
@@ -1599,8 +1554,8 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
 
     let selected_count = state.selected.len();
 
-    let visible_count = state.sorted_view.len();
-    let total_count = state.items.len();
+    let visible_count = state.media.visible_len();
+    let total_count = state.media.len();
 
     let left_text = if total_count == 0 {
         text("No files scanned")
@@ -1620,7 +1575,6 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
 
     let mut progress_items: Vec<Element<'_, Message>> = Vec::new();
 
-    // Phase 1: Scan progress (indeterminate - total unknown)
     if state.scanning {
         progress_items.push(
             text("Scanning...")

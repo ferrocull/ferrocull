@@ -15,4 +15,4 @@ pub(crate) mod sources;
 pub(crate) mod thumbnails;
 
 pub(crate) use section::collapsible_section;
-pub(crate) use thumbnails::{BurstDisplayInfo, GRID_SCROLLABLE_ID, GridCacheKey, thumbnail_grid};
+pub(crate) use thumbnails::{GRID_SCROLLABLE_ID, GridCacheKey, thumbnail_grid};

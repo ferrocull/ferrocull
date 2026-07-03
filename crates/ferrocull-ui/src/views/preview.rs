@@ -27,7 +27,11 @@ pub(crate) enum Event {
 }
 
 /// Renders the top bar with filename, position, and close button.
-pub(crate) fn top_bar(item: &Item, index: usize, total: usize) -> Element<'static, Event> {
+pub(crate) fn top_bar(
+    item: &Item,
+    position: Option<usize>,
+    total: usize,
+) -> Element<'static, Event> {
     let palette = crate::theme::palette();
     let filename = item
         .path
@@ -36,7 +40,10 @@ pub(crate) fn top_bar(item: &Item, index: usize, total: usize) -> Element<'stati
         .to_string_lossy()
         .into_owned();
 
-    let position_text = text(format!("{} / {}", index + 1, total))
+    // The item may not be in the filtered view (e.g. it was just rejected with
+    // "hide rejected" on); show "–" rather than a misleading position.
+    let position_label = position.map_or_else(|| "–".to_owned(), |p| (p + 1).to_string());
+    let position_text = text(format!("{position_label} / {total}"))
         .size(13)
         .color(palette.background.weak.text);
 
