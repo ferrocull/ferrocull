@@ -45,7 +45,7 @@ pub(crate) enum Event {
 pub(crate) fn top_bar(
     select_item: &Item,
     candidate_item: &Item,
-    select_index: usize,
+    select_position: Option<usize>,
     total: usize,
     active_pane: Pane,
     lock_scroll: bool,
@@ -96,7 +96,10 @@ pub(crate) fn top_bar(
         .style(styles::ghost_button)
         .on_press(Event::Close);
 
-    let position = text(format!("{} / {}", select_index + 1, total))
+    // The select may be filtered out of the view; show "–" rather than a
+    // misleading position.
+    let position_label = select_position.map_or_else(|| "–".to_owned(), |p| (p + 1).to_string());
+    let position = text(format!("{position_label} / {total}"))
         .size(11)
         .color(palette.background.weak.text);
 

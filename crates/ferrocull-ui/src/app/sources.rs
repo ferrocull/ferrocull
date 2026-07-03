@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use ferrocull_core::{
-    media::{CaptureTime, Item, SortKey},
+    media::{CaptureTime, Item},
     xmp::Metadata,
 };
 use ferrocull_devices::{
@@ -16,11 +16,10 @@ use crate::messages::{Message, sources};
 pub(super) fn update(state: &mut Ferrocull, msg: sources::Message) -> Task<Message> {
     match msg {
         sources::Message::SourceToggled(path) => {
-            let newly_selected = !state.selected_sources.contains(&path);
+            let newly_selected = !state.config.selected_sources.contains(&path);
             let scan_path = path.clone();
-            toggle_set(&mut state.selected_sources, path);
-            let outcome = state.rebuild_sorted_view();
-            state.report_focus_loss(outcome);
+            toggle_set(&mut state.config.selected_sources, path);
+            state.rebuild_view();
             if newly_selected {
                 return state.scan_source_directory(scan_path);
             }
@@ -155,18 +154,16 @@ impl Ferrocull {
         });
 
         if already_exists {
-            if self.selected_sources.insert(folder_path.clone()) {
-                let outcome = self.rebuild_sorted_view();
-                self.report_focus_loss(outcome);
+            if self.config.selected_sources.insert(folder_path.clone()) {
+                self.rebuild_view();
                 return self.scan_source_directory(folder_path);
             }
             return Task::none();
         }
 
         self.sources.push(Source::Directory(folder_path.clone()));
-        self.selected_sources.insert(folder_path.clone());
-        let outcome = self.rebuild_sorted_view();
-        self.report_focus_loss(outcome);
+        self.config.selected_sources.insert(folder_path.clone());
+        self.rebuild_view();
         self.scan_source_directory(folder_path)
     }
 
@@ -192,12 +189,12 @@ impl Ferrocull {
             .chain(user_dirs)
             .collect();
 
-        let before = self.selected_sources.len();
-        self.selected_sources
+        let before = self.config.selected_sources.len();
+        self.config
+            .selected_sources
             .retain(|p| self.sources.iter().any(|s| s.path() == p));
-        if self.selected_sources.len() != before {
-            let outcome = self.rebuild_sorted_view();
-            self.report_focus_loss(outcome);
+        if self.config.selected_sources.len() != before {
+            self.rebuild_view();
         }
     }
 
@@ -231,13 +228,12 @@ impl Ferrocull {
                         && s.device_path == device_path
                     {
                         if let Some(mp) = s.mount_point.take() {
-                            self.selected_sources.remove(&mp);
+                            self.config.selected_sources.remove(&mp);
                         }
                         break;
                     }
                 }
-                let outcome = self.rebuild_sorted_view();
-                self.report_focus_loss(outcome);
+                self.rebuild_view();
             }
             Err(e) => self.status_message = Some(e),
         }
@@ -290,7 +286,7 @@ impl Ferrocull {
             })
             .cloned();
         let path = scanned.path;
-        if self.item_index.contains_key(&path) {
+        if self.media.index_of(&path).is_some() {
             return;
         }
 
@@ -310,12 +306,8 @@ impl Ferrocull {
             .expect("rating_and_color query failed")
             .unwrap_or_else(|| xmp_metadata.map_or((0, None), |x| (x.rating, x.color_label)));
 
-        if let Some(ref jpeg_path) = jpeg_pair {
-            self.hidden_jpeg_paths.insert(jpeg_path.clone());
-        }
-
         let item = Item {
-            path: path.clone(),
+            path,
             source_id,
             media_type: scanned.media_type,
             capture_time,
@@ -328,15 +320,9 @@ impl Ferrocull {
             color_label,
         };
 
-        let idx = self.items.len();
-        self.items.push(item);
-        self.item_index.insert(path, idx);
-        self.item_version += 1;
-
-        if self.passes_filters(&self.items[idx]) {
-            let key = SortKey::from_item(&self.items[idx], self.sort_order);
-            self.sorted_view.insert(key.clone(), idx);
-            self.sort_key_by_idx.insert(idx, key);
-        }
+        // Selection/focus are deliberately not pruned here: a scan must never
+        // wipe a selection the user built (a hidden JPEG sibling, a
+        // collapsed-burst member).
+        self.media.insert(item, &self.config.params());
     }
 }
