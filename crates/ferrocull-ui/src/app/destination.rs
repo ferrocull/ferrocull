@@ -1,6 +1,5 @@
 use std::{
     cell::Cell,
-    collections::HashSet,
     path::{Path, PathBuf},
 };
 
@@ -224,13 +223,11 @@ impl Ferrocull {
             }
         };
         let sequence = Cell::new(0u32);
-        let mut seen_paths: HashSet<PathBuf> = HashSet::new();
 
         let selected: Vec<MediaFile> = self
             .selected
             .iter()
             .map(|&idx| self.media.item(idx))
-            .filter(|item| seen_paths.insert(item.path.clone()))
             .map(|item| {
                 item_to_media_file(
                     item,

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::Path};
+use std::path::Path;
 
 use ferrocull_core::{ColorLabel, media::Item};
 use iced::Task;
@@ -36,7 +36,7 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
                 .media
                 .sorted_view()
                 .values()
-                .flat_map(|&idx| state.target_indices(idx))
+                .flat_map(|&idx| state.group_of(idx))
                 .collect();
         }
         grid::Message::SelectNone => state.selected.clear(),
@@ -109,10 +109,15 @@ impl Ferrocull {
         self.set_selection_for_file(idx, false);
     }
 
-    /// Set selection state for a file and its burst/RAW+JPEG pairs.
+    /// Set selection state for a file and its whole logical group (burst members
+    /// + RAW+JPEG siblings).
     fn set_selection_for_file(&mut self, idx: usize, select: bool) {
-        for target_idx in self.target_indices(idx) {
-            self.set_selection(target_idx, select);
+        for member in self.group_of(idx) {
+            if select {
+                self.selected.insert(member);
+            } else {
+                self.selected.remove(&member);
+            }
         }
     }
 
@@ -140,14 +145,14 @@ impl Ferrocull {
             return;
         }
 
-        let targets = self.target_indices(idx);
-        let source_ids = self.apply_to_targets(&targets, |item| {
+        let group = self.group_of(idx);
+        let source_ids = self.apply_to_group(&group, |item| {
             item.rating = rating;
         });
         // Rejecting takes a file out of the working set; un-rejecting does not put it back.
         if rating == -1 {
-            for &target_idx in &targets {
-                self.selected.remove(&target_idx);
+            for &member in &group {
+                self.selected.remove(&member);
             }
         }
         // Reconcile selection/focus in case the rating change hid an item.
@@ -171,8 +176,8 @@ impl Ferrocull {
             return;
         }
 
-        let targets = self.target_indices(idx);
-        let source_ids = self.apply_to_targets(&targets, |item| {
+        let group = self.group_of(idx);
+        let source_ids = self.apply_to_group(&group, |item| {
             item.color_label = color_label;
         });
         self.reconcile_selection();
@@ -184,39 +189,14 @@ impl Ferrocull {
         }
     }
 
-    /// Apply `mutate` to each target plus its JPEG pair (when grouping is on),
-    /// reconciling the view per item. Returns the unique `source_ids` mutated,
-    /// for persistence.
-    fn apply_to_targets<F>(&mut self, targets: &[usize], mut mutate: F) -> Vec<String>
+    /// Apply `mutate` to every member of `group`, reconciling the view per
+    /// item. Returns the mutated `source_ids`, for persistence.
+    fn apply_to_group<F>(&mut self, group: &[usize], mut mutate: F) -> Vec<String>
     where
         F: FnMut(&mut Item),
     {
-        let mut to_mutate: Vec<usize> = Vec::with_capacity(targets.len() * 2);
-        let mut seen: HashSet<usize> = HashSet::new();
-        for &target_idx in targets {
-            if seen.insert(target_idx) {
-                to_mutate.push(target_idx);
-            }
-            let jpeg_idx = self
-                .config
-                .group_raw_jpeg
-                .then(|| {
-                    self.media
-                        .item(target_idx)
-                        .jpeg_pair
-                        .as_ref()
-                        .and_then(|jpeg| self.media.index_of(jpeg))
-                })
-                .flatten();
-            if let Some(jpeg_idx) = jpeg_idx
-                && seen.insert(jpeg_idx)
-            {
-                to_mutate.push(jpeg_idx);
-            }
-        }
-
         let params = self.config.params();
-        to_mutate
+        group
             .iter()
             .map(|&idx| {
                 self.media.mutate_item(idx, &params, &mut mutate);
