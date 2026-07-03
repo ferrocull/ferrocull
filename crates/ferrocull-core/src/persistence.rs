@@ -44,6 +44,20 @@ impl MediaDatabase {
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(db_err("set WAL mode"))?;
 
+        Self::init_tables(&conn)?;
+
+        Ok(Self { conn })
+    }
+
+    /// Opens an in-memory database with the schema initialized.
+    #[cfg(test)]
+    pub(crate) fn open_in_memory() -> Result<Self, Error> {
+        let conn = Connection::open_in_memory().map_err(db_err("open"))?;
+        Self::init_tables(&conn)?;
+        Ok(Self { conn })
+    }
+
+    fn init_tables(conn: &Connection) -> Result<(), Error> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS downloads (
                 source_id TEXT PRIMARY KEY,
@@ -64,9 +78,8 @@ impl MediaDatabase {
             )",
             [],
         )
-        .map_err(db_err("create ratings table"))?;
-
-        Ok(Self { conn })
+        .map(drop)
+        .map_err(db_err("create ratings table"))
     }
 
     /// Records a successful download.

@@ -5,6 +5,7 @@ pub mod download;
 pub(crate) mod history;
 pub mod hooks;
 pub mod media;
+pub mod metadata_store;
 pub mod pattern;
 pub mod persistence;
 pub mod profiles;
