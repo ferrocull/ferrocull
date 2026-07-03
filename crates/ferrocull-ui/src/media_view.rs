@@ -178,6 +178,36 @@ impl MediaView {
         Some(&self.burst_map[key])
     }
 
+    /// The deduplicated logical unit an action fans out over: `idx` plus its
+    /// collapsed-burst members (an expanded burst does not fan out) plus each
+    /// member's hidden JPEG sibling.
+    #[must_use]
+    pub(crate) fn group_of(
+        &self,
+        idx: usize,
+        group_bursts: bool,
+        group_raw_jpeg: bool,
+    ) -> Vec<usize> {
+        let members = self
+            .collapsed_burst_members(idx, group_bursts)
+            .unwrap_or_else(|| std::slice::from_ref(&idx));
+
+        let mut group: Vec<usize> = Vec::with_capacity(members.len());
+        for &member in members {
+            if !group.contains(&member) {
+                group.push(member);
+            }
+            if group_raw_jpeg
+                && let Some(jpeg) = &self.items[member].jpeg_pair
+                && let Some(jpeg_idx) = self.item_index.get(jpeg).copied()
+                && !group.contains(&jpeg_idx)
+            {
+                group.push(jpeg_idx);
+            }
+        }
+        group
+    }
+
     /// First item index in display order.
     #[must_use]
     pub(crate) fn first_index(&self, ascending: bool) -> Option<usize> {
@@ -1202,6 +1232,161 @@ mod tests {
         assert!(outcome.focused_lost, "focused d was hidden");
         assert_eq!(selected, [0].into_iter().collect());
         assert_eq!(focused, None);
+    }
+
+    /// Sort `group_of`'s output so tests can compare as a set (order is an
+    /// internal detail — callers treat the group as a set).
+    fn sorted_group(view: &MediaView, idx: usize) -> Vec<usize> {
+        let mut g = view.group_of(idx, true, true);
+        g.sort_unstable();
+        g
+    }
+
+    #[test]
+    fn group_of_plain_item_is_itself() {
+        let params = Params::new();
+        let items = [item_at("a.raw", 0, 0), item_at("b.raw", 100, 0)];
+        let view = build_incremental(&items, &params);
+        let a = view.index_of(Path::new("/src/a.raw")).unwrap();
+        assert_eq!(view.group_of(a, true, true), vec![a], "lone item = itself");
+    }
+
+    #[test]
+    fn group_of_plain_item_includes_its_jpeg_pair() {
+        let params = Params::new();
+        let mut raw = item_at("photo.raw", 0, 0);
+        raw.jpeg_pair = Some(PathBuf::from("/src/photo.jpg"));
+        let items = [raw, item_at("photo.jpg", 0, 0)];
+        let view = build_incremental(&items, &params);
+        let raw_i = view.index_of(Path::new("/src/photo.raw")).unwrap();
+        let jpeg_i = view.index_of(Path::new("/src/photo.jpg")).unwrap();
+        assert_eq!(
+            sorted_group(&view, raw_i),
+            {
+                let mut e = vec![raw_i, jpeg_i];
+                e.sort_unstable();
+                e
+            },
+            "a RAW fans out to its hidden JPEG sibling"
+        );
+    }
+
+    #[test]
+    fn group_of_collapsed_burst_member_fans_to_all_members_and_pairs() {
+        let params = Params::new();
+        // Three RAWs in a collapsed burst, each with a JPEG sibling.
+        let mut a = item_at("a.raw", 0, 0);
+        a.jpeg_pair = Some(PathBuf::from("/src/a.jpg"));
+        let mut b = item_at("b.raw", 0, 300_000_000);
+        b.jpeg_pair = Some(PathBuf::from("/src/b.jpg"));
+        let mut c = item_at("c.raw", 0, 600_000_000);
+        c.jpeg_pair = Some(PathBuf::from("/src/c.jpg"));
+        let items = [
+            a,
+            b,
+            c,
+            item_at("a.jpg", 0, 0),
+            item_at("b.jpg", 0, 300_000_000),
+            item_at("c.jpg", 0, 600_000_000),
+        ];
+        let view = build_incremental(&items, &params);
+        let idx = |name| view.index_of(Path::new(name)).unwrap();
+        let expected = {
+            let mut e = vec![
+                idx("/src/a.raw"),
+                idx("/src/b.raw"),
+                idx("/src/c.raw"),
+                idx("/src/a.jpg"),
+                idx("/src/b.jpg"),
+                idx("/src/c.jpg"),
+            ];
+            e.sort_unstable();
+            e
+        };
+        // Fanning from any member yields the same whole logical unit.
+        assert_eq!(sorted_group(&view, idx("/src/a.raw")), expected);
+        assert_eq!(sorted_group(&view, idx("/src/b.raw")), expected);
+    }
+
+    #[test]
+    fn group_of_expanded_burst_does_not_fan_out() {
+        let params = Params::new();
+        let mut a = item_at("a.raw", 0, 0);
+        a.jpeg_pair = Some(PathBuf::from("/src/a.jpg"));
+        let items = [
+            a,
+            item_at("b.raw", 0, 300_000_000),
+            item_at("c.raw", 0, 600_000_000),
+            item_at("a.jpg", 0, 0),
+        ];
+        let mut view = build_incremental(&items, &params);
+        let key = *view.burst_map.keys().next().unwrap();
+        view.toggle_burst_expansion(key, &params.view());
+
+        let a_i = view.index_of(Path::new("/src/a.raw")).unwrap();
+        let a_jpeg = view.index_of(Path::new("/src/a.jpg")).unwrap();
+        let b_i = view.index_of(Path::new("/src/b.raw")).unwrap();
+        // Expanded: no fan-out to burst siblings, but the item's own JPEG rides along.
+        assert_eq!(
+            sorted_group(&view, a_i),
+            {
+                let mut e = vec![a_i, a_jpeg];
+                e.sort_unstable();
+                e
+            },
+            "expanded burst member = itself + own pair only"
+        );
+        assert_eq!(
+            view.group_of(b_i, true, true),
+            vec![b_i],
+            "expanded burst member with no pair = itself"
+        );
+    }
+
+    #[test]
+    fn group_of_dedups_when_burst_members_share_a_jpeg_sibling() {
+        // Two RAWs with the same stem but different extensions (e.g. dual-format
+        // capture) both pair the same `photo.jpg`. Both are burst members, so
+        // fanning out would add the shared JPEG twice — the group must dedup it.
+        let params = Params::new();
+        let mut cr2 = item_at("photo.cr2", 0, 0);
+        cr2.jpeg_pair = Some(PathBuf::from("/src/photo.jpg"));
+        let mut nef = item_at("photo.nef", 0, 300_000_000);
+        nef.jpeg_pair = Some(PathBuf::from("/src/photo.jpg"));
+        let items = [
+            cr2,
+            nef,
+            item_at("x.raw", 0, 600_000_000),
+            item_at("photo.jpg", 0, 0),
+        ];
+        let view = build_incremental(&items, &params);
+        let idx = |name| view.index_of(Path::new(name)).unwrap();
+        let group = view.group_of(idx("/src/photo.cr2"), true, true);
+
+        let mut unique = group.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            group.len(),
+            unique.len(),
+            "the shared JPEG must not be duplicated"
+        );
+        let mut sorted = group;
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            {
+                let mut e = vec![
+                    idx("/src/photo.cr2"),
+                    idx("/src/photo.nef"),
+                    idx("/src/x.raw"),
+                    idx("/src/photo.jpg"),
+                ];
+                e.sort_unstable();
+                e
+            },
+            "both RAWs, the third member, and the single shared JPEG"
+        );
     }
 
     #[test]

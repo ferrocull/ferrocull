@@ -366,38 +366,10 @@ impl Ferrocull {
         self.media.ordinal_position(item_idx, self.config.ascending)
     }
 
-    /// Indices to operate on: burst members if collapsed, else just `idx`.
-    fn target_indices(&self, idx: usize) -> Vec<usize> {
+    /// The logical group to fan out to: collapsed-burst members plus RAW+JPEG siblings.
+    fn group_of(&self, idx: usize) -> Vec<usize> {
         self.media
-            .collapsed_burst_members(idx, self.config.group_bursts)
-            .map_or_else(|| vec![idx], <[usize]>::to_vec)
-    }
-
-    /// Set selection state for an item and its JPEG pair if grouping is enabled.
-    fn set_selection(&mut self, idx: usize, select: bool) {
-        if select {
-            self.selected.insert(idx);
-        } else {
-            self.selected.remove(&idx);
-        }
-
-        if !self.config.group_raw_jpeg {
-            return;
-        }
-
-        if let Some(jpeg_idx) = self
-            .media
-            .item(idx)
-            .jpeg_pair
-            .as_ref()
-            .and_then(|jpeg| self.media.index_of(jpeg))
-        {
-            if select {
-                self.selected.insert(jpeg_idx);
-            } else {
-                self.selected.remove(&jpeg_idx);
-            }
-        }
+            .group_of(idx, self.config.group_bursts, self.config.group_raw_jpeg)
     }
 
     fn handle_thumbnail_cached(&mut self) {
