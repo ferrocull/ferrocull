@@ -7,7 +7,6 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use nix::sys::statvfs;
 use objc2_core_foundation::{
     CFBoolean, CFDictionary, CFRunLoop, CFString, CFType, CFURL, kCFRunLoopDefaultMode,
 };
@@ -20,16 +19,6 @@ use crate::{
     Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
     UnmountOptions, WatchError,
 };
-
-fn disk_space(mount_point: &Path) -> Option<(u64, u64)> {
-    let stat = statvfs::statvfs(mount_point).ok()?;
-    let block_size = stat.fragment_size();
-    let total = u64::from(stat.blocks()) * block_size;
-    let available = u64::from(stat.blocks_available()) * block_size;
-    let used = total.saturating_sub(available);
-
-    Some((total, used))
-}
 
 const DA_VOLUME_NAME: &str = "DAVolumeName";
 const DA_VOLUME_PATH: &str = "DAVolumePath";
@@ -74,7 +63,7 @@ fn disk_to_storage_device(disk: &DADisk) -> Option<StorageDevice> {
 
     let device_path = unsafe { bsd_name_path(disk) }.unwrap_or_else(|| mount_point.clone());
 
-    let (total_bytes, used_bytes) = disk_space(&mount_point).unzip();
+    let (total_bytes, used_bytes) = crate::statvfs::disk_space(&mount_point).unzip();
 
     Some(StorageDevice {
         name,
@@ -115,7 +104,7 @@ fn url_path(dict: &CFDictionary, key: &str) -> Option<PathBuf> {
     url.to_file_path()
 }
 
-pub fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
+pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
     // Use /Volumes directory - simpler and more reliable than DASession for one-shot scan
     let volumes_dir = PathBuf::from("/Volumes");
     let entries = std::fs::read_dir(&volumes_dir)?;
@@ -155,7 +144,7 @@ pub fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
                 .device_node
                 .map_or_else(|| mount_point.clone(), PathBuf::from);
 
-            let (total_bytes, used_bytes) = disk_space(&mount_point).unzip();
+            let (total_bytes, used_bytes) = crate::statvfs::disk_space(&mount_point).unzip();
 
             Some(StorageDevice {
                 name,
@@ -232,7 +221,7 @@ unsafe extern "C-unwind" fn disk_disappeared_callback(disk: NonNull<DADisk>, con
 /// `DASession` is not `Send`, so it must be constructed inside the worker thread.
 /// A one-shot channel relays the construction result back so the caller can fail
 /// fast on `DiskArbitration` unavailability without losing the typed error.
-pub fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, WatchError> {
+pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, WatchError> {
     let (init_tx, init_rx) = std::sync::mpsc::channel();
 
     let handle = thread::spawn(move || {
@@ -283,14 +272,20 @@ pub fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, WatchEr
 }
 
 /// macOS auto-mounts devices -- manual mount is not supported.
-pub fn mount(_device: &StorageDevice, _options: &MountOptions) -> Result<PathBuf, MountError> {
+pub(crate) fn mount(
+    _device: &StorageDevice,
+    _options: &MountOptions,
+) -> Result<PathBuf, MountError> {
     Err(MountError::Failed(String::from(
         "macOS auto-mounts devices — manual mount not supported",
     )))
 }
 
 /// Unmount via `diskutil unmount [force]`.
-pub fn unmount(device: &StorageDevice, options: &UnmountOptions) -> Result<(), UnmountError> {
+pub(crate) fn unmount(
+    device: &StorageDevice,
+    options: &UnmountOptions,
+) -> Result<(), UnmountError> {
     let mut cmd = Command::new("diskutil");
     cmd.arg("unmount");
     if options.force.unwrap_or(false) {

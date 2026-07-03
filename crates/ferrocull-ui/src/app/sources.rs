@@ -29,7 +29,6 @@ pub(super) fn update(state: &mut Ferrocull, msg: sources::Message) -> Task<Messa
                 return Task::none();
             };
 
-            #[cfg(target_os = "linux")]
             return Task::perform(
                 async move {
                     mount(&device, &MountOptions::default())
@@ -38,29 +37,12 @@ pub(super) fn update(state: &mut Ferrocull, msg: sources::Message) -> Task<Messa
                 },
                 move |r| Message::MountResult(device_path, r),
             );
-
-            #[cfg(not(target_os = "linux"))]
-            return Task::perform(
-                tokio::task::spawn_blocking(move || {
-                    mount(&device, &MountOptions::default()).map_err(|e| e.to_string())
-                }),
-                move |r| {
-                    Message::MountResult(
-                        device_path,
-                        r.unwrap_or_else(|e| {
-                            tracing::error!("mount task panicked: {e}");
-                            Err(format!("task panicked: {e}"))
-                        }),
-                    )
-                },
-            );
         }
         sources::Message::UnmountStorage(device_path) => {
             let Some(device) = find_storage_device(&state.sources, &device_path) else {
                 return Task::none();
             };
 
-            #[cfg(target_os = "linux")]
             return Task::perform(
                 async move {
                     unmount(&device, &UnmountOptions::default())
@@ -68,22 +50,6 @@ pub(super) fn update(state: &mut Ferrocull, msg: sources::Message) -> Task<Messa
                         .map_err(|e| e.to_string())
                 },
                 move |r| Message::UnmountResult(device_path, r),
-            );
-
-            #[cfg(not(target_os = "linux"))]
-            return Task::perform(
-                tokio::task::spawn_blocking(move || {
-                    unmount(&device, &UnmountOptions::default()).map_err(|e| e.to_string())
-                }),
-                move |r| {
-                    Message::UnmountResult(
-                        device_path,
-                        r.unwrap_or_else(|e| {
-                            tracing::error!("unmount task panicked: {e}");
-                            Err(format!("task panicked: {e}"))
-                        }),
-                    )
-                },
             );
         }
         sources::Message::AddDirectoryClicked => {
@@ -109,19 +75,8 @@ fn find_storage_device(sources: &[Source], device_path: &Path) -> Option<Storage
     })
 }
 
-#[cfg(target_os = "linux")]
 pub(super) fn scan_storage_task() -> Task<Message> {
     Task::perform(scan_storage(), Message::SourcesRefreshed)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(super) fn scan_storage_task() -> Task<Message> {
-    Task::perform(tokio::task::spawn_blocking(scan_storage), |r| {
-        Message::SourcesRefreshed(r.unwrap_or_else(|e| {
-            tracing::error!("source scan task panicked: {e}");
-            Err(ScanError::Backend(format!("scan task panicked: {e}")))
-        }))
-    })
 }
 
 impl Ferrocull {

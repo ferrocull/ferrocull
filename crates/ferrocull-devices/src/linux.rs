@@ -76,19 +76,6 @@ fn bytes_to_path(raw: &[u8]) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(trimmed))
 }
 
-// libc `statvfs` field widths (`c_ulong`, `fsblkcnt_t`) are platform-dependent:
-// the `u64::from` conversions are no-ops on 64-bit targets but real widening on
-// 32-bit ones, so they're kept for portability.
-#[allow(clippy::useless_conversion)]
-fn disk_space(mount_point: &Path) -> Option<(u64, u64)> {
-    let stat = nix::sys::statvfs::statvfs(mount_point).ok()?;
-    let block_size = u64::from(stat.fragment_size());
-    let total = u64::from(stat.blocks()) * block_size;
-    let available = u64::from(stat.blocks_available()) * block_size;
-    let used = total.saturating_sub(available);
-    Some((total, used))
-}
-
 fn device_name(label: Option<&str>, drive_model: Option<&str>, device_path: &Path) -> String {
     label.or(drive_model).map_or_else(
         || {
@@ -189,7 +176,7 @@ impl From<zbus::fdo::Error> for ScanError {
     }
 }
 
-pub async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
+pub(crate) async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
     let conn = connection().await?;
     let om = ObjectManagerProxy::builder(conn)
         .destination(UDISKS2_SERVICE)?
@@ -250,7 +237,10 @@ pub async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
             drive.model.as_deref(),
             &device_path,
         );
-        let (total_bytes, used_bytes) = mount_point.as_deref().and_then(disk_space).unzip();
+        let (total_bytes, used_bytes) = mount_point
+            .as_deref()
+            .and_then(crate::statvfs::disk_space)
+            .unzip();
         let priority = block_priority(mount_point.is_some(), has_fs);
         let candidate = StorageDevice {
             name,
@@ -300,7 +290,10 @@ async fn filesystem_proxy(object_path: &str) -> Result<FilesystemProxy<'static>,
         .await
 }
 
-pub async fn mount(device: &StorageDevice, options: &MountOptions) -> Result<PathBuf, MountError> {
+pub(crate) async fn mount(
+    device: &StorageDevice,
+    options: &MountOptions,
+) -> Result<PathBuf, MountError> {
     let proxy = filesystem_proxy(&device.object_path)
         .await
         .map_err(|e| MountError::Failed(e.to_string()))?;
@@ -325,7 +318,10 @@ fn classify_mount_error(e: &zbus::Error) -> MountError {
     MountError::Failed(e.to_string())
 }
 
-pub async fn unmount(device: &StorageDevice, options: &UnmountOptions) -> Result<(), UnmountError> {
+pub(crate) async fn unmount(
+    device: &StorageDevice,
+    options: &UnmountOptions,
+) -> Result<(), UnmountError> {
     let proxy = filesystem_proxy(&device.object_path)
         .await
         .map_err(|e| UnmountError::Failed(e.to_string()))?;
@@ -427,7 +423,7 @@ fn emit_mounted(
         return Ok(());
     };
     kd.mounted = true;
-    let (total_bytes, used_bytes) = disk_space(&mount_point).unzip();
+    let (total_bytes, used_bytes) = crate::statvfs::disk_space(&mount_point).unzip();
     tx.send(DeviceEvent::Mounted {
         device_path: kd.device_path.clone(),
         mount_point,
@@ -459,7 +455,7 @@ fn emit_unmounted(
 /// consumes these only as change triggers: each event drives a full
 /// [`scan_storage`] rescan, which collapses a card to one `StorageDevice` per
 /// Drive, so the per-Block granularity here is harmless.
-pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
+pub(crate) async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
     watch_inner(tx)
         .await
         .map_err(|e| WatchError::Backend(e.to_string()))
