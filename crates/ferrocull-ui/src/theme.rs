@@ -32,12 +32,10 @@ thread_local! {
 
 fn cached() -> CachedTheme {
     CACHED.with(Cell::get).unwrap_or_else(|| {
-        // Fallback before the app has populated the cache via `set_os_is_dark`.
-        // Light theme is the safer default if the OS preference hasn't arrived yet.
-        let theme = light_theme();
+        let theme = dark_theme();
         CachedTheme {
             palette: *theme.extended_palette(),
-            is_dark: false,
+            is_dark: true,
         }
     })
 }
@@ -63,7 +61,11 @@ pub(crate) fn palette() -> palette::Extended {
 /// (`spawn_blocking`) or at boot, never from the render path.
 #[must_use]
 pub(crate) fn detect_os_is_dark() -> bool {
-    matches!(dark_light::detect(), Ok(dark_light::Mode::Dark))
+    // Unspecified/unreachable portal falls back to dark, not light.
+    match dark_light::detect() {
+        Ok(dark_light::Mode::Light) => false,
+        Ok(dark_light::Mode::Dark | dark_light::Mode::Unspecified) | Err(_) => true,
+    }
 }
 
 /// Set the resolved dark-mode value. Respects user preference: when the user
