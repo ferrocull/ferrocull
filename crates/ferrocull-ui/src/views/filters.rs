@@ -13,25 +13,13 @@ use iced::{
 };
 
 use crate::{
+    messages::filters::Message,
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
 };
 
-/// Events emitted by filter bar controls.
-#[derive(Debug, Clone)]
-pub(crate) enum Event {
-    SortChanged(SortOrder),
-    AscendingToggled,
-    FilterChanged(FilterMode),
-    GroupRawJpegToggled,
-    GroupBurstsToggled,
-    HideRejectedToggled,
-    RatingFilterToggled(i8),
-    ColorLabelFilterToggled(Option<ColorLabel>),
-}
-
 /// Visual divider between filter groups.
-fn divider() -> Element<'static, Event> {
+fn divider() -> Element<'static, Message> {
     container(Space::new().width(1))
         .height(20)
         .width(1)
@@ -42,8 +30,8 @@ fn divider() -> Element<'static, Event> {
         .into()
 }
 
-pub(crate) fn sort_controls(order: SortOrder, ascending: bool) -> Element<'static, Event> {
-    let sort_picker = pick_list(SortOrder::ALL, Some(order), Event::SortChanged)
+pub(crate) fn sort_controls(order: SortOrder, ascending: bool) -> Element<'static, Message> {
+    let sort_picker = pick_list(SortOrder::ALL, Some(order), Message::SortChanged)
         .text_size(12)
         .padding([4, 8]);
 
@@ -51,12 +39,12 @@ pub(crate) fn sort_controls(order: SortOrder, ascending: bool) -> Element<'stati
     let asc_btn = button(text(arrow).size(12))
         .padding([4, 8])
         .style(styles::secondary_button)
-        .on_press(Event::AscendingToggled);
+        .on_press(Message::AscendingToggled);
 
     row![sort_picker, asc_btn].spacing(2).into()
 }
 
-pub(crate) fn filter_mode_controls(mode: FilterMode) -> Element<'static, Event> {
+pub(crate) fn filter_mode_controls(mode: FilterMode) -> Element<'static, Message> {
     row(FilterMode::ALL.iter().map(|&m| {
         let is_selected = m == mode;
         let btn = button(text(m.to_string()).size(11))
@@ -65,7 +53,7 @@ pub(crate) fn filter_mode_controls(mode: FilterMode) -> Element<'static, Event> 
         if is_selected {
             btn.into()
         } else {
-            btn.on_press(Event::FilterChanged(m)).into()
+            btn.on_press(Message::FilterChanged(m)).into()
         }
     }))
     .spacing(2)
@@ -76,28 +64,28 @@ pub(crate) fn grouping_controls(
     group_raw_jpeg: bool,
     group_bursts: bool,
     hide_rejected: bool,
-) -> Element<'static, Event> {
+) -> Element<'static, Message> {
     let group_toggle = checkbox(group_raw_jpeg)
         .label("R+J")
         .text_size(11)
-        .on_toggle(|_| Event::GroupRawJpegToggled);
+        .on_toggle(|_| Message::GroupRawJpegToggled);
 
     let group_bursts_toggle = checkbox(group_bursts)
         .label("Bursts")
         .text_size(11)
-        .on_toggle(|_| Event::GroupBurstsToggled);
+        .on_toggle(|_| Message::GroupBurstsToggled);
 
     let hide_rejected_toggle = checkbox(hide_rejected)
         .label("Hide ✗")
         .text_size(11)
-        .on_toggle(|_| Event::HideRejectedToggled);
+        .on_toggle(|_| Message::HideRejectedToggled);
 
     row![group_toggle, group_bursts_toggle, hide_rejected_toggle]
         .spacing(spacing::MD)
         .into()
 }
 
-pub(crate) fn rating_filter(selected: &BTreeSet<i8>) -> Element<'_, Event> {
+pub(crate) fn rating_filter(selected: &BTreeSet<i8>) -> Element<'_, Message> {
     let rating_label = text("★").size(13).color(colors::ACCENT);
 
     let rating_buttons = row((0..=5i8).map(|rating| {
@@ -110,7 +98,7 @@ pub(crate) fn rating_filter(selected: &BTreeSet<i8>) -> Element<'_, Event> {
         button(text(label).size(10))
             .padding([3, 7])
             .style(styles::filter_pill(is_selected))
-            .on_press(Event::RatingFilterToggled(rating))
+            .on_press(Message::RatingFilterToggled(rating))
             .into()
     }))
     .spacing(2);
@@ -121,7 +109,7 @@ pub(crate) fn rating_filter(selected: &BTreeSet<i8>) -> Element<'_, Event> {
         .into()
 }
 
-pub(crate) fn color_label_filter(selected: &BTreeSet<Option<ColorLabel>>) -> Element<'_, Event> {
+pub(crate) fn color_label_filter(selected: &BTreeSet<Option<ColorLabel>>) -> Element<'_, Message> {
     let palette = crate::theme::palette();
     let all_options = std::iter::once(None).chain(ColorLabel::ALL.map(Some));
     row(all_options.map(|label| {
@@ -136,7 +124,7 @@ pub(crate) fn color_label_filter(selected: &BTreeSet<Option<ColorLabel>>) -> Ele
         button(text("").size(6))
             .padding([7, 9])
             .style(color_swatch(bg_color, border_color, is_selected))
-            .on_press(Event::ColorLabelFilterToggled(label))
+            .on_press(Message::ColorLabelFilterToggled(label))
             .into()
     }))
     .spacing(3)
@@ -144,12 +132,12 @@ pub(crate) fn color_label_filter(selected: &BTreeSet<Option<ColorLabel>>) -> Ele
 }
 
 pub(crate) fn filter_bar<'a>(
-    sort: Element<'a, Event>,
-    filter_mode: Element<'a, Event>,
-    grouping: Element<'a, Event>,
-    rating: Element<'a, Event>,
-    color_label: Element<'a, Event>,
-) -> Element<'a, Event> {
+    sort: Element<'a, Message>,
+    filter_mode: Element<'a, Message>,
+    grouping: Element<'a, Message>,
+    rating: Element<'a, Message>,
+    color_label: Element<'a, Message>,
+) -> Element<'a, Message> {
     row![
         sort,
         divider(),

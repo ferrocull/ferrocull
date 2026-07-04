@@ -34,8 +34,7 @@ use crate::{
     media_view::{MediaView, ViewParams},
     messages::{
         Message, Panel, Section, compare as compare_msg, destination as destination_msg,
-        filters as filters_msg, grid as grid_msg, preview as preview_msg, profile as profile_msg,
-        sources as sources_msg,
+        filters as filters_msg, grid as grid_msg, preview as preview_msg, sources as sources_msg,
     },
     styles,
     theme::spacing,
@@ -913,7 +912,7 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
         active_item.color_label,
         state.hovered_star,
     )
-    .map(views::compare::Event::Item.with(active_path));
+    .map(map_item_event.with(active_path));
 
     let top = views::compare::top_bar(
         select_item,
@@ -943,30 +942,7 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
     );
     let bottom = views::compare::bottom_bar(cmp.layout, item_ctrl);
 
-    views::compare::compose(cmp.layout, top, select_pane, candidate_pane, bottom).map(|event| {
-        match event {
-            views::compare::Event::Close => Message::Compare(compare_msg::Message::Exit),
-            views::compare::Event::ToggleLock => {
-                Message::Compare(compare_msg::Message::ToggleLockScroll)
-            }
-            views::compare::Event::Prev => Message::Compare(compare_msg::Message::CandidatePrev),
-            views::compare::Event::Next => Message::Compare(compare_msg::Message::CandidateNext),
-            views::compare::Event::Promote => Message::Compare(compare_msg::Message::Promote),
-            views::compare::Event::SwitchHorizontal => {
-                Message::Compare(compare_msg::Message::EnterHorizontal)
-            }
-            views::compare::Event::SwitchVertical => {
-                Message::Compare(compare_msg::Message::EnterVertical)
-            }
-            views::compare::Event::SetActivePane(pane) => {
-                Message::Compare(compare_msg::Message::ActivePaneChanged(pane))
-            }
-            views::compare::Event::ViewStateChanged(pane, e) => {
-                Message::Compare(compare_msg::Message::ViewStateChanged(pane, e))
-            }
-            views::compare::Event::Item(path, item_event) => map_item_event(path, item_event),
-        }
-    })
+    views::compare::compose(cmp.layout, top, select_pane, candidate_pane, bottom)
 }
 
 fn preview_overlay(state: &Ferrocull, p: &PreviewState) -> Element<'static, Message> {
@@ -974,7 +950,7 @@ fn preview_overlay(state: &Ferrocull, p: &PreviewState) -> Element<'static, Mess
     let item_path = item.path.clone();
 
     let item_ctrl = views::rating::item_controls(item.rating, item.color_label, state.hovered_star)
-        .map(views::preview::Event::Item.with(item_path));
+        .map(map_item_event.with(item_path));
 
     let top = views::preview::top_bar(
         item,
@@ -990,15 +966,7 @@ fn preview_overlay(state: &Ferrocull, p: &PreviewState) -> Element<'static, Mess
     );
     let bottom = views::preview::bottom_bar(item_ctrl);
 
-    views::preview::compose(top, image, bottom).map(|event| match event {
-        views::preview::Event::Close => Message::Preview(preview_msg::Message::Close),
-        views::preview::Event::Prev => Message::Preview(preview_msg::Message::Prev),
-        views::preview::Event::Next => Message::Preview(preview_msg::Message::Next),
-        views::preview::Event::ViewStateChanged(e) => {
-            Message::Preview(preview_msg::Message::ViewStateChanged(e))
-        }
-        views::preview::Event::Item(path, item_event) => map_item_event(path, item_event),
-    })
+    views::preview::compose(top, image, bottom)
 }
 
 /// Clickable edge handle for collapsing/expanding panels.
@@ -1044,25 +1012,8 @@ fn sources_panel(state: &Ferrocull) -> Element<'_, Message> {
         .width(Fill);
 
     let sources_view =
-        views::sources::sources_panel(&state.sources, &state.config.selected_sources).map(|e| {
-            match e {
-                views::sources::Event::Toggle(path) => {
-                    Message::Sources(sources_msg::Message::SourceToggled(path))
-                }
-                views::sources::Event::Mount(path) => {
-                    Message::Sources(sources_msg::Message::MountStorage(path))
-                }
-                views::sources::Event::Unmount(path) => {
-                    Message::Sources(sources_msg::Message::UnmountStorage(path))
-                }
-                views::sources::Event::AddDirectory => {
-                    Message::Sources(sources_msg::Message::AddDirectoryClicked)
-                }
-                views::sources::Event::Refresh => {
-                    Message::Sources(sources_msg::Message::RefreshSources)
-                }
-            }
-        });
+        views::sources::sources_panel(&state.sources, &state.config.selected_sources)
+            .map(Message::Sources);
 
     let dates = views::date_tree::date_tree(
         state.media.items(),
@@ -1071,17 +1022,7 @@ fn sources_panel(state: &Ferrocull) -> Element<'_, Message> {
         &state.expanded_years,
         &state.expanded_months,
     )
-    .map(|e| match e {
-        views::date_tree::Event::DateToggled(sel) => {
-            Message::Filters(filters_msg::Message::DateToggled(sel))
-        }
-        views::date_tree::Event::YearExpanded(year) => {
-            Message::Filters(filters_msg::Message::YearExpanded(year))
-        }
-        views::date_tree::Event::MonthExpanded(year, month) => {
-            Message::Filters(filters_msg::Message::MonthExpanded(year, month))
-        }
-    });
+    .map(Message::Filters);
 
     let content = column![
         header,
@@ -1113,32 +1054,7 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
         views::filters::rating_filter(&state.config.selected_ratings),
         views::filters::color_label_filter(&state.config.selected_color_labels),
     )
-    .map(|event| match event {
-        views::filters::Event::SortChanged(order) => {
-            Message::Filters(filters_msg::Message::SortChanged(order))
-        }
-        views::filters::Event::AscendingToggled => {
-            Message::Filters(filters_msg::Message::AscendingToggled)
-        }
-        views::filters::Event::FilterChanged(mode) => {
-            Message::Filters(filters_msg::Message::FilterChanged(mode))
-        }
-        views::filters::Event::GroupRawJpegToggled => {
-            Message::Filters(filters_msg::Message::GroupRawJpegToggled)
-        }
-        views::filters::Event::GroupBurstsToggled => {
-            Message::Filters(filters_msg::Message::GroupBurstsToggled)
-        }
-        views::filters::Event::HideRejectedToggled => {
-            Message::Filters(filters_msg::Message::HideRejectedToggled)
-        }
-        views::filters::Event::RatingFilterToggled(rating) => {
-            Message::Filters(filters_msg::Message::RatingFilterToggled(rating))
-        }
-        views::filters::Event::ColorLabelFilterToggled(label) => {
-            Message::Filters(filters_msg::Message::ColorLabelFilterToggled(label))
-        }
-    });
+    .map(Message::Filters);
 
     let header = container(filters_view)
         .padding([spacing::SM, spacing::MD])
@@ -1257,98 +1173,32 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "TEA view: each panel needs its own .map() closure"
-)]
 fn config_panel(state: &Ferrocull) -> Element<'_, Message> {
     let palette = crate::theme::palette();
 
     let destination_content =
-        views::destination::destination_panel(&state.photos_dest, &state.videos_dest).map(|e| {
-            match e {
-                views::destination::Event::PhotosDestChanged(s) => {
-                    Message::Destination(destination_msg::Message::PhotosDestChanged(s))
-                }
-                views::destination::Event::VideosDestChanged(s) => {
-                    Message::Destination(destination_msg::Message::VideosDestChanged(s))
-                }
-                views::destination::Event::BrowsePhotos => {
-                    Message::Destination(destination_msg::Message::BrowsePhotosDest)
-                }
-                views::destination::Event::BrowseVideos => {
-                    Message::Destination(destination_msg::Message::BrowseVideosDest)
-                }
-            }
-        });
+        views::destination::destination_panel(&state.photos_dest, &state.videos_dest)
+            .map(Message::Destination);
     let rename_content =
-        views::rename::rename_panel(&state.photo_pattern, &state.video_pattern, state.today).map(
-            |e| match e {
-                views::rename::Event::PhotoPatternChanged(s) => {
-                    Message::Destination(destination_msg::Message::PhotoPatternChanged(s))
-                }
-                views::rename::Event::VideoPatternChanged(s) => {
-                    Message::Destination(destination_msg::Message::VideoPatternChanged(s))
-                }
-            },
-        );
-    let backup_content = views::backup::backup_panel(&state.backup_destinations).map(|e| match e {
-        views::backup::Event::Add => {
-            Message::Destination(destination_msg::Message::AddBackupClicked)
-        }
-        views::backup::Event::Remove(idx) => {
-            Message::Destination(destination_msg::Message::RemoveBackup(idx))
-        }
-    });
-    let hooks_content = views::hooks::hooks_panel(&state.hooks).map(|e| match e {
-        views::hooks::Event::Add => Message::Profile(profile_msg::Message::HookAddRequested),
-        views::hooks::Event::Remove(idx) => {
-            Message::Profile(profile_msg::Message::HookRemoved(idx))
-        }
-        views::hooks::Event::Toggle(idx) => {
-            Message::Profile(profile_msg::Message::HookToggled(idx))
-        }
-        views::hooks::Event::Edit(idx, cmd) => {
-            Message::Profile(profile_msg::Message::HookCommandEdited(idx, cmd))
-        }
-    });
+        views::rename::rename_panel(&state.photo_pattern, &state.video_pattern, state.today)
+            .map(Message::Destination);
+    let backup_content =
+        views::backup::backup_panel(&state.backup_destinations).map(Message::Destination);
+    let hooks_content = views::hooks::hooks_panel(&state.hooks).map(Message::Profile);
 
     let profiles_content = views::profiles::profiles_panel(
         &state.profiles,
         state.current_profile.as_deref(),
         &state.profile_name_input,
     )
-    .map(|e| match e {
-        views::profiles::Event::Load(name) => {
-            Message::Profile(profile_msg::Message::ProfileSelected(name))
-        }
-        views::profiles::Event::Save => Message::Profile(profile_msg::Message::SaveRequested),
-        views::profiles::Event::Delete(name) => {
-            Message::Profile(profile_msg::Message::DeleteRequested(name))
-        }
-        views::profiles::Event::NameChanged(name) => {
-            Message::Profile(profile_msg::Message::NameChanged(name))
-        }
-    });
+    .map(Message::Profile);
 
     let jobcode_content =
-        views::jobcode::jobcode_panel(&state.job_code, state.job_code_history.codes()).map(|e| {
-            match e {
-                views::jobcode::Event::Changed(s) => {
-                    Message::Destination(destination_msg::Message::JobCodeChanged(s))
-                }
-                views::jobcode::Event::Selected(s) => {
-                    Message::Destination(destination_msg::Message::JobCodeSelected(s))
-                }
-            }
-        });
+        views::jobcode::jobcode_panel(&state.job_code, state.job_code_history.codes())
+            .map(Message::Destination);
 
     let delete_content =
-        views::delete::delete_panel(state.delete_after_download).map(|e| match e {
-            views::delete::Event::Toggled => {
-                Message::Destination(destination_msg::Message::DeleteAfterDownloadToggled)
-            }
-        });
+        views::delete::delete_panel(state.delete_after_download).map(Message::Destination);
 
     let scrollable_content = column![
         profiles_content,

@@ -4,17 +4,9 @@ use iced::{
     widget::{Space, button, checkbox, column, container, row, scrollable, text, text_input},
 };
 
-use crate::{styles, theme::spacing};
+use crate::{messages::profile::Message, styles, theme::spacing};
 
-#[derive(Debug, Clone)]
-pub(crate) enum Event {
-    Add,
-    Remove(usize),
-    Toggle(usize),
-    Edit(usize, String),
-}
-
-pub(crate) fn hooks_panel(hooks: &[Hook]) -> Element<'static, Event> {
+pub(crate) fn hooks_panel(hooks: &[Hook]) -> Element<'static, Message> {
     let header = text("Post-Download Hooks").size(13);
 
     let mut content = column![header].spacing(spacing::SM);
@@ -27,22 +19,22 @@ pub(crate) fn hooks_panel(hooks: &[Hook]) -> Element<'static, Event> {
                 .color(palette.background.strong.text),
         );
     } else {
-        let items: Vec<Element<'static, Event>> = hooks
+        let items: Vec<Element<'static, Message>> = hooks
             .iter()
             .enumerate()
             .map(|(idx, hook)| {
                 let enabled_checkbox =
-                    checkbox(hook.enabled).on_toggle(move |_| Event::Toggle(idx));
+                    checkbox(hook.enabled).on_toggle(move |_| Message::HookToggled(idx));
 
                 let name_label = text(hook.name.clone()).size(11).width(Length::Fixed(80.0));
 
                 let command_input = text_input("command", &hook.command)
                     .size(10)
                     .width(Fill)
-                    .on_input(move |cmd| Event::Edit(idx, cmd));
+                    .on_input(move |cmd| Message::HookCommandEdited(idx, cmd));
 
                 let remove_btn = button(text("X").size(10))
-                    .on_press(Event::Remove(idx))
+                    .on_press(Message::HookRemoved(idx))
                     .padding([2, 6])
                     .style(button::danger);
 
@@ -65,7 +57,7 @@ pub(crate) fn hooks_panel(hooks: &[Hook]) -> Element<'static, Event> {
         .push(Space::new().height(spacing::XS))
         .push(
             button(text("Add Hook...").size(11).color(Color::WHITE))
-                .on_press(Event::Add)
+                .on_press(Message::HookAddRequested)
                 .padding([4, 8])
                 .style(styles::primary_button),
         )

@@ -5,13 +5,10 @@ use iced::{
     widget::{column, container, text, text_input},
 };
 
-use crate::theme::{colors, spacing};
-
-#[derive(Debug, Clone)]
-pub(crate) enum Event {
-    PhotoPatternChanged(String),
-    VideoPatternChanged(String),
-}
+use crate::{
+    messages::destination::Message,
+    theme::{colors, spacing},
+};
 
 fn sample_context(today: NaiveDate) -> RenderContext {
     RenderContext {
@@ -32,7 +29,7 @@ pub(crate) fn rename_panel(
     photo_pattern: &str,
     video_pattern: &str,
     today: NaiveDate,
-) -> Element<'static, Event> {
+) -> Element<'static, Message> {
     let help_text = text(
         "{YYYY} {MM} {DD} {HH} {MIN} {SS} {filename} {ext} {EXT} {seq} {camera_make} {camera_model} {jobcode}",
     )
@@ -44,7 +41,7 @@ pub(crate) fn rename_panel(
     let mut photo_section = column![
         text("Photo Pattern").size(13),
         text_input("{YYYY}/{MM}/{DD}/{filename}.{ext}", photo_pattern)
-            .on_input(Event::PhotoPatternChanged)
+            .on_input(Message::PhotoPatternChanged)
             .size(12),
     ]
     .spacing(spacing::XS);
@@ -56,7 +53,7 @@ pub(crate) fn rename_panel(
     let mut video_section = column![
         text("Video Pattern").size(13),
         text_input("{YYYY}/{MM}/{DD}/{filename}.{ext}", video_pattern)
-            .on_input(Event::VideoPatternChanged)
+            .on_input(Message::VideoPatternChanged)
             .size(12),
     ]
     .spacing(spacing::XS);
@@ -70,11 +67,11 @@ pub(crate) fn rename_panel(
     "MVI_0001".clone_into(&mut video_ctx.filename);
     "mov".clone_into(&mut video_ctx.extension);
 
-    let photo_preview: Element<'static, Event> = match photo_parsed {
+    let photo_preview: Element<'static, Message> = match photo_parsed {
         Ok(pattern) => text(pattern.render(&photo_ctx)).size(11).into(),
         Err(e) => text(e.to_string()).size(11).color(colors::DANGER).into(),
     };
-    let video_preview: Element<'static, Event> = match video_parsed {
+    let video_preview: Element<'static, Message> = match video_parsed {
         Ok(pattern) => text(pattern.render(&video_ctx)).size(11).into(),
         Err(e) => text(e.to_string()).size(11).color(colors::DANGER).into(),
     };
