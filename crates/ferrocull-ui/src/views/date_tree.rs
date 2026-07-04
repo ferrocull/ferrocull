@@ -7,14 +7,7 @@ use iced::{
     widget::{Space, button, column, container, lazy, row, text},
 };
 
-use crate::{styles, theme::spacing};
-
-#[derive(Debug, Clone)]
-pub(crate) enum Event {
-    DateToggled(DateSelection),
-    YearExpanded(i32),
-    MonthExpanded(i32, u32),
-}
+use crate::{messages::filters::Message, styles, theme::spacing};
 
 type DateCounts = BTreeMap<i32, BTreeMap<u32, BTreeMap<u32, usize>>>;
 
@@ -73,7 +66,7 @@ pub(crate) fn date_tree<'a>(
     selected_date: Option<DateSelection>,
     expanded_years: &'a BTreeSet<i32>,
     expanded_months: &'a BTreeSet<(i32, u32)>,
-) -> Element<'a, Event> {
+) -> Element<'a, Message> {
     let key = CacheKey {
         item_version,
         selected_date,
@@ -93,7 +86,7 @@ pub(crate) fn date_tree<'a>(
             );
         }
 
-        let mut rows: Vec<Element<'static, Event>> = Vec::new();
+        let mut rows: Vec<Element<'static, Message>> = Vec::new();
 
         for &year in counts.keys().rev() {
             let months = &counts[&year];
@@ -107,7 +100,7 @@ pub(crate) fn date_tree<'a>(
                         button(text(expand_icon(is_expanded)).size(10))
                             .padding([2, 4])
                             .style(button::text)
-                            .on_press(Event::YearExpanded(year)),
+                            .on_press(Message::YearExpanded(year)),
                         text(format!("{year} ({year_total})")).size(12),
                     ]
                     .align_y(iced::Alignment::Center),
@@ -115,7 +108,7 @@ pub(crate) fn date_tree<'a>(
                 .padding([2, 6])
                 .width(Fill)
                 .style(styles::date_tree_item(is_selected))
-                .on_press(Event::DateToggled(DateSelection::year_only(year)))
+                .on_press(Message::DateToggled(DateSelection::year_only(year)))
                 .into(),
             );
 
@@ -134,7 +127,7 @@ pub(crate) fn date_tree<'a>(
 }
 
 fn push_month_rows(
-    rows: &mut Vec<Element<'static, Event>>,
+    rows: &mut Vec<Element<'static, Message>>,
     months: &BTreeMap<u32, BTreeMap<u32, usize>>,
     year: i32,
     selected_date: Option<DateSelection>,
@@ -153,7 +146,7 @@ fn push_month_rows(
                     button(text(expand_icon(is_expanded)).size(10))
                         .padding([2, 4])
                         .style(button::text)
-                        .on_press(Event::MonthExpanded(year, month)),
+                        .on_press(Message::MonthExpanded(year, month)),
                     text(format!("{} ({month_count})", month_name(month))).size(11),
                 ]
                 .align_y(iced::Alignment::Center),
@@ -161,7 +154,7 @@ fn push_month_rows(
             .padding([2, 6])
             .width(Fill)
             .style(styles::date_tree_item(is_selected))
-            .on_press(Event::DateToggled(DateSelection::year_month(year, month)))
+            .on_press(Message::DateToggled(DateSelection::year_month(year, month)))
             .into(),
         );
 
@@ -182,7 +175,7 @@ fn push_month_rows(
                     .padding([2, 6])
                     .width(Fill)
                     .style(styles::date_tree_item(is_day_selected))
-                    .on_press(Event::DateToggled(DateSelection::year_month_day(
+                    .on_press(Message::DateToggled(DateSelection::year_month_day(
                         year, month, day,
                     )))
                     .into(),

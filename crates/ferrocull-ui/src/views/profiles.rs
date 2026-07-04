@@ -5,23 +5,16 @@ use iced::{
 };
 
 use crate::{
+    messages::profile::Message,
     styles,
     theme::{colors, spacing},
 };
-
-#[derive(Debug, Clone)]
-pub(crate) enum Event {
-    Load(String),
-    Save,
-    Delete(String),
-    NameChanged(String),
-}
 
 pub(crate) fn profiles_panel(
     profiles: &[NamedProfile],
     current: Option<&str>,
     save_name_input: &str,
-) -> Element<'static, Event> {
+) -> Element<'static, Message> {
     let header = text("Profiles").size(13);
 
     let mut content = column![header].spacing(spacing::SM);
@@ -34,7 +27,7 @@ pub(crate) fn profiles_panel(
                 .color(palette.background.strong.text),
         );
     } else {
-        let items: Vec<Element<'static, Event>> = profiles
+        let items: Vec<Element<'static, Message>> = profiles
             .iter()
             .map(|named| {
                 let name = &named.name;
@@ -49,12 +42,12 @@ pub(crate) fn profiles_panel(
                 };
 
                 let load_btn = button(text("Load").size(10).color(Color::WHITE))
-                    .on_press(Event::Load(name.clone()))
+                    .on_press(Message::ProfileSelected(name.clone()))
                     .padding([2, 6])
                     .style(styles::primary_button);
 
                 let delete_btn = button(text("X").size(10))
-                    .on_press(Event::Delete(name.clone()))
+                    .on_press(Message::DeleteRequested(name.clone()))
                     .padding([2, 6])
                     .style(button::danger);
 
@@ -77,11 +70,11 @@ pub(crate) fn profiles_panel(
 
     let save_row = row![
         text_input("Profile name...", save_name_input)
-            .on_input(Event::NameChanged)
+            .on_input(Message::NameChanged)
             .size(11)
             .width(Fill),
         button(text("Save").size(11).color(Color::WHITE))
-            .on_press(Event::Save)
+            .on_press(Message::SaveRequested)
             .padding([4, 8])
             .style(styles::primary_button),
     ]

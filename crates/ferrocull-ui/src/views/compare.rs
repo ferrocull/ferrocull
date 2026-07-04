@@ -2,8 +2,6 @@
 //!
 //! Photo Mechanic-style compare functionality with synchronized zoom/pan.
 
-use std::path::PathBuf;
-
 use ferrocull_core::media::Item;
 use iced::{
     Alignment, Element, Fill,
@@ -11,9 +9,11 @@ use iced::{
 };
 use iced_aw::Spinner;
 
-use super::rating;
 use crate::{
-    messages::compare::{Layout, Pane},
+    messages::{
+        Message,
+        compare::{self, Layout, Pane},
+    },
     styles,
     theme::{colors, spacing},
     widgets::{self, ViewState, Viewer},
@@ -26,21 +26,6 @@ pub(crate) enum PaneEvent {
     ViewStateChanged(widgets::Event),
 }
 
-/// Module-level event composed from sub-function events.
-#[derive(Clone)]
-pub(crate) enum Event {
-    Close,
-    ToggleLock,
-    Prev,
-    Next,
-    Promote,
-    SwitchHorizontal,
-    SwitchVertical,
-    SetActivePane(Pane),
-    ViewStateChanged(Pane, widgets::Event),
-    Item(PathBuf, rating::ItemEvent),
-}
-
 /// Renders the top bar with filenames, position, lock, and close button.
 pub(crate) fn top_bar(
     select_item: &Item,
@@ -49,7 +34,7 @@ pub(crate) fn top_bar(
     total: usize,
     active_pane: Pane,
     lock_scroll: bool,
-) -> Element<'static, Event> {
+) -> Element<'static, Message> {
     let palette = crate::theme::palette();
     let select_name = select_item
         .path
@@ -89,12 +74,12 @@ pub(crate) fn top_bar(
         } else {
             styles::ghost_button
         })
-        .on_press(Event::ToggleLock);
+        .on_press(Message::Compare(compare::Message::ToggleLockScroll));
 
     let close_btn = button(text("✕").size(14).color(palette.background.base.text))
         .padding([6, 12])
         .style(styles::ghost_button)
-        .on_press(Event::Close);
+        .on_press(Message::Compare(compare::Message::Exit));
 
     // The select may be filtered out of the view; show "–" rather than a
     // misleading position.
@@ -189,8 +174,8 @@ pub(crate) fn image_pane(
 fn layout_toggle_btn(
     label: &'static str,
     is_active: bool,
-    on_press: Event,
-) -> iced::widget::Button<'static, Event> {
+    on_press: Message,
+) -> iced::widget::Button<'static, Message> {
     let palette = crate::theme::palette();
     let color = if is_active {
         colors::ACCENT
@@ -211,8 +196,8 @@ fn layout_toggle_btn(
 /// Renders the bottom bar with navigation, promote, layout controls, and pre-mapped item controls.
 pub(crate) fn bottom_bar(
     layout: Layout,
-    item_controls: Element<'static, Event>,
-) -> Element<'static, Event> {
+    item_controls: Element<'static, Message>,
+) -> Element<'static, Message> {
     let palette = crate::theme::palette();
 
     let promote_btn = button(
@@ -222,20 +207,28 @@ pub(crate) fn bottom_bar(
     )
     .padding([6, 12])
     .style(styles::secondary_button)
-    .on_press(Event::Promote);
+    .on_press(Message::Compare(compare::Message::Promote));
 
     let nav_prev = button(text("‹").size(24).color(palette.background.base.text))
         .padding([10, 20])
         .style(styles::ghost_button)
-        .on_press(Event::Prev);
+        .on_press(Message::Compare(compare::Message::CandidatePrev));
 
     let nav_next = button(text("›").size(24).color(palette.background.base.text))
         .padding([10, 20])
         .style(styles::ghost_button)
-        .on_press(Event::Next);
+        .on_press(Message::Compare(compare::Message::CandidateNext));
 
-    let h_btn = layout_toggle_btn("H", layout == Layout::Horizontal, Event::SwitchHorizontal);
-    let v_btn = layout_toggle_btn("V", layout == Layout::Vertical, Event::SwitchVertical);
+    let h_btn = layout_toggle_btn(
+        "H",
+        layout == Layout::Horizontal,
+        Message::Compare(compare::Message::EnterHorizontal),
+    );
+    let v_btn = layout_toggle_btn(
+        "V",
+        layout == Layout::Vertical,
+        Message::Compare(compare::Message::EnterVertical),
+    );
 
     container(
         row![
@@ -263,21 +256,27 @@ pub(crate) fn bottom_bar(
 /// Maps pane events to module events with pane identity.
 pub(crate) fn compose(
     layout: Layout,
-    top: Element<'static, Event>,
+    top: Element<'static, Message>,
     select_pane: Element<'static, PaneEvent>,
     candidate_pane: Element<'static, PaneEvent>,
-    bottom: Element<'static, Event>,
-) -> Element<'static, Event> {
+    bottom: Element<'static, Message>,
+) -> Element<'static, Message> {
     let select = select_pane.map(|e| match e {
-        PaneEvent::Clicked => Event::SetActivePane(Pane::Select),
-        PaneEvent::ViewStateChanged(e) => Event::ViewStateChanged(Pane::Select, e),
+        PaneEvent::Clicked => Message::Compare(compare::Message::ActivePaneChanged(Pane::Select)),
+        PaneEvent::ViewStateChanged(e) => {
+            Message::Compare(compare::Message::ViewStateChanged(Pane::Select, e))
+        }
     });
     let candidate = candidate_pane.map(|e| match e {
-        PaneEvent::Clicked => Event::SetActivePane(Pane::Candidate),
-        PaneEvent::ViewStateChanged(e) => Event::ViewStateChanged(Pane::Candidate, e),
+        PaneEvent::Clicked => {
+            Message::Compare(compare::Message::ActivePaneChanged(Pane::Candidate))
+        }
+        PaneEvent::ViewStateChanged(e) => {
+            Message::Compare(compare::Message::ViewStateChanged(Pane::Candidate, e))
+        }
     });
 
-    let image_area: Element<'static, Event> = match layout {
+    let image_area: Element<'static, Message> = match layout {
         Layout::Horizontal => row![select, candidate]
             .spacing(2)
             .width(Fill)

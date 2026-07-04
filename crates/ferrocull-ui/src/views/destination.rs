@@ -3,30 +3,22 @@ use iced::{
     widget::{button, column, row, text, text_input},
 };
 
-use crate::{styles, theme::spacing};
+use crate::{messages::destination::Message, styles, theme::spacing};
 
-#[derive(Debug, Clone)]
-pub(crate) enum Event {
-    PhotosDestChanged(String),
-    VideosDestChanged(String),
-    BrowsePhotos,
-    BrowseVideos,
-}
-
-pub(crate) fn destination_panel(photos_dest: &str, videos_dest: &str) -> Element<'static, Event> {
+pub(crate) fn destination_panel(photos_dest: &str, videos_dest: &str) -> Element<'static, Message> {
     let photos_section = dest_section(
         "Photos Destination",
         "~/Pictures",
         photos_dest,
-        Event::PhotosDestChanged,
-        Event::BrowsePhotos,
+        Message::PhotosDestChanged,
+        Message::BrowsePhotosDest,
     );
     let videos_section = dest_section(
         "Videos Destination",
         "~/Videos",
         videos_dest,
-        Event::VideosDestChanged,
-        Event::BrowseVideos,
+        Message::VideosDestChanged,
+        Message::BrowseVideosDest,
     );
 
     column![photos_section, videos_section]
@@ -38,9 +30,9 @@ fn dest_section(
     label: &'static str,
     placeholder: &'static str,
     value: &str,
-    on_change: fn(String) -> Event,
-    on_browse: Event,
-) -> Element<'static, Event> {
+    on_change: fn(String) -> Message,
+    on_browse: Message,
+) -> Element<'static, Message> {
     column![
         text(label).size(13),
         row![

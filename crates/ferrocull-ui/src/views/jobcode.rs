@@ -3,19 +3,13 @@ use iced::{
     widget::{button, column, container, scrollable, text, text_input},
 };
 
-use crate::theme::spacing;
+use crate::{messages::destination::Message, theme::spacing};
 
-#[derive(Debug, Clone)]
-pub(crate) enum Event {
-    Changed(String),
-    Selected(String),
-}
-
-pub(crate) fn jobcode_panel<'a>(current_code: &str, history: &'a [String]) -> Element<'a, Event> {
+pub(crate) fn jobcode_panel<'a>(current_code: &str, history: &'a [String]) -> Element<'a, Message> {
     let input_section = column![
         text("Job Code").size(13),
         text_input("e.g. CLIENT-001", current_code)
-            .on_input(Event::Changed)
+            .on_input(Message::JobCodeChanged)
             .size(12),
     ]
     .spacing(spacing::XS);
@@ -23,11 +17,11 @@ pub(crate) fn jobcode_panel<'a>(current_code: &str, history: &'a [String]) -> El
     let mut content = column![input_section].spacing(spacing::MD);
 
     if !history.is_empty() {
-        let history_items: Vec<Element<'a, Event>> = history
+        let history_items: Vec<Element<'a, Message>> = history
             .iter()
             .map(|code| {
                 button(text(code).size(11))
-                    .on_press(Event::Selected(code.clone()))
+                    .on_press(Message::JobCodeSelected(code.clone()))
                     .padding([4, 8])
                     .width(Fill)
                     .style(button::text)

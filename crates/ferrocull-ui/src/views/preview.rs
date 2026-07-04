@@ -1,7 +1,5 @@
 //! Full-screen preview mode for culling workflow.
 
-use std::path::PathBuf;
-
 use ferrocull_core::media::Item;
 use iced::{
     Alignment, Element, Fill,
@@ -9,29 +7,19 @@ use iced::{
 };
 use iced_aw::Spinner;
 
-use super::rating;
 use crate::{
+    messages::{Message, preview},
     styles,
     theme::spacing,
-    widgets::{self, ViewState, Viewer},
+    widgets::{ViewState, Viewer},
 };
-
-/// Module-level events emitted by the preview overlay.
-#[derive(Clone)]
-pub(crate) enum Event {
-    Close,
-    Prev,
-    Next,
-    ViewStateChanged(widgets::Event),
-    Item(PathBuf, rating::ItemEvent),
-}
 
 /// Renders the top bar with filename, position, and close button.
 pub(crate) fn top_bar(
     item: &Item,
     position: Option<usize>,
     total: usize,
-) -> Element<'static, Event> {
+) -> Element<'static, Message> {
     let palette = crate::theme::palette();
     let filename = item
         .path
@@ -52,7 +40,7 @@ pub(crate) fn top_bar(
     let close_btn = button(text("✕").size(14).color(palette.background.base.text))
         .padding([6, 12])
         .style(styles::ghost_button)
-        .on_press(Event::Close);
+        .on_press(Message::Preview(preview::Message::Close));
 
     container(
         row![
@@ -74,7 +62,7 @@ pub(crate) fn top_bar(
 pub(crate) fn image_area(
     preview_image: Option<&iced::widget::image::Handle>,
     view_state: ViewState,
-) -> Element<'static, Event> {
+) -> Element<'static, Message> {
     let Some(handle) = preview_image else {
         return center(Spinner::new().width(40.0).height(40.0).circle_radius(3.0))
             .width(Fill)
@@ -82,28 +70,30 @@ pub(crate) fn image_area(
             .into();
     };
 
-    Viewer::new(handle.clone(), view_state, Event::ViewStateChanged)
-        .min_scale(0.25)
-        .max_scale(8.0)
-        .scale_step(0.25)
-        .width(Fill)
-        .height(Fill)
-        .into()
+    Viewer::new(handle.clone(), view_state, |e| {
+        Message::Preview(preview::Message::ViewStateChanged(e))
+    })
+    .min_scale(0.25)
+    .max_scale(8.0)
+    .scale_step(0.25)
+    .width(Fill)
+    .height(Fill)
+    .into()
 }
 
 /// Renders the bottom bar with navigation and pre-mapped item controls.
-pub(crate) fn bottom_bar(item_controls: Element<'static, Event>) -> Element<'static, Event> {
+pub(crate) fn bottom_bar(item_controls: Element<'static, Message>) -> Element<'static, Message> {
     let palette = crate::theme::palette();
 
     let nav_prev = button(text("‹").size(24).color(palette.background.base.text))
         .padding([10, 20])
         .style(styles::ghost_button)
-        .on_press(Event::Prev);
+        .on_press(Message::Preview(preview::Message::Prev));
 
     let nav_next = button(text("›").size(24).color(palette.background.base.text))
         .padding([10, 20])
         .style(styles::ghost_button)
-        .on_press(Event::Next);
+        .on_press(Message::Preview(preview::Message::Next));
 
     container(
         row![
@@ -123,10 +113,10 @@ pub(crate) fn bottom_bar(item_controls: Element<'static, Event>) -> Element<'sta
 
 /// Assembles the full preview overlay from pre-built sub-elements.
 pub(crate) fn compose(
-    top: Element<'static, Event>,
-    image: Element<'static, Event>,
-    bottom: Element<'static, Event>,
-) -> Element<'static, Event> {
+    top: Element<'static, Message>,
+    image: Element<'static, Message>,
+    bottom: Element<'static, Message>,
+) -> Element<'static, Message> {
     let content = column![
         top,
         container(image)

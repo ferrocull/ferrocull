@@ -8,23 +8,14 @@ use iced::{
     widget::{Space, button, checkbox, column, container, progress_bar, row, text},
 };
 
-use crate::{styles, theme::spacing};
-
-#[derive(Debug, Clone)]
-pub(crate) enum Event {
-    Toggle(PathBuf),
-    Mount(PathBuf),
-    Unmount(PathBuf),
-    AddDirectory,
-    Refresh,
-}
+use crate::{messages::sources::Message, styles, theme::spacing};
 
 pub(crate) fn sources_panel(
     sources: &[Source],
     selected: &BTreeSet<PathBuf>,
-) -> Element<'static, Event> {
+) -> Element<'static, Message> {
     let palette = crate::theme::palette();
-    let source_list: Element<'static, Event> = if sources.is_empty() {
+    let source_list: Element<'static, Message> = if sources.is_empty() {
         container(
             text("No sources detected")
                 .size(12)
@@ -40,19 +31,19 @@ pub(crate) fn sources_panel(
                     None,
                     Some(Action {
                         label: "Mount",
-                        message: Event::Mount(s.device_path.clone()),
+                        message: Message::MountStorage(s.device_path.clone()),
                         style: styles::primary_button,
                     }),
                 ),
                 Source::Storage(s) => (
-                    Some(Event::Toggle(path.to_path_buf())),
+                    Some(Message::SourceToggled(path.to_path_buf())),
                     Some(Action {
                         label: "Unmount",
-                        message: Event::Unmount(s.device_path.clone()),
+                        message: Message::UnmountStorage(s.device_path.clone()),
                         style: styles::secondary_button,
                     }),
                 ),
-                _ => (Some(Event::Toggle(path.to_path_buf())), None),
+                _ => (Some(Message::SourceToggled(path.to_path_buf())), None),
             };
             let is_selected = toggle_msg.is_some() && selected.contains(path);
             source_row(source, is_selected, toggle_msg, action, &palette)
@@ -67,12 +58,12 @@ pub(crate) fn sources_panel(
                 .size(10)
                 .color(palette.background.base.text)
         )
-        .on_press(Event::AddDirectory)
+        .on_press(Message::AddDirectoryClicked)
         .padding([spacing::XS, spacing::SM])
         .style(styles::secondary_button),
         Space::new().width(Fill),
         button(text("Refresh").size(10).color(palette.background.weak.text))
-            .on_press(Event::Refresh)
+            .on_press(Message::RefreshSources)
             .padding([spacing::XS, spacing::SM])
             .style(styles::ghost_button),
     ]
@@ -85,17 +76,17 @@ pub(crate) fn sources_panel(
 
 struct Action {
     label: &'static str,
-    message: Event,
+    message: Message,
     style: fn(&iced::Theme, button::Status) -> button::Style,
 }
 
 fn source_row(
     source: &Source,
     is_selected: bool,
-    on_toggle: Option<Event>,
+    on_toggle: Option<Message>,
     action: Option<Action>,
     palette: &iced::theme::palette::Extended,
-) -> Element<'static, Event> {
+) -> Element<'static, Message> {
     let (icon, name, subtitle, storage) = match source {
         Source::Storage(s) => (
             "📁",

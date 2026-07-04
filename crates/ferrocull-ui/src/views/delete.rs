@@ -3,18 +3,16 @@ use iced::{
     widget::{checkbox, column, text},
 };
 
-use crate::theme::{colors, spacing};
-
-#[derive(Debug, Clone)]
-pub(crate) enum Event {
-    Toggled,
-}
+use crate::{
+    messages::destination::Message,
+    theme::{colors, spacing},
+};
 
 /// Delete after download toggle with warning.
-pub(crate) fn delete_panel(enabled: bool) -> Element<'static, Event> {
+pub(crate) fn delete_panel(enabled: bool) -> Element<'static, Message> {
     let toggle = checkbox(enabled)
         .label("Delete source files after download")
-        .on_toggle(|_| Event::Toggled)
+        .on_toggle(|_| Message::DeleteAfterDownloadToggled)
         .size(14)
         .text_size(12);
 
