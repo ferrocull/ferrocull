@@ -18,10 +18,22 @@ use crate::messages::{DownloadResult, Message, SuccessInfo, destination};
 
 pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<Message> {
     match msg {
-        destination::Message::PhotosDestChanged(path) => state.photos_dest = path,
-        destination::Message::VideosDestChanged(path) => state.videos_dest = path,
-        destination::Message::PhotoPatternChanged(pattern) => state.photo_pattern = pattern,
-        destination::Message::VideoPatternChanged(pattern) => state.video_pattern = pattern,
+        destination::Message::PhotosDestChanged(path) => {
+            state.photos_dest = path;
+            state.persist_settings();
+        }
+        destination::Message::VideosDestChanged(path) => {
+            state.videos_dest = path;
+            state.persist_settings();
+        }
+        destination::Message::PhotoPatternChanged(pattern) => {
+            state.photo_pattern = pattern;
+            state.persist_settings();
+        }
+        destination::Message::VideoPatternChanged(pattern) => {
+            state.video_pattern = pattern;
+            state.persist_settings();
+        }
         destination::Message::BrowsePhotosDest => {
             return pick_folder(|opt| {
                 Message::Destination(destination::Message::PhotosDestPicked(opt))
@@ -37,9 +49,11 @@ pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<M
         | destination::Message::BackupDestPicked(None) => {}
         destination::Message::PhotosDestPicked(Some(path)) => {
             state.photos_dest = path.display().to_string();
+            state.persist_settings();
         }
         destination::Message::VideosDestPicked(Some(path)) => {
             state.videos_dest = path.display().to_string();
+            state.persist_settings();
         }
         destination::Message::JobCodeChanged(code) => {
             if code.is_empty()
@@ -52,9 +66,9 @@ pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<M
         }
         destination::Message::JobCodeSelected(code) => {
             state.job_code_history.add(&code);
-            if let Err(e) = state.job_code_history.save(&state.jobcode_path) {
-                tracing::warn!(error = %e, "failed to save jobcode history");
-            }
+            state
+                .metadata
+                .set_job_code_history(state.job_code_history.codes());
             state.job_code = code;
         }
         destination::Message::AddBackupClicked => {
@@ -64,10 +78,12 @@ pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<M
         }
         destination::Message::RemoveBackup(idx) => {
             state.backup_destinations.remove(idx);
+            state.persist_settings();
         }
         destination::Message::BackupDestPicked(Some(path)) => state.handle_backup_picked(path),
         destination::Message::DeleteAfterDownloadToggled => {
             state.delete_after_download = !state.delete_after_download;
+            state.persist_settings();
         }
         destination::Message::StartDownload => return state.handle_start_download(),
     }
@@ -360,6 +376,7 @@ impl Ferrocull {
     fn handle_backup_picked(&mut self, path: PathBuf) {
         if !self.backup_destinations.contains(&path) {
             self.backup_destinations.push(path);
+            self.persist_settings();
         }
     }
 }

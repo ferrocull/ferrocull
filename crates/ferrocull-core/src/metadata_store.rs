@@ -9,7 +9,13 @@
 
 use std::path::Path;
 
-use crate::{MediaFile, media::ColorLabel, persistence::MediaDatabase, xmp::Metadata};
+use crate::{
+    MediaFile,
+    media::ColorLabel,
+    persistence::{AppSettings, MediaDatabase},
+    profiles::{NamedProfile, Profile},
+    xmp::Metadata,
+};
 
 /// Reads and writes culling metadata across the database, XMP sidecars, and memory.
 ///
@@ -65,6 +71,47 @@ impl Store {
         self.db
             .record_download(source_id, checksum, dest)
             .expect("record_download query failed");
+    }
+
+    #[must_use]
+    pub fn profiles(&self) -> Vec<NamedProfile> {
+        self.db.list_profiles().expect("list_profiles query failed")
+    }
+
+    pub fn save_profile(&mut self, name: &str, profile: &Profile) {
+        self.db
+            .save_profile(name, profile)
+            .expect("save_profile query failed");
+    }
+
+    pub fn delete_profile(&mut self, name: &str) {
+        self.db
+            .delete_profile(name)
+            .expect("delete_profile query failed");
+    }
+
+    #[must_use]
+    pub fn job_code_history(&self) -> Vec<String> {
+        self.db
+            .job_code_history()
+            .expect("job_code_history query failed")
+    }
+
+    pub fn set_job_code_history(&mut self, codes: &[String]) {
+        self.db
+            .set_job_code_history(codes)
+            .expect("set_job_code_history query failed");
+    }
+
+    #[must_use]
+    pub fn settings(&self) -> AppSettings {
+        self.db.settings().expect("settings query failed")
+    }
+
+    pub fn set_settings(&mut self, settings: &AppSettings) {
+        self.db
+            .set_settings(settings)
+            .expect("set_settings query failed");
     }
 }
 
@@ -191,5 +238,92 @@ mod tests {
     #[test]
     fn ingest_payload_skipped_for_default_metadata() {
         assert!(ingest_payload(&media_file(0, None)).is_none());
+    }
+
+    fn profile(photos: &str) -> Profile {
+        Profile {
+            ingest: crate::profiles::IngestConfig {
+                photos_dest: PathBuf::from(photos),
+                ..crate::profiles::IngestConfig::default()
+            },
+        }
+    }
+
+    #[test]
+    fn profiles_save_list_load_delete_roundtrip() {
+        let mut store = store();
+        assert!(store.profiles().is_empty());
+
+        store.save_profile("Wedding", &profile("/a"));
+        store.save_profile("Studio", &profile("/b"));
+
+        let by_name = store.profiles();
+        // Ordered by name.
+        assert_eq!(by_name.len(), 2);
+        assert_eq!(by_name[0].name, "Studio");
+        assert_eq!(by_name[1].name, "Wedding");
+        assert_eq!(by_name[1].profile.ingest.photos_dest, PathBuf::from("/a"));
+
+        // Save with existing name replaces the payload.
+        store.save_profile("Wedding", &profile("/c"));
+        let after_replace = store.profiles();
+        assert_eq!(after_replace.len(), 2);
+        assert_eq!(
+            after_replace[1].profile.ingest.photos_dest,
+            PathBuf::from("/c")
+        );
+
+        store.delete_profile("Studio");
+        let after_delete = store.profiles();
+        assert_eq!(after_delete.len(), 1);
+        assert_eq!(after_delete[0].name, "Wedding");
+    }
+
+    #[test]
+    fn job_code_history_roundtrips_with_order_and_dedup() {
+        let mut store = store();
+        assert!(store.job_code_history().is_empty());
+
+        let mut history = crate::JobCodeHistory::from_codes(store.job_code_history());
+        history.add("A");
+        history.add("B");
+        history.add("A"); // moves A to front, dedups
+        store.set_job_code_history(history.codes());
+
+        assert_eq!(
+            store.job_code_history(),
+            vec!["A".to_owned(), "B".to_owned()]
+        );
+
+        let reloaded = crate::JobCodeHistory::from_codes(store.job_code_history());
+        assert_eq!(reloaded.codes(), ["A", "B"]);
+    }
+
+    #[test]
+    fn settings_default_when_absent_then_roundtrip() {
+        let mut store = store();
+        let defaults = store.settings();
+        assert!(!defaults.delete_after_download);
+        assert!(defaults.post_download_hooks.is_empty());
+
+        let settings = AppSettings {
+            ingest: crate::profiles::IngestConfig {
+                photo_pattern: String::from("{filename}.{ext}"),
+                ..crate::profiles::IngestConfig::default()
+            },
+            post_download_hooks: vec![crate::Hook {
+                name: String::from("notify"),
+                command: String::from("echo done"),
+                enabled: true,
+            }],
+            delete_after_download: true,
+        };
+        store.set_settings(&settings);
+
+        let loaded = store.settings();
+        assert!(loaded.delete_after_download);
+        assert_eq!(loaded.ingest.photo_pattern, "{filename}.{ext}");
+        assert_eq!(loaded.post_download_hooks.len(), 1);
+        assert_eq!(loaded.post_download_hooks[0].command, "echo done");
     }
 }
