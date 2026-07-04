@@ -20,7 +20,6 @@ sha2 = "0.11"
 ferrocull-media = { workspace = true }
 tempfile = { workspace = true }
 thiserror.workspace = true
-toml = { workspace = true }
 tracing.workspace = true
 twox-hash = "2.1"
 

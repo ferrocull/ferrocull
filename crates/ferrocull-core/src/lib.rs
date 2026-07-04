@@ -10,7 +10,6 @@ pub mod pattern;
 pub mod persistence;
 pub mod profiles;
 pub mod scan;
-pub(crate) mod settings;
 pub mod thumbnail;
 pub mod xmp;
 
@@ -22,11 +21,8 @@ pub use history::JobCodeHistory;
 pub use hooks::Hook;
 pub use media::ColorLabel;
 pub use pattern::{Pattern, RenderContext};
-pub use profiles::{
-    NamedProfile, Profile, delete as delete_profile, load_all as load_profiles, profiles_dir,
-    save as save_profile,
-};
-pub use settings::{IngestConfig, Settings};
+pub use persistence::AppSettings;
+pub use profiles::{IngestConfig, NamedProfile, Profile};
 
 /// A media file with optional related files (RAW+JPEG pairs, sidecars).
 #[derive(Debug, Clone)]

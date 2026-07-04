@@ -12,13 +12,12 @@ use std::{
 };
 
 use ferrocull_core::{
-    ColorLabel, FileCategory, Hook, JobCodeHistory, NamedProfile,
+    AppSettings, ColorLabel, FileCategory, Hook, IngestConfig, JobCodeHistory, NamedProfile,
     cache::ThumbnailCache,
-    load_profiles,
     media::{DateSelection, FilterMode, SortOrder},
     metadata_store,
     persistence::MediaDatabase,
-    profiles_dir, scan,
+    scan,
 };
 use ferrocull_devices::{ScannedFile, Source};
 use iced::{
@@ -66,7 +65,6 @@ impl SectionState {
 const LEFT_PANEL_WIDTH: f32 = 250.0;
 const RIGHT_PANEL_WIDTH: f32 = 300.0;
 
-const DEFAULT_PATTERN: &str = "{YYYY}/{MM}/{DD}/{filename}.{ext}";
 const THUMBNAIL_SIZE: u32 = 256;
 
 struct ThumbnailProgress {
@@ -194,7 +192,6 @@ struct Ferrocull {
     scanning: bool,
     job_code: String,
     job_code_history: JobCodeHistory,
-    jobcode_path: PathBuf,
     backup_destinations: Vec<PathBuf>,
     profiles: Vec<NamedProfile>,
     current_profile: Option<String>,
@@ -228,18 +225,10 @@ struct Ferrocull {
 
 impl Default for Ferrocull {
     fn default() -> Self {
-        let profiles = profiles_dir()
-            .and_then(|dir| load_profiles(&dir))
-            .unwrap_or_else(|e| {
-                tracing::warn!("failed to load profiles: {e}");
-                Vec::new()
-            });
-        let sources = Vec::new();
         let data_dir = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Ferrocull");
         let db_path = data_dir.join("ferrocull.db");
-        let jobcode_path = data_dir.join("jobcodes.json");
 
         let db = match MediaDatabase::open(&db_path) {
             Ok(db) => db,
@@ -251,26 +240,20 @@ impl Default for Ferrocull {
                 panic!("cannot open database at {}: {e}", db_path.display());
             }
         };
-        let jobcode_history = JobCodeHistory::load(&jobcode_path).unwrap_or_else(|e| {
-            tracing::warn!("failed to load jobcode history: {e}");
-            JobCodeHistory::default()
-        });
+        let metadata = metadata_store::Store::new(db);
+        let profiles = metadata.profiles();
+        let job_code_history = JobCodeHistory::from_codes(metadata.job_code_history());
+        let settings = metadata.settings();
 
         Self {
             media: MediaView::new(),
             config: ViewConfig::with_defaults(),
             selected: BTreeSet::new(),
-            sources,
-            photos_dest: dirs::picture_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .to_string_lossy()
-                .into_owned(),
-            videos_dest: dirs::video_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .to_string_lossy()
-                .into_owned(),
-            photo_pattern: String::from(DEFAULT_PATTERN),
-            video_pattern: String::from(DEFAULT_PATTERN),
+            sources: Vec::new(),
+            photos_dest: settings.ingest.photos_dest.to_string_lossy().into_owned(),
+            videos_dest: settings.ingest.videos_dest.to_string_lossy().into_owned(),
+            photo_pattern: settings.ingest.photo_pattern,
+            video_pattern: settings.ingest.video_pattern,
             download_progress: None,
             last_download_failures: 0,
             status_message: None,
@@ -279,15 +262,14 @@ impl Default for Ferrocull {
             thumbnail_jobs_in_flight: 0,
             scanning: false,
             job_code: String::new(),
-            job_code_history: jobcode_history,
-            jobcode_path,
-            backup_destinations: Vec::new(),
+            job_code_history,
+            backup_destinations: settings.ingest.backup_destinations,
             profiles,
             current_profile: None,
             profile_name_input: String::new(),
-            hooks: Vec::new(),
-            delete_after_download: false,
-            metadata: metadata_store::Store::new(db),
+            hooks: settings.post_download_hooks,
+            delete_after_download: settings.delete_after_download,
+            metadata,
             sections: SectionState::with_defaults(),
             expanded_years: BTreeSet::new(),
             expanded_months: BTreeSet::new(),
@@ -370,6 +352,23 @@ impl Ferrocull {
     fn group_of(&self, idx: usize) -> Vec<usize> {
         self.media
             .group_of(idx, self.config.group_bursts, self.config.group_raw_jpeg)
+    }
+
+    /// Snapshots the persisted working settings and writes them to the store.
+    /// Called at every mutation site of a persisted field.
+    fn persist_settings(&mut self) {
+        let settings = AppSettings {
+            ingest: IngestConfig {
+                photos_dest: PathBuf::from(&self.photos_dest),
+                videos_dest: PathBuf::from(&self.videos_dest),
+                photo_pattern: self.photo_pattern.clone(),
+                video_pattern: self.video_pattern.clone(),
+                backup_destinations: self.backup_destinations.clone(),
+            },
+            post_download_hooks: self.hooks.clone(),
+            delete_after_download: self.delete_after_download,
+        };
+        self.metadata.set_settings(&settings);
     }
 
     fn handle_thumbnail_cached(&mut self) {
@@ -836,14 +835,6 @@ fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::HooksComplete | Message::Noop => Task::none(),
-        Message::ProfileSaved(result) => {
-            state.handle_profile_saved(result);
-            Task::none()
-        }
-        Message::ProfileDeleted(result) => {
-            state.handle_profile_deleted(result);
-            Task::none()
-        }
         Message::SourcesRefreshed(storage_devices) => {
             state.handle_sources_refreshed(storage_devices);
             Task::none()

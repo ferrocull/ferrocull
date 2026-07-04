@@ -248,8 +248,6 @@ pub(crate) enum Message {
     SourcesRefreshed(Result<Vec<ferrocull_devices::StorageDevice>, ferrocull_devices::ScanError>),
     MountResult(PathBuf, Result<PathBuf, String>),
     UnmountResult(PathBuf, Result<(), String>),
-    ProfileSaved(Result<(String, Vec<ferrocull_core::NamedProfile>), String>),
-    ProfileDeleted(Result<(Option<String>, Vec<ferrocull_core::NamedProfile>), String>),
     Tick,
     OsThemeDetected(bool),
     /// No-op message — produced by `spawn_blocking` panic fallbacks where the

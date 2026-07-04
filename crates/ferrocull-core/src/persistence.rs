@@ -7,8 +7,23 @@ use std::{
 
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
-use crate::media::ColorLabel;
+use crate::{
+    hooks::Hook,
+    media::ColorLabel,
+    profiles::{IngestConfig, Profile},
+};
+
+/// The app's persisted working settings, restored at startup and written on change.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppSettings {
+    pub ingest: IngestConfig,
+    pub post_download_hooks: Vec<Hook>,
+    /// Delete source files after successful download and checksum verification.
+    pub delete_after_download: bool,
+}
 
 /// Errors from database operations.
 #[derive(Debug, thiserror::Error)]
@@ -18,8 +33,17 @@ pub enum Error {
         operation: &'static str,
         source: rusqlite::Error,
     },
+    #[error("serialization error during {operation}: {source}")]
+    Serde {
+        operation: &'static str,
+        source: serde_json::Error,
+    },
     #[error("{path}: {source}")]
     Io { path: PathBuf, source: io::Error },
+}
+
+fn serde_err(operation: &'static str) -> impl FnOnce(serde_json::Error) -> Error {
+    move |source| Error::Serde { operation, source }
 }
 
 fn db_err(operation: &'static str) -> impl FnOnce(rusqlite::Error) -> Error {
@@ -78,8 +102,36 @@ impl MediaDatabase {
             )",
             [],
         )
+        .map_err(db_err("create ratings table"))?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS profiles (
+                name TEXT PRIMARY KEY,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )
+        .map_err(db_err("create profiles table"))?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS jobcode_history (
+                position INTEGER PRIMARY KEY,
+                code TEXT NOT NULL
+            )",
+            [],
+        )
+        .map_err(db_err("create jobcode_history table"))?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (
+                id INTEGER PRIMARY KEY CHECK (id = 0),
+                payload TEXT NOT NULL
+            )",
+            [],
+        )
         .map(drop)
-        .map_err(db_err("create ratings table"))
+        .map_err(db_err("create settings table"))
     }
 
     /// Records a successful download.
@@ -180,5 +232,112 @@ impl MediaDatabase {
             )
             .optional()
             .map_err(db_err("query metadata"))
+    }
+
+    /// All saved profiles, ordered by name.
+    pub fn list_profiles(&self) -> Result<Vec<crate::profiles::NamedProfile>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, payload FROM profiles ORDER BY name")
+            .map_err(db_err("prepare list profiles"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_err("query profiles"))?;
+
+        let mut profiles = Vec::new();
+        for row in rows {
+            let (name, payload) = row.map_err(db_err("read profile row"))?;
+            let profile: Profile =
+                serde_json::from_str(&payload).map_err(serde_err("deserialize profile"))?;
+            profiles.push(crate::profiles::NamedProfile { name, profile });
+        }
+        Ok(profiles)
+    }
+
+    /// Inserts or replaces a profile by name.
+    pub fn save_profile(&mut self, name: &str, profile: &Profile) -> Result<(), Error> {
+        let payload = serde_json::to_string(profile).map_err(serde_err("serialize profile"))?;
+        let now = Utc::now().to_rfc3339();
+
+        self.conn
+            .execute(
+                "INSERT INTO profiles (name, payload, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
+                params![name, payload, now],
+            )
+            .map(drop)
+            .map_err(db_err("save profile"))
+    }
+
+    /// Deletes a profile by name. A no-op if the name is absent.
+    pub fn delete_profile(&mut self, name: &str) -> Result<(), Error> {
+        self.conn
+            .execute("DELETE FROM profiles WHERE name = ?1", params![name])
+            .map(drop)
+            .map_err(db_err("delete profile"))
+    }
+
+    /// Job code history, ordered most-recent first.
+    pub fn job_code_history(&self) -> Result<Vec<String>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT code FROM jobcode_history ORDER BY position")
+            .map_err(db_err("prepare job code history"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(db_err("query job code history"))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db_err("read job code history"))
+    }
+
+    /// Replaces the job code history with `codes` (index 0 is most recent).
+    pub fn set_job_code_history(&mut self, codes: &[String]) -> Result<(), Error> {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(db_err("begin job code history transaction"))?;
+        tx.execute("DELETE FROM jobcode_history", [])
+            .map_err(db_err("clear job code history"))?;
+        for (position, code) in codes.iter().enumerate() {
+            let position = i64::try_from(position).expect("job code history index fits i64");
+            tx.execute(
+                "INSERT INTO jobcode_history (position, code) VALUES (?1, ?2)",
+                params![position, code],
+            )
+            .map_err(db_err("insert job code"))?;
+        }
+        tx.commit().map_err(db_err("commit job code history"))
+    }
+
+    /// The persisted app settings, or defaults when none are stored yet.
+    pub fn settings(&self) -> Result<AppSettings, Error> {
+        let payload: Option<String> = self
+            .conn
+            .query_row("SELECT payload FROM settings WHERE id = 0", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(db_err("query settings"))?;
+
+        payload.map_or_else(
+            || Ok(AppSettings::default()),
+            |json| serde_json::from_str(&json).map_err(serde_err("deserialize settings")),
+        )
+    }
+
+    /// Writes the app settings, replacing any prior row.
+    pub fn set_settings(&mut self, settings: &AppSettings) -> Result<(), Error> {
+        let payload = serde_json::to_string(settings).map_err(serde_err("serialize settings"))?;
+
+        self.conn
+            .execute(
+                "INSERT INTO settings (id, payload) VALUES (0, ?1)
+             ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
+                params![payload],
+            )
+            .map(drop)
+            .map_err(db_err("save settings"))
     }
 }
