@@ -8,9 +8,6 @@ use crate::messages::{Message, grid};
 
 pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message> {
     match msg {
-        grid::Message::Scrolled(viewport) => {
-            state.grid_viewport_width = viewport.bounds().width;
-        }
         grid::Message::ThumbnailVisible(item_idx) => {
             return state.load_thumbnail(item_idx);
         }

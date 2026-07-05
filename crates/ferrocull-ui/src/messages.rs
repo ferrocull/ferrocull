@@ -53,13 +53,10 @@ pub(crate) mod grid {
 
     use chrono::{DateTime, Utc};
     use ferrocull_core::ColorLabel;
-    use iced::widget::scrollable;
 
     /// Messages for grid and media item interactions.
     #[derive(Debug, Clone)]
     pub(crate) enum Message {
-        /// Scroll position changed — records viewport width for grid cache key.
-        Scrolled(scrollable::Viewport),
         /// Click on thumbnail: sets focus to this item.
         FileFocused(PathBuf),
         /// Cmd/Ctrl+Click on thumbnail: toggles selection.
@@ -250,6 +247,11 @@ pub(crate) enum Message {
     UnmountResult(PathBuf, Result<(), String>),
     Tick,
     OsThemeDetected(bool),
+    /// Main window opened — kicks off the initial scale-factor fetch.
+    WindowOpened(iced::window::Id),
+    /// Window scale factor (initial fetch or monitor change) — grid cell
+    /// widths are floored to whole physical pixels with it.
+    WindowScaleChanged(f32),
     /// No-op message — produced by `spawn_blocking` panic fallbacks where the
     /// task failure has already been logged and the caller has nothing to do.
     Noop,

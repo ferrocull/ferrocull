@@ -205,7 +205,6 @@ struct Ferrocull {
     expanded_years: BTreeSet<i32>,
     expanded_months: BTreeSet<(i32, u32)>,
     loaded_thumbs: HashMap<PathBuf, iced::widget::image::Handle>,
-    grid_viewport_width: f32,
     hovered_thumbnail: Option<usize>,
     hovered_star: Option<i8>,
     focused_index: Option<usize>,
@@ -220,6 +219,9 @@ struct Ferrocull {
     view_mode: ViewMode,
     /// Current date for "Today"/"Yesterday" headers. Updated on each message.
     today: chrono::NaiveDate,
+    /// OS window scale factor, tracked via `window::Event::Rescaled` — the
+    /// thumbnail grid floors cell widths to whole physical pixels with it.
+    window_scale: f32,
 }
 
 impl Default for Ferrocull {
@@ -273,7 +275,6 @@ impl Default for Ferrocull {
             expanded_years: BTreeSet::new(),
             expanded_months: BTreeSet::new(),
             loaded_thumbs: HashMap::new(),
-            grid_viewport_width: 0.0,
             hovered_thumbnail: None,
             hovered_star: None,
             focused_index: None,
@@ -285,6 +286,7 @@ impl Default for Ferrocull {
             preview_generation: 0,
             view_mode: ViewMode::Grid,
             today: chrono::Local::now().date_naive(),
+            window_scale: 1.0,
         }
     }
 }
@@ -688,7 +690,12 @@ fn subscription(_state: &Ferrocull) -> Subscription<Message> {
     });
     let tick = iced::time::every(std::time::Duration::from_mins(1)).map(|_| Message::Tick);
     let devices = Subscription::run(device_events);
-    Subscription::batch([keys, tick, devices])
+    let window = iced::window::events().filter_map(|(id, event)| match event {
+        iced::window::Event::Opened { .. } => Some(Message::WindowOpened(id)),
+        iced::window::Event::Rescaled(scale) => Some(Message::WindowScaleChanged(scale)),
+        _ => None,
+    });
+    Subscription::batch([keys, tick, devices, window])
 }
 
 /// Subscription that turns storage hotplug events into source rescans,
@@ -831,6 +838,13 @@ fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
         }
         Message::OsThemeDetected(is_dark) => {
             crate::theme::set_os_is_dark(is_dark);
+            Task::none()
+        }
+        Message::WindowOpened(id) => {
+            iced::window::scale_factor(id).map(Message::WindowScaleChanged)
+        }
+        Message::WindowScaleChanged(scale) => {
+            state.window_scale = scale;
             Task::none()
         }
         Message::HooksComplete | Message::Noop => Task::none(),
@@ -1110,7 +1124,6 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
     let command_held = state.modifiers.command();
 
     let cache_key = GridCacheKey {
-        viewport_width_bits: state.grid_viewport_width.to_bits(),
         item_count: state.media.len(),
         item_content_version: state.media.version(),
         selected: state.selected.clone(),
@@ -1138,7 +1151,8 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         state.media.burst_of(),
         state.media.burst_map(),
         state.today,
-        cache_key,
+        state.window_scale,
+        &cache_key,
     )
     .map(move |event| match event {
         views::thumbnails::Event::CellClicked(path) => {
@@ -1169,7 +1183,6 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         views::thumbnails::Event::ThumbnailHidden(idx) => {
             Message::Grid(grid_msg::Message::ThumbnailHidden(idx))
         }
-        views::thumbnails::Event::Scrolled(vp) => Message::Grid(grid_msg::Message::Scrolled(vp)),
     })
 }
 
