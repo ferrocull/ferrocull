@@ -10,7 +10,7 @@ use ferrocull_core::{
     media::{DateSelection, FilterMode, Item, SortKey, SortOrder},
 };
 use iced::{
-    Color, ContentFit, Element, Fill, Length,
+    Color, ContentFit, Element, Fill,
     widget::{
         Stack, center, column, container, grid, image, lazy, mouse_area, opaque, scrollable,
         sensor, text,
@@ -82,8 +82,6 @@ pub(crate) struct GridCacheKey {
     pub focused_index: Option<usize>,
 }
 
-/// Size of the thumbnail image container.
-const THUMBNAIL_SIZE: f32 = 200.0;
 /// Total cell width including padding for controls.
 pub(crate) const CELL_WIDTH: f32 = 224.0;
 /// Widget ID for the thumbnail scrollable — used by `snap_to` to scroll to items.
@@ -332,13 +330,9 @@ fn item_grid(
     build_cell: &impl Fn(IndexedItem) -> Element<'static, Event>,
 ) -> iced::widget::Grid<'static, Event, iced::Theme, iced::Renderer> {
     grid(items.into_iter().map(build_cell))
-        .fluid(CELL_WIDTH + 8.0)
-        .height(Length::Shrink)
+        .fluid(CELL_WIDTH)
         .spacing(spacing::SM)
 }
-
-/// Total card size including padding around thumbnail.
-pub(crate) const CARD_SIZE: f32 = THUMBNAIL_SIZE + 2.0 * spacing::SM;
 
 /// Renders a thumbnail card with image, overlays, badges, and interaction handlers.
 fn thumbnail_card(
@@ -359,31 +353,33 @@ fn thumbnail_card(
     };
 
     let image_content: Element<'static, CellEvent> = thumb.map_or_else(placeholder, |handle| {
-        container(image(handle.clone()).content_fit(ContentFit::ScaleDown))
-            .width(THUMBNAIL_SIZE)
-            .height(THUMBNAIL_SIZE)
-            .center_x(Fill)
-            .center_y(Fill)
+        image(handle.clone())
+            .content_fit(ContentFit::Contain)
+            .width(Fill)
+            .height(Fill)
             .into()
     });
 
     let padded_image: Element<'static, CellEvent> = container(image_content)
-        .width(CARD_SIZE)
-        .height(CARD_SIZE)
-        .center_x(Fill)
-        .center_y(Fill)
+        .width(Fill)
+        .height(Fill)
         .into();
 
     let stack = cell_overlays(padded_image, item, state, show_pair, burst, hovered_star);
 
-    // When focused, add border and padding to prevent content overlap
     let border = iced::Border {
         radius: radius::MD.into(),
-        width: if state.is_focused { 2.0 } else { 0.0 },
-        color: colors::ACCENT,
+        width: 2.0,
+        color: if state.is_focused {
+            colors::ACCENT
+        } else {
+            Color::TRANSPARENT
+        },
     };
     let card = container(stack)
         .padding(border.width)
+        .width(Fill)
+        .height(Fill)
         .style(styles::thumbnail_card(card_bg, border));
 
     mouse_area(card)
@@ -403,28 +399,28 @@ fn cell_overlays(
     burst: Option<BurstBadgeInfo>,
     hovered_star: Option<i8>,
 ) -> Stack<'static, CellEvent> {
-    let mut stack = Stack::new().width(CARD_SIZE).height(CARD_SIZE).push(base);
+    let mut stack = Stack::new().width(Fill).height(Fill).push(base);
 
     if item.rating == -1 {
-        stack = stack.push(rejected_badge(CARD_SIZE));
+        stack = stack.push(rejected_badge());
     } else if item.is_downloaded {
-        stack = stack.push(color_overlay(colors::OVERLAY_DOWNLOADED, CARD_SIZE));
+        stack = stack.push(color_overlay(colors::OVERLAY_DOWNLOADED));
     }
 
     if show_pair {
-        stack = stack.push(pair_badge(CARD_SIZE));
+        stack = stack.push(pair_badge());
     }
 
     if let Some(burst) = burst {
-        stack = stack.push(burst_badge(CARD_SIZE, burst.count, burst.burst_key));
+        stack = stack.push(burst_badge(burst.count, burst.burst_key));
     }
 
     if let Some(label) = item.color_label {
-        stack = stack.push(color_label_bar(CARD_SIZE, label));
+        stack = stack.push(color_label_bar(label));
     }
 
     if !state.is_hovered && item.rating > 0 {
-        stack = stack.push(rated_badge(CARD_SIZE, item.rating));
+        stack = stack.push(rated_badge(item.rating));
     }
 
     if state.is_hovered {
@@ -435,14 +431,9 @@ fn cell_overlays(
             .to_string_lossy()
             .into_owned();
 
-        stack = stack.push(bottom_info_overlay(
-            CARD_SIZE,
-            item.rating,
-            hovered_star,
-            filename,
-        ));
+        stack = stack.push(bottom_info_overlay(item.rating, hovered_star, filename));
 
-        stack = stack.push(preview_icon(CARD_SIZE));
+        stack = stack.push(preview_icon());
     }
 
     stack
@@ -450,7 +441,6 @@ fn cell_overlays(
 
 /// Bottom overlay with stars and filename on semi-transparent background.
 fn bottom_info_overlay(
-    size: f32,
     rating: i8,
     hovered_star: Option<i8>,
     filename: String,
@@ -467,56 +457,56 @@ fn bottom_info_overlay(
         .align_x(iced::Alignment::Center);
 
     let info_bar = container(info_column)
-        .width(size)
+        .width(Fill)
         .padding(4)
         .style(styles::solid_fill(colors::OVERLAY_BADGE));
 
     container(info_bar)
-        .width(size)
-        .height(size)
+        .width(Fill)
+        .height(Fill)
         .align_y(iced::alignment::Vertical::Bottom)
         .into()
 }
 
 fn placeholder<Message: 'static>() -> Element<'static, Message> {
     container(center(text("?").size(24)))
-        .width(THUMBNAIL_SIZE)
-        .height(THUMBNAIL_SIZE)
+        .width(Fill)
+        .height(Fill)
         .style(container::bordered_box)
         .into()
 }
 
 /// "R+J" badge positioned in bottom-right corner for RAW+JPEG pairs.
-fn pair_badge<Message: 'static>(size: f32) -> Element<'static, Message> {
+fn pair_badge<Message: 'static>() -> Element<'static, Message> {
     let badge = container(text("R+J").size(9))
         .padding([2, 4])
         .style(styles::overlay_badge);
 
     container(badge)
-        .width(size)
-        .height(size)
+        .width(Fill)
+        .height(Fill)
         .align_x(iced::alignment::Horizontal::Right)
         .align_y(iced::alignment::Vertical::Bottom)
         .padding(spacing::XS)
         .into()
 }
 
-fn color_overlay<Message: 'static>(color: Color, size: f32) -> Element<'static, Message> {
+fn color_overlay<Message: 'static>(color: Color) -> Element<'static, Message> {
     container(opaque(container("").width(Fill).height(Fill)))
-        .width(size)
-        .height(size)
+        .width(Fill)
+        .height(Fill)
         .style(styles::solid_fill(color))
         .into()
 }
 
-fn rejected_badge<Message: 'static>(size: f32) -> Element<'static, Message> {
+fn rejected_badge<Message: 'static>() -> Element<'static, Message> {
     let badge = container(text("X").size(10))
         .padding([2, 6])
         .style(styles::rounded_badge(colors::BADGE_REJECTED));
 
     container(badge)
-        .width(size)
-        .height(size)
+        .width(Fill)
+        .height(Fill)
         .align_x(iced::alignment::Horizontal::Left)
         .align_y(iced::alignment::Vertical::Top)
         .padding(spacing::XS)
@@ -524,14 +514,14 @@ fn rejected_badge<Message: 'static>(size: f32) -> Element<'static, Message> {
 }
 
 /// Rating indicator badge positioned in bottom-left corner (shown when not hovered).
-fn rated_badge<Message: 'static>(size: f32, rating: i8) -> Element<'static, Message> {
+fn rated_badge<Message: 'static>(rating: i8) -> Element<'static, Message> {
     let badge = container(text(format!("★{rating}")).size(10).color(colors::WARNING))
         .padding([2, 4])
         .style(styles::overlay_badge);
 
     container(badge)
-        .width(size)
-        .height(size)
+        .width(Fill)
+        .height(Fill)
         .align_x(iced::alignment::Horizontal::Left)
         .align_y(iced::alignment::Vertical::Bottom)
         .padding(spacing::XS)
@@ -539,7 +529,7 @@ fn rated_badge<Message: 'static>(size: f32, rating: i8) -> Element<'static, Mess
 }
 
 /// Burst count badge positioned in top-right corner.
-fn burst_badge(size: f32, count: usize, burst_key: DateTime<Utc>) -> Element<'static, CellEvent> {
+fn burst_badge(count: usize, burst_key: DateTime<Utc>) -> Element<'static, CellEvent> {
     let badge = container(text(format!("{count}")).size(10))
         .padding([2, 6])
         .style(styles::rounded_badge(colors::BADGE_BURST));
@@ -547,8 +537,8 @@ fn burst_badge(size: f32, count: usize, burst_key: DateTime<Utc>) -> Element<'st
     let clickable_badge = mouse_area(badge).on_press(CellEvent::BurstToggle(burst_key));
 
     container(clickable_badge)
-        .width(size)
-        .height(size)
+        .width(Fill)
+        .height(Fill)
         .align_x(iced::alignment::Horizontal::Right)
         .align_y(iced::alignment::Vertical::Top)
         .padding(spacing::XS)
@@ -556,23 +546,23 @@ fn burst_badge(size: f32, count: usize, burst_key: DateTime<Utc>) -> Element<'st
 }
 
 /// Color label bar at the bottom of the thumbnail card.
-fn color_label_bar<Message: 'static>(size: f32, label: ColorLabel) -> Element<'static, Message> {
+fn color_label_bar<Message: 'static>(label: ColorLabel) -> Element<'static, Message> {
     let color = COLOR_LABELS[u8::from(label) as usize];
 
     let bar = container("")
-        .width(size)
+        .width(Fill)
         .height(4.0)
         .style(styles::solid_fill(color));
 
     container(bar)
-        .width(size)
-        .height(CARD_SIZE)
+        .width(Fill)
+        .height(Fill)
         .align_y(iced::alignment::Vertical::Bottom)
         .into()
 }
 
 /// Preview icon (magnifying glass) positioned in bottom-right corner on hover.
-fn preview_icon(size: f32) -> Element<'static, CellEvent> {
+fn preview_icon() -> Element<'static, CellEvent> {
     let icon = container(text("\u{1F50D}").size(14))
         .padding([4, 6])
         .style(styles::rounded_badge(
@@ -580,8 +570,8 @@ fn preview_icon(size: f32) -> Element<'static, CellEvent> {
         ));
 
     container(mouse_area(icon).on_press(CellEvent::DoubleClicked))
-        .width(size)
-        .height(size)
+        .width(Fill)
+        .height(Fill)
         .align_x(iced::alignment::Horizontal::Right)
         .align_y(iced::alignment::Vertical::Bottom)
         .padding(spacing::XS)
