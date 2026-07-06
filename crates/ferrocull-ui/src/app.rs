@@ -222,6 +222,41 @@ struct Ferrocull {
     /// OS window scale factor, tracked via `window::Event::Rescaled` — the
     /// thumbnail grid floors cell widths to whole physical pixels with it.
     window_scale: f32,
+    /// Tracked absolute y offset of the thumbnail scrollable, kept in sync via
+    /// the scrollable's `on_scroll` (drags, keyboard, and programmatic scrolls).
+    grid_scroll_y: f32,
+    /// Last measured grid content width (`None` until the first layout). Drives
+    /// row math and resize re-anchoring.
+    grid_area_width: Option<f32>,
+    /// Display ordinal of the card whose row is pinned at the viewport top.
+    /// Updated when the user scrolls; reflows re-anchor to it unchanged, so a
+    /// resize drag keeps pinning the same card (and resizing back restores it).
+    grid_anchor: usize,
+    /// Last seen scrollable viewport height, to tell user scrolls from clamps.
+    grid_viewport_height: f32,
+    /// Last seen scrollable content height, to tell user scrolls from clamps.
+    grid_content_height: f32,
+    /// Fractional carry for hi-res wheels: whole line steps move a row, the
+    /// remainder accumulates toward the next.
+    grid_wheel_lines: f32,
+    /// Memoized grid row model. The row starts only change when the media view,
+    /// sort/grouping, or derived column geometry change, but `on_scroll` fires
+    /// many times per second — this caches the `O(items)` `section_counts` walk
+    /// so a scroll frame doesn't rebuild it.
+    grid_rows_cache: Option<(GridRowsKey, Vec<views::thumbnails::RowStart>)>,
+}
+
+/// Invalidation key for [`Ferrocull::grid_rows`]'s memoized row model. Captures
+/// everything the row starts depend on: the media view (`media_version`), the
+/// section layout (`ascending`, `grouped`), and the column geometry
+/// (`width_bits`, `scale_bits`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GridRowsKey {
+    media_version: u64,
+    ascending: bool,
+    grouped: bool,
+    width_bits: u32,
+    scale_bits: u32,
 }
 
 impl Default for Ferrocull {
@@ -287,6 +322,13 @@ impl Default for Ferrocull {
             view_mode: ViewMode::Grid,
             today: chrono::Local::now().date_naive(),
             window_scale: 1.0,
+            grid_scroll_y: 0.0,
+            grid_area_width: None,
+            grid_anchor: 0,
+            grid_viewport_height: 0.0,
+            grid_content_height: 0.0,
+            grid_wheel_lines: 0.0,
+            grid_rows_cache: None,
         }
     }
 }
@@ -844,8 +886,18 @@ fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
             iced::window::scale_factor(id).map(Message::WindowScaleChanged)
         }
         Message::WindowScaleChanged(scale) => {
-            state.window_scale = scale;
-            Task::none()
+            // Scale changes cell width at constant grid width, so the same
+            // re-anchor keeps the top row pinned.
+            match state.grid_area_width {
+                Some(width) if (scale - state.window_scale).abs() > f32::EPSILON => {
+                    state.window_scale = scale;
+                    state.reanchor_grid(width)
+                }
+                _ => {
+                    state.window_scale = scale;
+                    Task::none()
+                }
+            }
         }
         Message::HooksComplete | Message::Noop => Task::none(),
         Message::SourcesRefreshed(storage_devices) => {
@@ -1183,6 +1235,18 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         views::thumbnails::Event::ThumbnailHidden(idx) => {
             Message::Grid(grid_msg::Message::ThumbnailHidden(idx))
         }
+        views::thumbnails::Event::Wheel(delta) => Message::Grid(grid_msg::Message::Wheel(delta)),
+        views::thumbnails::Event::Scrolled {
+            offset,
+            grid_width,
+            viewport_height,
+            content_height,
+        } => Message::Grid(grid_msg::Message::Scrolled {
+            offset,
+            grid_width,
+            viewport_height,
+            content_height,
+        }),
     })
 }
 

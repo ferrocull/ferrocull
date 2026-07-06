@@ -51,6 +51,18 @@ pub(crate) enum Event {
     BurstToggle(DateTime<Utc>),
     ThumbnailVisible(usize),
     ThumbnailHidden(usize),
+    /// Wheel scrolled over the grid — the parent snaps row-by-row.
+    Wheel(iced::mouse::ScrollDelta),
+    /// Viewport report from the scrollable: absolute y offset plus the grid's
+    /// available width and the viewport/content heights (fires on scrolls,
+    /// window resizes, and item loads). The heights let the parent tell a user
+    /// scroll from an offset clamp caused by a geometry change.
+    Scrolled {
+        offset: f32,
+        grid_width: f32,
+        viewport_height: f32,
+        content_height: f32,
+    },
 }
 
 /// Cache key derived from grid-affecting state. Uses monotonic `item_version`
@@ -104,7 +116,7 @@ pub(crate) const GRID_SCROLLABLE_ID: &str = "thumbnail-grid";
     clippy::cast_precision_loss,
     reason = "column count is far below f32's 2^23 exact-integer range"
 )]
-fn grid_metrics(available: f32, scale: f32) -> (usize, f32) {
+pub(crate) fn grid_metrics(available: f32, scale: f32) -> (usize, f32) {
     let cols = (((available + spacing::SM) / (CELL_WIDTH + spacing::SM)).ceil() as usize).max(1);
     let exact = (available - spacing::SM * (cols - 1) as f32) / cols as f32;
     let cell_width = (exact * scale).floor() / scale;
@@ -119,6 +131,212 @@ fn grid_metrics(available: f32, scale: f32) -> (usize, f32) {
 )]
 fn grid_width(cols: usize, cell_width: f32) -> f32 {
     cell_width * cols as f32 + spacing::SM * (cols - 1) as f32
+}
+
+/// Fixed height of a date section header, so the update-side row model does not
+/// depend on text metrics. Applied via `.height(...)` on the header container.
+pub(crate) const DATE_HEADER_HEIGHT: f32 = 26.0;
+
+/// Half-a-pixel-plus tolerance so an already-aligned offset counts as sitting
+/// exactly on a row boundary despite `f32` round-trips.
+const ROW_EPS: f32 = 1.0;
+
+/// One grid row's scroll anchor: the offset that lands it at the viewport top,
+/// and the display-order index of its first card. Plain rows keep an `SM` gap
+/// above them — exactly the inter-row spacing, so the previous row ends at the
+/// viewport edge without its card bottoms bleeding in. Section-first rows
+/// anchor their header with an `MD` gap; the `LG` section spacing above absorbs
+/// it without bleed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RowStart {
+    pub offset: f32,
+    pub ordinal: usize,
+}
+
+/// Scroll anchors for every grid row, in display order.
+///
+/// `section_counts` is the card count per date section (a single entry in
+/// ungrouped mode). The first row of each section anchors to the section top so
+/// its header stays visible; later rows anchor to the row itself. Square cells
+/// make the row pitch `cell_width + spacing::SM`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "row and column counts are far below f32's exact-integer range"
+)]
+pub(crate) fn row_starts(
+    section_counts: &[usize],
+    cols: usize,
+    cell_width: f32,
+    grouped: bool,
+) -> Vec<RowStart> {
+    let pitch = cell_width + spacing::SM;
+    let mut rows = Vec::new();
+    // Content-y cursor; starts at the scrollable content's MD top padding.
+    let mut y = spacing::MD;
+    let mut ordinal = 0;
+    for &count in section_counts {
+        let num_rows = count.div_ceil(cols);
+        let header_top = y;
+        let grid_top = if grouped {
+            header_top + DATE_HEADER_HEIGHT + spacing::XS
+        } else {
+            header_top
+        };
+        for r in 0..num_rows {
+            let row_top = grid_top + r as f32 * pitch;
+            let offset = if r == 0 {
+                header_top - spacing::MD
+            } else {
+                row_top - spacing::SM
+            };
+            rows.push(RowStart {
+                offset,
+                ordinal: ordinal + r * cols,
+            });
+        }
+        ordinal += count;
+        let grid_height =
+            num_rows as f32 * cell_width + num_rows.saturating_sub(1) as f32 * spacing::SM;
+        y = grid_top + grid_height + spacing::LG;
+    }
+    rows
+}
+
+/// Display-order card count per date section (Time sort) or a single section
+/// (any other sort). Time sort keeps each date contiguous, so counting runs
+/// over `sorted_view` reproduces exactly what the grouped view renders.
+pub(crate) fn section_counts(
+    items: &[Item],
+    sorted_view: &BTreeMap<SortKey, usize>,
+    ascending: bool,
+    grouped: bool,
+) -> Vec<usize> {
+    if !grouped {
+        return if sorted_view.is_empty() {
+            Vec::new()
+        } else {
+            vec![sorted_view.len()]
+        };
+    }
+    let ordered: Box<dyn Iterator<Item = usize>> = if ascending {
+        Box::new(sorted_view.values().copied())
+    } else {
+        Box::new(sorted_view.values().rev().copied())
+    };
+    let mut counts: Vec<usize> = Vec::new();
+    let mut current: Option<NaiveDate> = None;
+    for idx in ordered {
+        let date = capture_date(&items[idx]);
+        if current == Some(date) {
+            *counts
+                .last_mut()
+                .expect("current date implies a section exists") += 1;
+        } else {
+            counts.push(1);
+            current = Some(date);
+        }
+    }
+    counts
+}
+
+/// Row index `steps` rows from `offset` (positive down, negative up). When
+/// `offset` sits between rows, stepping re-aligns to the nearest boundary in the
+/// direction of travel; clamps within the list, and returns `None` when there is
+/// no row boundary in the direction of travel (already at the first/last).
+pub(crate) fn step_row(rows: &[RowStart], offset: f32, steps: i32) -> Option<usize> {
+    match steps.cmp(&0) {
+        std::cmp::Ordering::Greater => {
+            let first = rows.iter().position(|r| r.offset > offset + ROW_EPS)?;
+            Some((first + (steps.unsigned_abs() as usize - 1)).min(rows.len() - 1))
+        }
+        std::cmp::Ordering::Less => {
+            let last = rows.iter().rposition(|r| r.offset < offset - ROW_EPS)?;
+            Some(last.saturating_sub(steps.unsigned_abs() as usize - 1))
+        }
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// Row currently at the viewport top: the last anchor at or before `offset`.
+pub(crate) fn anchor_row(rows: &[RowStart], offset: f32) -> Option<usize> {
+    rows.iter().rposition(|r| r.offset <= offset + ROW_EPS)
+}
+
+/// Grid scroll geometry from one viewport report, retained to interpret the
+/// next one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct GridGeometry {
+    pub width: f32,
+    pub viewport_height: f32,
+    pub content_height: f32,
+    pub scroll_y: f32,
+}
+
+/// What a viewport report means for the pinned anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScrollReaction {
+    /// The geometry reflowed or iced clamped the offset — re-pin the stored
+    /// anchor card to the viewport top under the new geometry.
+    Reanchor,
+    /// A genuine user scroll at unchanged geometry — adopt the reported offset
+    /// as the new anchor.
+    AdoptOffset,
+    /// Nothing that moves the anchor happened.
+    Idle,
+}
+
+/// Below this, an offset or height delta is float noise, not a real change.
+const GEOM_EPS: f32 = 0.5;
+
+/// Classify a viewport report against the previous one.
+///
+/// iced reports scrolls, window resizes, and content growth through the same
+/// channel, and on any reflow it clamps the absolute offset against the new
+/// content *before* reporting — so a bare offset move is ambiguous. The
+/// geometry deltas disambiguate:
+///
+/// - **Width changed** — the column count reflowed, so every row sits at a new
+///   offset. Re-pin the anchor regardless of whether the offset moved.
+/// - **Offset moved while a height changed** — a clamp from a vertical resize
+///   or content reflow, never a user scroll (scrolling does not resize the
+///   viewport or the content). Re-pin; do not read the clamped offset as
+///   intent.
+/// - **Offset moved with all geometry unchanged** — the only true user scroll
+///   (drag, touchpad, keyboard). Adopt it.
+///
+/// The first report (`prev` is `None`) only seeds the geometry.
+pub(crate) fn scroll_reaction(
+    prev: Option<GridGeometry>,
+    offset: f32,
+    width: f32,
+    viewport_height: f32,
+    content_height: f32,
+) -> ScrollReaction {
+    let Some(prev) = prev else {
+        return ScrollReaction::Idle;
+    };
+    let moved = (offset - prev.scroll_y).abs() > GEOM_EPS;
+    let width_changed = (width - prev.width).abs() > GEOM_EPS;
+    let heights_changed = (viewport_height - prev.viewport_height).abs() > GEOM_EPS
+        || (content_height - prev.content_height).abs() > GEOM_EPS;
+    if width_changed || (moved && heights_changed) {
+        ScrollReaction::Reanchor
+    } else if moved {
+        ScrollReaction::AdoptOffset
+    } else {
+        ScrollReaction::Idle
+    }
+}
+
+/// Row containing card `ordinal`: the last row whose first card is at or before
+/// it. Used to re-anchor the same card after a column-count reflow.
+pub(crate) fn row_for_ordinal(rows: &[RowStart], ordinal: usize) -> Option<usize> {
+    rows.iter().rposition(|r| r.ordinal <= ordinal)
+}
+
+/// The Local capture date a card is grouped under.
+pub(crate) fn capture_date(item: &Item) -> NaiveDate {
+    item.capture_time.second.with_timezone(&Local).date_naive()
 }
 
 /// Background color for selected cards - warm-tinted to match darkroom palette.
@@ -157,12 +375,7 @@ fn group_by_date_indexed(
     let mut groups: BTreeMap<NaiveDate, Vec<IndexedItem>> = BTreeMap::new();
 
     for indexed in items {
-        let date = indexed
-            .item
-            .capture_time
-            .second
-            .with_timezone(&Local)
-            .date_naive();
+        let date = capture_date(&indexed.item);
         groups.entry(date).or_default().push(indexed);
     }
 
@@ -348,8 +561,27 @@ pub(crate) fn thumbnail_grid<'a>(
     // gutter to the rail itself, giving cards the same `MD` gap to the rail as
     // to the left edge. The gutter exists only while the content overflows, so
     // at an exact-fit height the measured width can flip between passes.
-    scrollable(container(grid).padding(spacing::MD).width(Fill))
+    //
+    // The `mouse_area` inside the scrollable steals the wheel from the
+    // scrollable's own handler (children see wheel events first), so the parent
+    // can snap row-by-row; scrollbar drag and keyboard scrolling still reach the
+    // scrollable and report back through `on_scroll`.
+    //
+    // `on_scroll` doubles as the grid-width channel: it re-fires on any redraw
+    // where the viewport or content bounds changed (scrolls, window resizes,
+    // item loads), and `content_bounds` minus this container's `MD` padding is
+    // exactly the `available` the `responsive` closure receives. A content-
+    // wrapping `sensor` cannot do this job: iced gates `on_resize` on the
+    // distance from the viewport to the sensor's *corners*, so a sensor the
+    // size of the grid goes silent once the user scrolls off the top.
+    scrollable(mouse_area(container(grid).padding(spacing::MD).width(Fill)).on_scroll(Event::Wheel))
         .id(GRID_SCROLLABLE_ID)
+        .on_scroll(|vp| Event::Scrolled {
+            offset: vp.absolute_offset().y,
+            grid_width: vp.content_bounds().width - 2.0 * spacing::MD,
+            viewport_height: vp.bounds().height,
+            content_height: vp.content_bounds().height,
+        })
         .spacing(0)
         .width(Fill)
         .height(Fill)
@@ -377,6 +609,7 @@ fn render_grouped_by_date(
                     .color(palette.background.base.text),
             )
             .padding([spacing::XS, spacing::SM])
+            .height(DATE_HEADER_HEIGHT)
             .style(styles::date_header);
 
             let grid_content = item_grid(group_items, cols, cell_width, build_cell);
@@ -648,8 +881,257 @@ fn preview_icon() -> Element<'static, CellEvent> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CELL_WIDTH, grid_metrics, grid_width};
+    use super::{
+        CELL_WIDTH, DATE_HEADER_HEIGHT, anchor_row, grid_metrics, grid_width, row_for_ordinal,
+        row_starts, step_row,
+    };
     use crate::theme::spacing;
+
+    // A round cell width keeps the expected offsets easy to read.
+    const CW: f32 = 100.0;
+    const PITCH: f32 = CW + spacing::SM; // 108
+
+    fn offsets(rows: &[super::RowStart]) -> Vec<f32> {
+        rows.iter().map(|r| r.offset).collect()
+    }
+
+    fn ordinals(rows: &[super::RowStart]) -> Vec<usize> {
+        rows.iter().map(|r| r.ordinal).collect()
+    }
+
+    /// Gap kept above a snapped plain row: the row sits `SM` below the viewport
+    /// top, and the anchor math cancels all but `MD - SM` of the top padding.
+    const GAP: f32 = spacing::MD - spacing::SM; // 4
+
+    #[test]
+    fn ungrouped_row_offsets_step_by_pitch() {
+        // 7 cards, 3 columns → 3 rows. First row anchors to the top (offset 0);
+        // later rows keep an SM gap so the previous row ends at the viewport
+        // edge instead of bleeding its card bottoms in.
+        let rows = row_starts(&[7], 3, CW, false);
+        assert_eq!(offsets(&rows), vec![0.0, PITCH + GAP, 2.0 * PITCH + GAP]);
+        assert_eq!(ordinals(&rows), vec![0, 3, 6]);
+    }
+
+    #[test]
+    fn grouped_sections_add_header_and_section_gaps() {
+        // Section 0: 4 cards / 3 cols = 2 rows. Section 1: 5 cards / 3 cols = 2 rows.
+        let rows = row_starts(&[4, 5], 3, CW, true);
+        let header_block = DATE_HEADER_HEIGHT + spacing::XS; // 30
+
+        // Section 0, row 0 snaps to the header top (offset 0).
+        // Section 0, row 1: header_block + pitch below the content top, minus
+        // the SM gap kept above a snapped plain row.
+        let s0_r1 = header_block + PITCH + GAP;
+        // Section 1 header top, in content-y: MD + header_block + grid0 + LG.
+        let grid0_height = 2.0 * CW + spacing::SM; // 208
+        let s1_header_content_y = spacing::MD + header_block + grid0_height + spacing::LG;
+        let s1_r0 = s1_header_content_y - spacing::MD; // header snap keeps the MD gap
+        let s1_r1 = s1_r0 + header_block + PITCH + GAP;
+
+        assert_eq!(offsets(&rows), vec![0.0, s0_r1, s1_r0, s1_r1]);
+        // First card ordinal per row across both sections.
+        assert_eq!(ordinals(&rows), vec![0, 3, 4, 7]);
+    }
+
+    #[test]
+    fn step_row_moves_one_row_per_step_from_aligned_offset() {
+        let rows = row_starts(&[7], 3, CW, false);
+        let o = offsets(&rows);
+        assert_eq!(step_row(&rows, o[0], 1), Some(1));
+        assert_eq!(step_row(&rows, o[0], 2), Some(2));
+        assert_eq!(step_row(&rows, o[1], -1), Some(0));
+        assert_eq!(step_row(&rows, o[2], -1), Some(1));
+        assert_eq!(step_row(&rows, o[0], 0), None);
+    }
+
+    #[test]
+    fn step_row_realigns_from_unaligned_offset() {
+        let rows = row_starts(&[7], 3, CW, false); // offsets 0, 116, 224
+        // Mid-way between row 0 and row 1 after a free drag.
+        assert_eq!(step_row(&rows, 50.0, 1), Some(1));
+        assert_eq!(step_row(&rows, 50.0, -1), Some(0));
+        // Between row 1 and row 2.
+        assert_eq!(step_row(&rows, 170.0, 1), Some(2));
+        assert_eq!(step_row(&rows, 170.0, -1), Some(1));
+    }
+
+    #[test]
+    fn step_row_clamps_within_rows_and_noops_past_the_ends() {
+        let rows = row_starts(&[7], 3, CW, false); // 3 rows
+        let o = offsets(&rows);
+        // A next/previous boundary exists: overshooting steps clamp to it.
+        assert_eq!(step_row(&rows, o[1], 5), Some(2));
+        assert_eq!(step_row(&rows, o[1], -5), Some(0));
+        // No boundary in the direction of travel: stay put, never reverse.
+        assert_eq!(step_row(&rows, o[2], 1), None);
+        assert_eq!(step_row(&rows, o[2] + 40.0, 1), None);
+        assert_eq!(step_row(&rows, o[0], -1), None);
+    }
+
+    #[test]
+    fn anchor_row_finds_row_containing_offset() {
+        let rows = row_starts(&[7], 3, CW, false);
+        let o = offsets(&rows);
+        assert_eq!(anchor_row(&rows, o[0]), Some(0));
+        assert_eq!(anchor_row(&rows, 50.0), Some(0));
+        assert_eq!(anchor_row(&rows, o[1]), Some(1));
+        assert_eq!(anchor_row(&rows, 170.0), Some(1));
+        assert_eq!(anchor_row(&rows, o[2]), Some(2));
+    }
+
+    #[test]
+    fn row_for_ordinal_maps_card_to_its_row() {
+        let rows = row_starts(&[4, 5], 3, CW, true); // ordinals 0, 3, 4, 7
+        assert_eq!(row_for_ordinal(&rows, 0), Some(0));
+        assert_eq!(row_for_ordinal(&rows, 3), Some(1));
+        assert_eq!(row_for_ordinal(&rows, 4), Some(2));
+        assert_eq!(row_for_ordinal(&rows, 5), Some(2)); // card 5 shares row with 4
+        assert_eq!(row_for_ordinal(&rows, 7), Some(3));
+    }
+
+    #[test]
+    fn reanchor_is_a_noop_at_unchanged_geometry() {
+        // The resize-pinning invariant: anchoring an exact row offset and
+        // re-resolving it under identical geometry returns the same offset.
+        let rows = row_starts(&[4, 5], 3, CW, true);
+        for row in &rows {
+            let anchor = anchor_row(&rows, row.offset).expect("row exists");
+            let ordinal = rows[anchor].ordinal;
+            let target = row_for_ordinal(&rows, ordinal).expect("ordinal maps to a row");
+            assert!(
+                (rows[target].offset - row.offset).abs() < 1e-3,
+                "offset {} did not round-trip",
+                row.offset
+            );
+        }
+    }
+
+    #[test]
+    fn reanchor_keeps_top_card_visible_across_column_change() {
+        // Grouped [4, 5]. At 3 columns the last row starts at card 7; after a
+        // reflow to 2 columns that card must still sit in the row placed at top.
+        let old = row_starts(&[4, 5], 3, CW, true);
+        let new = row_starts(&[4, 5], 2, CW, true);
+
+        // Anchored at the section-1 second row (offset for card 7) under 3 cols.
+        let old_idx = 3;
+        let anchored_ordinal = old[old_idx].ordinal; // 7
+        let target = row_for_ordinal(&new, anchored_ordinal).expect("card maps to a row");
+
+        // Card 7 must fall within [ordinal, next_ordinal) of the target row.
+        let start = new[target].ordinal;
+        let end = new.get(target + 1).map_or(usize::MAX, |r| r.ordinal);
+        assert!(
+            start <= anchored_ordinal && anchored_ordinal < end,
+            "card {anchored_ordinal} not contained in target row [{start}, {end})"
+        );
+    }
+
+    #[test]
+    fn persisted_anchor_does_not_drift_across_chained_reflows() {
+        // A resize drag reflows through many column counts. Re-anchoring must
+        // use the PERSISTED card ordinal each time — re-deriving it from the
+        // target row's first card would walk the anchor backwards (12 → 10 at
+        // 5 cols → 9 at 3 cols → 8 at 2 cols), drifting toward the grid start.
+        let anchor = 12;
+        for cols in [5, 4, 3, 2, 3, 4, 5] {
+            let rows = row_starts(&[72], cols, CW, false);
+            let target = row_for_ordinal(&rows, anchor).expect("card maps to a row");
+            let start = rows[target].ordinal;
+            assert!(
+                start <= anchor && anchor < start + cols,
+                "{cols} cols: anchor {anchor} not in top row starting at {start}"
+            );
+        }
+        // Returning to the original geometry restores the original top card.
+        let rows = row_starts(&[72], 2, CW, false);
+        let target = row_for_ordinal(&rows, anchor).expect("card maps to a row");
+        assert_eq!(rows[target].ordinal, 12);
+    }
+
+    use super::{GridGeometry, ScrollReaction, scroll_reaction};
+
+    fn geom(width: f32, vh: f32, ch: f32, scroll_y: f32) -> GridGeometry {
+        GridGeometry {
+            width,
+            viewport_height: vh,
+            content_height: ch,
+            scroll_y,
+        }
+    }
+
+    #[test]
+    fn first_report_only_seeds_geometry() {
+        assert_eq!(
+            scroll_reaction(None, 0.0, 800.0, 600.0, 3000.0),
+            ScrollReaction::Idle
+        );
+    }
+
+    #[test]
+    fn content_growth_while_parked_is_idle() {
+        // Thumbnails stream in: offset pinned at the top, content_height
+        // climbing. Must not touch the anchor.
+        let prev = geom(800.0, 600.0, 3000.0, 0.0);
+        assert_eq!(
+            scroll_reaction(Some(prev), 0.0, 800.0, 600.0, 3450.0),
+            ScrollReaction::Idle
+        );
+    }
+
+    #[test]
+    fn pure_offset_move_is_a_user_scroll() {
+        let prev = geom(800.0, 600.0, 3000.0, 500.0);
+        assert_eq!(
+            scroll_reaction(Some(prev), 620.0, 800.0, 600.0, 3000.0),
+            ScrollReaction::AdoptOffset
+        );
+    }
+
+    #[test]
+    fn width_change_reanchors_even_without_an_offset_move() {
+        // A horizontal resize reflows the columns: every row moves to a new
+        // offset even if the raw scroll value happens to stay put.
+        let prev = geom(800.0, 600.0, 3000.0, 500.0);
+        assert_eq!(
+            scroll_reaction(Some(prev), 500.0, 900.0, 600.0, 2700.0),
+            ScrollReaction::Reanchor
+        );
+    }
+
+    #[test]
+    fn vertical_resize_clamp_reanchors_not_adopts() {
+        // Growing the viewport height near the bottom makes iced clamp the
+        // offset toward the start. With the width unchanged this looks exactly
+        // like a user scroll by offset alone, but the coincident height change
+        // marks it a clamp — re-pin, don't adopt.
+        let prev = geom(800.0, 600.0, 3000.0, 2400.0);
+        assert_eq!(
+            scroll_reaction(Some(prev), 2100.0, 800.0, 900.0, 3000.0),
+            ScrollReaction::Reanchor
+        );
+    }
+
+    #[test]
+    fn content_shrink_clamp_reanchors() {
+        // A filter change shortens the content; iced clamps the offset. Height
+        // (content) changed alongside the offset move → clamp, not scroll.
+        let prev = geom(800.0, 600.0, 3000.0, 2400.0);
+        assert_eq!(
+            scroll_reaction(Some(prev), 1500.0, 800.0, 600.0, 2100.0),
+            ScrollReaction::Reanchor
+        );
+    }
+
+    #[test]
+    fn float_noise_is_idle() {
+        let prev = geom(800.0, 600.0, 3000.0, 500.0);
+        assert_eq!(
+            scroll_reaction(Some(prev), 500.2, 800.1, 600.1, 3000.2),
+            ScrollReaction::Idle
+        );
+    }
 
     /// Every card edge must land on a whole *physical* pixel, otherwise iced's
     /// `crisp` snapping — which rounds each quad in physical pixels after

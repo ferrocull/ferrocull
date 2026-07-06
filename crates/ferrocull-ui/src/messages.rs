@@ -79,6 +79,17 @@ pub(crate) mod grid {
         FocusPrev,
         FocusOn(usize),
         OpenPreview(usize),
+        /// Wheel scrolled over the grid — snap row-by-row.
+        Wheel(iced::mouse::ScrollDelta),
+        /// Viewport report: absolute y offset, the grid's available width, and
+        /// the viewport/content heights. A width change re-anchors the top row;
+        /// height changes mark offset moves as clamps rather than user scrolls.
+        Scrolled {
+            offset: f32,
+            grid_width: f32,
+            viewport_height: f32,
+            content_height: f32,
+        },
     }
 }
 
