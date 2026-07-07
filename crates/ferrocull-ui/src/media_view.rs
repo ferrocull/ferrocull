@@ -137,12 +137,6 @@ impl MediaView {
         &self.burst_map
     }
 
-    /// Burst keys the user has expanded (for the grid render-cache key).
-    #[must_use]
-    pub(crate) fn expanded_bursts(&self) -> &BTreeSet<DateTime<Utc>> {
-        &self.expanded_bursts
-    }
-
     /// Number of currently visible (post-filter, post burst-collapse) items.
     #[must_use]
     pub(crate) fn visible_len(&self) -> usize {
@@ -280,12 +274,31 @@ impl MediaView {
         }
     }
 
-    /// Bump the render-cache version without changing item data.
-    ///
-    /// Used when something the grid renders but `MediaView` does not own changed
-    /// (e.g. a thumbnail finished loading), so the lazy grid must re-render.
-    pub(crate) fn mark_dirty(&mut self) {
-        self.version += 1;
+    /// Item indices for the `len` display-order positions starting at `start`.
+    /// Used to resolve the grid's scroll-window rows to concrete items.
+    #[must_use]
+    pub(crate) fn indices_in_ordinal_range(
+        &self,
+        start: usize,
+        len: usize,
+        ascending: bool,
+    ) -> Vec<usize> {
+        if ascending {
+            self.sorted_view
+                .values()
+                .skip(start)
+                .take(len)
+                .copied()
+                .collect()
+        } else {
+            self.sorted_view
+                .values()
+                .rev()
+                .skip(start)
+                .take(len)
+                .copied()
+                .collect()
+        }
     }
 
     /// Apply `mutate` to a single item and reconcile the derived view for it in
@@ -1209,9 +1222,6 @@ mod tests {
         view.mutate_item(0, &params.view(), |item| item.rating = 5);
         let v3 = view.version();
         assert!(v3 > v2, "mutate_item must bump version");
-
-        view.mark_dirty();
-        assert!(view.version() > v3, "mark_dirty must bump version");
     }
 
     #[test]

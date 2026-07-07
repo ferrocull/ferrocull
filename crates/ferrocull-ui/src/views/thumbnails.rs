@@ -1,20 +1,19 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap},
-    hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
 };
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use ferrocull_core::{
     ColorLabel,
-    media::{DateSelection, FilterMode, Item, SortKey, SortOrder},
+    media::{Item, SortKey, SortOrder},
 };
 use iced::{
     Color, ContentFit, Element, Fill, Shrink,
     widget::{
-        Stack, center, column, container, grid, image, lazy, mouse_area, opaque, responsive,
-        scrollable, sensor, text,
+        Space, Stack, center, column, container, grid, image, mouse_area, opaque, responsive,
+        scrollable, text,
     },
 };
 
@@ -49,8 +48,6 @@ pub(crate) enum Event {
     Rated(PathBuf, i8),
     StarHover(Option<i8>),
     BurstToggle(DateTime<Utc>),
-    ThumbnailVisible(usize),
-    ThumbnailHidden(usize),
     /// Wheel scrolled over the grid — the parent snaps row-by-row.
     Wheel(iced::mouse::ScrollDelta),
     /// Viewport report from the scrollable: absolute y offset plus the grid's
@@ -63,33 +60,6 @@ pub(crate) enum Event {
         viewport_height: f32,
         content_height: f32,
     },
-}
-
-/// Cache key derived from grid-affecting state. Uses monotonic `item_version`
-/// counter (O(1)) instead of per-render content hashing.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "mirrors UI state for cache invalidation"
-)]
-pub(crate) struct GridCacheKey {
-    pub item_count: usize,
-    pub item_content_version: u64,
-    pub selected: BTreeSet<usize>,
-    pub filter_mode: FilterMode,
-    pub group_raw_jpeg: bool,
-    pub hide_rejected: bool,
-    pub sort_order: SortOrder,
-    pub ascending: bool,
-    pub selected_dates: Option<DateSelection>,
-    pub selected_sources: BTreeSet<PathBuf>,
-    pub group_bursts: bool,
-    pub expanded_bursts: BTreeSet<DateTime<Utc>>,
-    pub selected_ratings: BTreeSet<i8>,
-    pub selected_color_labels: BTreeSet<Option<ColorLabel>>,
-    pub hovered_thumbnail: Option<usize>,
-    pub hovered_star: Option<i8>,
-    pub focused_index: Option<usize>,
 }
 
 /// Total cell width including padding for controls.
@@ -136,6 +106,11 @@ fn grid_width(cols: usize, cell_width: f32) -> f32 {
 /// Fixed height of a date section header, so the update-side row model does not
 /// depend on text metrics. Applied via `.height(...)` on the header container.
 pub(crate) const DATE_HEADER_HEIGHT: f32 = 26.0;
+
+/// Extra content kept rendered above and below the viewport. A fast scroll then
+/// reveals already-built cells, and the update side preloads their thumbnails
+/// before they enter view. Replaces the old per-cell `sensor(...).anticipate`.
+pub(crate) const GRID_OVERSCAN: f32 = 1000.0;
 
 /// Half-a-pixel-plus tolerance so an already-aligned offset counts as sitting
 /// exactly on a row boundary despite `f32` round-trips.
@@ -262,6 +237,59 @@ pub(crate) fn anchor_row(rows: &[RowStart], offset: f32) -> Option<usize> {
     rows.iter().rposition(|r| r.offset <= offset + ROW_EPS)
 }
 
+/// Inclusive `[first, last]` row range whose rows intersect the viewport
+/// (`scroll_y ..= scroll_y + viewport_height`) grown by `overscan` on each side.
+/// Row anchors are monotonic and sit within a gap of each row's content top, so
+/// they double as the intersection key. `viewport_height <= 0.0` marks the
+/// viewport size as not yet reported — the whole grid is then in-window. Returns
+/// `None` only for an empty row list.
+pub(crate) fn visible_row_window(
+    rows: &[RowStart],
+    scroll_y: f32,
+    viewport_height: f32,
+    overscan: f32,
+) -> Option<(usize, usize)> {
+    if rows.is_empty() {
+        return None;
+    }
+    if viewport_height <= 0.0 {
+        return Some((0, rows.len() - 1));
+    }
+    let lo = scroll_y - overscan;
+    let hi = scroll_y + viewport_height + overscan;
+    // The row before the first anchor past `lo` straddles the top edge.
+    let first = rows.partition_point(|r| r.offset <= lo).saturating_sub(1);
+    // The last anchor at or before `hi` is the last visible row.
+    let last = rows
+        .partition_point(|r| r.offset <= hi)
+        .saturating_sub(1)
+        .max(first);
+    Some((first, last))
+}
+
+/// Top and bottom spacer heights that sandwich the visible rows `first..=last`
+/// of a `num_rows`-tall grid so the rendered sub-grid sits exactly where those
+/// rows sit in the full grid. The pair plus the visible sub-grid's own height
+/// sum to the full grid height, so the scrollable's content height never
+/// changes.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "row counts are far below f32's exact-integer range"
+)]
+pub(crate) fn row_run_spacers(
+    num_rows: usize,
+    cell_width: f32,
+    first: usize,
+    last: usize,
+) -> (f32, f32) {
+    let pitch = cell_width + spacing::SM;
+    let grid_height =
+        num_rows as f32 * cell_width + (num_rows.saturating_sub(1)) as f32 * spacing::SM;
+    let top = first as f32 * pitch;
+    let visible = (last - first + 1) as f32 * cell_width + (last - first) as f32 * spacing::SM;
+    (top, grid_height - top - visible)
+}
+
 /// Grid scroll geometry from one viewport report, retained to interpret the
 /// next one.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -359,34 +387,6 @@ fn format_date_header(date: NaiveDate, today: NaiveDate) -> Cow<'static, str> {
     }
 }
 
-/// An item with its grid index and resolved thumbnail handle.
-struct IndexedItem {
-    idx: usize,
-    item: Item,
-    thumb: Option<image::Handle>,
-}
-
-/// Groups indexed items by date, preserving the item index for selection checks.
-/// Returns groups in ascending (oldest first) or descending (newest first) date order.
-fn group_by_date_indexed(
-    items: Vec<IndexedItem>,
-    ascending: bool,
-) -> Vec<(NaiveDate, Vec<IndexedItem>)> {
-    let mut groups: BTreeMap<NaiveDate, Vec<IndexedItem>> = BTreeMap::new();
-
-    for indexed in items {
-        let date = capture_date(&indexed.item);
-        groups.entry(date).or_default().push(indexed);
-    }
-
-    // BTreeMap iterates in ascending order
-    if ascending {
-        groups.into_iter().collect()
-    } else {
-        groups.into_iter().rev().collect()
-    }
-}
-
 /// Burst badge data resolved per rendered cell (count via `burst_map` length).
 #[derive(Clone, Copy)]
 struct BurstBadgeInfo {
@@ -402,17 +402,22 @@ struct CellState {
     is_focused: bool,
 }
 
-/// Renders a thumbnail grid, rebuilding only when `cache_key` or the derived
-/// column geometry changes.
+/// Renders a virtualized thumbnail grid: only the rows intersecting the viewport
+/// (plus [`GRID_OVERSCAN`]) are built as widgets; the rest is collapsed into
+/// fixed-height spacers so the scrollable's content height and every row offset
+/// stay exactly what the un-virtualized grid produced (see [`row_starts`]).
 ///
-/// `sorted_view` holds pre-filtered, pre-sorted indices. The badge count is
-/// resolved from `burst_map`'s member-list length (no per-member count stored).
-/// Click always emits `Event::CellClicked(path)`; the caller decides whether
-/// that means focus or selection toggle based on modifier state. `window_scale`
-/// pins cell widths to whole physical pixels (see [`grid_metrics`]).
+/// `sorted_view` holds pre-filtered, pre-sorted indices; cells borrow straight
+/// from `items` so no per-render clone of the item store is needed. The badge
+/// count is resolved from `burst_map`'s member-list length. Click always emits
+/// `Event::CellClicked(path)`; the caller decides focus vs. selection based on
+/// modifier state. `window_scale` pins cell widths to whole physical pixels
+/// (see [`grid_metrics`]). `scroll_y`/`viewport_height` are the tracked scroll
+/// window; `viewport_height` is `0.0` until the first scroll report, which
+/// means "unknown" — the grid then renders every row.
 #[expect(
     clippy::too_many_arguments,
-    reason = "grid needs items + view + burst indices + date; a param bag would just relocate them"
+    reason = "grid render state has no domain grouping; a param bag would just relocate it"
 )]
 pub(crate) fn thumbnail_grid<'a>(
     items: &'a [Item],
@@ -423,7 +428,14 @@ pub(crate) fn thumbnail_grid<'a>(
     burst_map: &'a HashMap<DateTime<Utc>, Vec<usize>>,
     today: NaiveDate,
     window_scale: f32,
-    cache_key: &GridCacheKey,
+    sort_order: SortOrder,
+    ascending: bool,
+    group_raw_jpeg: bool,
+    hovered_thumbnail: Option<usize>,
+    hovered_star: Option<i8>,
+    focused_index: Option<usize>,
+    scroll_y: f32,
+    viewport_height: f32,
 ) -> Element<'a, Event> {
     // Empty state needs none of the grid/scrollable machinery.
     if sorted_view.is_empty() {
@@ -433,20 +445,7 @@ pub(crate) fn thumbnail_grid<'a>(
             .into();
     }
 
-    // Extract Copy values from cache_key before it's captured by the closures.
-    let item_version = cache_key.item_content_version;
-    let hovered_thumbnail = cache_key.hovered_thumbnail;
-    let hovered_star = cache_key.hovered_star;
-    let focused_index = cache_key.focused_index;
-    let ascending = cache_key.ascending;
-    let group_raw_jpeg = cache_key.group_raw_jpeg;
-    let group_by_date = cache_key.sort_order == SortOrder::Time;
-
-    // Folded to a hash: the responsive closure below runs on every layout
-    // pass, so it must capture only cheap Copy values.
-    let mut hasher = DefaultHasher::new();
-    cache_key.hash(&mut hasher);
-    let key_hash = hasher.finish();
+    let group_by_date = sort_order == SortOrder::Time;
 
     // `responsive` runs at layout time, so `size.width` is the true grid area:
     // iced has already subtracted the container's `MD` padding and, when the
@@ -462,92 +461,79 @@ pub(crate) fn thumbnail_grid<'a>(
             .max(0.0)
             / window_scale;
 
-        // Keyed on the derived column geometry, not the raw width: cell_width
-        // moves in whole-pixel steps, so a resize drag doesn't rebuild the
-        // cells on every pixel.
-        let cells = lazy((key_hash, cols, cell_width.to_bits()), move |_| {
-            // Resolve handle lookups here so the full loaded_thumbs HashMap
-            // doesn't need to be cloned into the build_cell closure.
-            let resolve = |i: usize| {
-                let item = items[i].clone();
-                let thumb = loaded_thumbs.get(&item.path).cloned();
-                IndexedItem {
-                    idx: i,
-                    item,
-                    thumb,
-                }
+        // Cells borrow from `items`; the map closure owns a cloned path so the
+        // element is `'static` (no borrow escapes the cell). Only visible cells
+        // are ever built, so this clone is O(visible), not O(items).
+        let build_cell = |idx: usize| -> Element<'a, Event> {
+            let item = &items[idx];
+            let is_hovered = hovered_thumbnail == Some(idx);
+            let cell_hovered_star = if is_hovered { hovered_star } else { None };
+            let state = CellState {
+                is_selected: selected.contains(&idx),
+                is_hovered,
+                is_focused: focused_index == Some(idx),
             };
-            let indexed_items: Vec<IndexedItem> = if ascending {
-                sorted_view.values().copied().map(resolve).collect()
-            } else {
-                sorted_view.values().copied().rev().map(resolve).collect()
-            };
+            let show_pair = group_raw_jpeg && item.jpeg_pair.is_some();
+            let burst = burst_of.get(&idx).map(|&burst_key| BurstBadgeInfo {
+                count: burst_map[&burst_key].len(),
+                burst_key,
+            });
 
-            let selected = selected.clone();
-            // Resolve each burst member's badge count here, so the hot
-            // incremental-insert path never stores per-member counts.
-            let burst_info: HashMap<usize, BurstBadgeInfo> = burst_of
-                .iter()
-                .map(|(&idx, &burst_key)| {
-                    let count = burst_map[&burst_key].len();
-                    (idx, BurstBadgeInfo { count, burst_key })
-                })
-                .collect();
+            let path = item.path.clone();
+            let cell = thumbnail_card(
+                loaded_thumbs.get(&item.path),
+                item,
+                state,
+                show_pair,
+                burst,
+                cell_hovered_star,
+            );
 
-            let build_cell = move |indexed: IndexedItem| -> Element<'static, Event> {
-                let idx = indexed.idx;
-                let is_hovered = hovered_thumbnail == Some(idx);
-                let cell_hovered_star = if is_hovered { hovered_star } else { None };
+            cell.map(move |e| match e {
+                CellEvent::Clicked => Event::CellClicked(path.clone()),
+                CellEvent::DoubleClicked => Event::CellDoubleClicked(idx),
+                CellEvent::HoverEnter => Event::CellHover(idx, true),
+                CellEvent::HoverExit => Event::CellHover(idx, false),
+                CellEvent::Rated(r) => Event::Rated(path.clone(), r),
+                CellEvent::StarHover(s) => Event::StarHover(s),
+                CellEvent::BurstToggle(key) => Event::BurstToggle(key),
+            })
+        };
 
-                let state = CellState {
-                    is_selected: selected.contains(&idx),
-                    is_hovered,
-                    is_focused: focused_index == Some(idx),
-                };
-                let show_pair = group_raw_jpeg && indexed.item.jpeg_pair.is_some();
-                let burst = burst_info.get(&idx).copied();
+        // Display-order item indices; borrowed, no item clone.
+        let order: Vec<usize> = if ascending {
+            sorted_view.values().copied().collect()
+        } else {
+            sorted_view.values().rev().copied().collect()
+        };
 
-                let path = indexed.item.path.clone();
-                let cell = thumbnail_card(
-                    indexed.thumb.as_ref(),
-                    &indexed.item,
-                    state,
-                    show_pair,
-                    burst,
-                    cell_hovered_star,
-                );
+        // Split into date sections (one section when not grouping). Sections are
+        // contiguous runs in `order` under Time sort, matching `section_counts`.
+        let sections: Vec<(usize, usize)> = if group_by_date {
+            date_sections(items, &order)
+        } else {
+            vec![(0, order.len())]
+        };
 
-                let mapped = cell.map(move |e| match e {
-                    CellEvent::Clicked => Event::CellClicked(path.clone()),
-                    CellEvent::DoubleClicked => Event::CellDoubleClicked(idx),
-                    CellEvent::HoverEnter => Event::CellHover(idx, true),
-                    CellEvent::HoverExit => Event::CellHover(idx, false),
-                    CellEvent::Rated(r) => Event::Rated(path.clone(), r),
-                    CellEvent::StarHover(s) => Event::StarHover(s),
-                    CellEvent::BurstToggle(key) => Event::BurstToggle(key),
-                });
+        // The same row model and window function the update side uses to decide
+        // which thumbnails to load (`window_item_indices`), so the rendered
+        // rows and the loaded thumbnails cannot drift apart.
+        let counts: Vec<usize> = sections.iter().map(|&(_, count)| count).collect();
+        let rows = row_starts(&counts, cols, cell_width, group_by_date);
+        let row_window = visible_row_window(&rows, scroll_y, viewport_height, GRID_OVERSCAN)
+            .expect("a non-empty sorted view yields rows");
 
-                sensor(mapped)
-                    .on_show(move |_| Event::ThumbnailVisible(idx))
-                    .on_hide(Event::ThumbnailHidden(idx))
-                    .anticipate(1000.0)
-                    .key(item_version)
-                    .into()
-            };
-
-            if group_by_date {
-                render_grouped_by_date(
-                    indexed_items,
-                    ascending,
-                    today,
-                    cols,
-                    cell_width,
-                    &build_cell,
-                )
-            } else {
-                item_grid(indexed_items, cols, cell_width, &build_cell).into()
-            }
-        });
+        let cells = build_sections(
+            items,
+            &order,
+            &sections,
+            cols,
+            cell_width,
+            group_by_date,
+            today,
+            row_window,
+            &build_cell,
+        );
 
         container(cells)
             .padding(iced::padding::horizontal(side_margin))
@@ -588,21 +574,93 @@ pub(crate) fn thumbnail_grid<'a>(
         .into()
 }
 
-/// Render items grouped by date with section headers.
-fn render_grouped_by_date(
-    indexed_items: Vec<IndexedItem>,
-    ascending: bool,
-    today: NaiveDate,
+/// Split display-order indices into contiguous `(start, count)` runs sharing a
+/// capture date, matching [`section_counts`] so the render and the scroll-anchor
+/// row model stay in lockstep.
+fn date_sections(items: &[Item], order: &[usize]) -> Vec<(usize, usize)> {
+    let mut sections = Vec::new();
+    let mut i = 0;
+    while i < order.len() {
+        let date = capture_date(&items[order[i]]);
+        let mut j = i + 1;
+        while j < order.len() && capture_date(&items[order[j]]) == date {
+            j += 1;
+        }
+        sections.push((i, j - i));
+        i = j;
+    }
+    sections
+}
+
+/// Build the section column, rendering only rows within `row_window` (global
+/// row indices from [`visible_row_window`], in [`row_starts`] numbering) and
+/// collapsing everything else into spacers so the total height is unchanged.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "layout inputs that a param bag would only relocate"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "row counts are far below f32's exact-integer range"
+)]
+fn build_sections<'a>(
+    items: &'a [Item],
+    order: &[usize],
+    sections: &[(usize, usize)],
     cols: usize,
     cell_width: f32,
-    build_cell: &impl Fn(IndexedItem) -> Element<'static, Event>,
-) -> Element<'static, Event> {
-    let date_groups = group_by_date_indexed(indexed_items, ascending);
+    grouped: bool,
+    today: NaiveDate,
+    row_window: (usize, usize),
+    build_cell: &dyn Fn(usize) -> Element<'a, Event>,
+) -> Element<'a, Event> {
+    let header_block = if grouped {
+        DATE_HEADER_HEIGHT + spacing::XS
+    } else {
+        0.0
+    };
 
-    let palette = crate::theme::palette();
-    let sections: Vec<Element<'static, Event>> = date_groups
-        .into_iter()
-        .map(|(date, group_items)| {
+    let mut section_els: Vec<Element<'a, Event>> = Vec::with_capacity(sections.len());
+    // Global index of the current section's first row, in `row_starts` numbering.
+    let mut row_base = 0usize;
+
+    for &(start, count) in sections {
+        let num_rows = count.div_ceil(cols);
+        let grid_height =
+            num_rows as f32 * cell_width + (num_rows.saturating_sub(1)) as f32 * spacing::SM;
+        let section_height = header_block + grid_height;
+        let base = row_base;
+        row_base += num_rows;
+
+        // This section's rows intersected with the window, in section-local
+        // row indices. An empty intersection collapses the whole section.
+        let sec_first = row_window.0.max(base);
+        let sec_last = row_window.1.min(base + num_rows - 1);
+        if sec_first > sec_last {
+            section_els.push(Space::new().height(section_height).into());
+            continue;
+        }
+        let (first_row, last_row) = (sec_first - base, sec_last - base);
+        let (top_sp, bottom_sp) = row_run_spacers(num_rows, cell_width, first_row, last_row);
+        let slice_start = start + first_row * cols;
+        let slice_end = (start + (last_row + 1) * cols).min(start + count);
+        let cells = grid(
+            order[slice_start..slice_end]
+                .iter()
+                .map(|&idx| build_cell(idx)),
+        )
+        .spacing(spacing::SM)
+        .columns(cols)
+        .width(grid_width(cols, cell_width));
+        let body = column![
+            Space::new().height(top_sp),
+            cells,
+            Space::new().height(bottom_sp),
+        ];
+
+        if grouped {
+            let palette = crate::theme::palette();
+            let date = capture_date(&items[order[start]]);
             let header = container(
                 text(format_date_header(date, today))
                     .size(13)
@@ -611,30 +669,13 @@ fn render_grouped_by_date(
             .padding([spacing::XS, spacing::SM])
             .height(DATE_HEADER_HEIGHT)
             .style(styles::date_header);
+            section_els.push(column![header, body].spacing(spacing::XS).into());
+        } else {
+            section_els.push(body.into());
+        }
+    }
 
-            let grid_content = item_grid(group_items, cols, cell_width, build_cell);
-
-            column![header, grid_content].spacing(spacing::XS).into()
-        })
-        .collect();
-
-    let content = column(sections).spacing(spacing::LG);
-
-    content.into()
-}
-
-/// Build a grid of thumbnail cells pinned to `cols` whole-physical-pixel cells
-/// so card edges stay on the device pixel grid (see [`grid_metrics`]).
-fn item_grid(
-    items: Vec<IndexedItem>,
-    cols: usize,
-    cell_width: f32,
-    build_cell: &impl Fn(IndexedItem) -> Element<'static, Event>,
-) -> iced::widget::Grid<'static, Event, iced::Theme, iced::Renderer> {
-    grid(items.into_iter().map(build_cell))
-        .spacing(spacing::SM)
-        .columns(cols)
-        .width(grid_width(cols, cell_width))
+    column(section_els).spacing(spacing::LG).into()
 }
 
 /// Renders a thumbnail card with image, overlays, badges, and interaction handlers.
@@ -882,8 +923,8 @@ fn preview_icon() -> Element<'static, CellEvent> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CELL_WIDTH, DATE_HEADER_HEIGHT, anchor_row, grid_metrics, grid_width, row_for_ordinal,
-        row_starts, step_row,
+        CELL_WIDTH, DATE_HEADER_HEIGHT, RowStart, anchor_row, grid_metrics, grid_width,
+        row_for_ordinal, row_run_spacers, row_starts, step_row, visible_row_window,
     };
     use crate::theme::spacing;
 
@@ -891,11 +932,11 @@ mod tests {
     const CW: f32 = 100.0;
     const PITCH: f32 = CW + spacing::SM; // 108
 
-    fn offsets(rows: &[super::RowStart]) -> Vec<f32> {
+    fn offsets(rows: &[RowStart]) -> Vec<f32> {
         rows.iter().map(|r| r.offset).collect()
     }
 
-    fn ordinals(rows: &[super::RowStart]) -> Vec<usize> {
+    fn ordinals(rows: &[RowStart]) -> Vec<usize> {
         rows.iter().map(|r| r.ordinal).collect()
     }
 
@@ -1130,6 +1171,128 @@ mod tests {
         assert_eq!(
             scroll_reaction(Some(prev), 500.2, 800.1, 600.1, 3000.2),
             ScrollReaction::Idle
+        );
+    }
+
+    /// Evenly-spaced anchors keep the window arithmetic easy to read; the real
+    /// `row_starts` offsets are monotonic too, which is all the window needs.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "small loop indices are exact in f32"
+    )]
+    fn rows_every(n: usize, step: f32) -> Vec<RowStart> {
+        (0..n)
+            .map(|i| RowStart {
+                offset: i as f32 * step,
+                ordinal: i * 3,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn window_unknown_viewport_renders_every_row() {
+        let rows = rows_every(20, 100.0);
+        assert_eq!(visible_row_window(&rows, 0.0, 0.0, 1000.0), Some((0, 19)));
+    }
+
+    #[test]
+    fn window_of_empty_rows_is_none() {
+        assert_eq!(visible_row_window(&[], 500.0, 600.0, 1000.0), None);
+    }
+
+    #[test]
+    fn window_covers_viewport_plus_overscan() {
+        let rows = rows_every(20, 100.0); // offsets 0..=1900
+        // Viewport [500, 800] grown by 150 → [350, 950]: row 3 (300) straddles
+        // the top, row 9 (900) is the last anchor within the bottom.
+        assert_eq!(visible_row_window(&rows, 500.0, 300.0, 150.0), Some((3, 9)));
+    }
+
+    #[test]
+    fn window_clamps_against_the_top() {
+        let rows = rows_every(20, 100.0);
+        // scroll 0, viewport 300, overscan 150 → [-150, 450].
+        assert_eq!(visible_row_window(&rows, 0.0, 300.0, 150.0), Some((0, 4)));
+    }
+
+    #[test]
+    fn window_never_returns_last_below_first() {
+        let rows = rows_every(5, 100.0); // offsets 0..=400
+        // Window entirely below the content (scrolled past the end).
+        let (first, last) = visible_row_window(&rows, 10_000.0, 300.0, 150.0).expect("rows exist");
+        assert!(first <= last);
+        assert_eq!((first, last), (4, 4));
+    }
+
+    #[test]
+    fn row_run_spacers_sum_to_full_grid_height() {
+        let pitch = CW + spacing::SM;
+        let grid_height = 10.0 * CW + 9.0 * spacing::SM; // 10 rows
+        let (top, bottom) = row_run_spacers(10, CW, 3, 6);
+        let visible = 4.0 * CW + 3.0 * spacing::SM; // rows 3..=6
+        assert!(
+            (top - 3.0 * pitch).abs() < 1e-3,
+            "top spacer offsets to row 3"
+        );
+        assert!(
+            (top + visible + bottom - grid_height).abs() < 1e-3,
+            "spacers + visible rows fill the full grid height"
+        );
+        assert!(bottom >= 0.0);
+    }
+
+    #[test]
+    fn row_run_spacers_full_range_has_no_padding() {
+        let (top, bottom) = row_run_spacers(5, CW, 0, 4);
+        assert!(top.abs() < 1e-3 && bottom.abs() < 1e-3);
+    }
+
+    #[test]
+    fn row_run_spacers_last_row_visible_has_zero_bottom() {
+        let (_, bottom) = row_run_spacers(8, CW, 5, 7);
+        assert!(
+            bottom.abs() < 1e-3,
+            "no bottom spacer when the last row shows"
+        );
+    }
+
+    #[test]
+    fn date_sections_split_into_contiguous_same_day_runs() {
+        use chrono::{TimeZone, Utc};
+        use ferrocull_core::{
+            FileCategory,
+            media::{CaptureTime, Item},
+        };
+
+        // 24h apart at the same UTC time-of-day → distinct Local dates in any
+        // zone; equal instants share a date. So the runs hold timezone-agnostic.
+        let item_on_day = |day: u32| Item {
+            path: format!("/x/{day}").into(),
+            source_id: String::new(),
+            media_type: FileCategory::Raw,
+            capture_time: CaptureTime::new(
+                Utc.with_ymd_and_hms(2024, 1, day, 12, 0, 0).unwrap(),
+                0,
+            ),
+            is_downloaded: false,
+            jpeg_pair: None,
+            paired: Vec::new(),
+            sidecars: Vec::new(),
+            xmp_sidecar: None,
+            rating: 0,
+            color_label: None,
+        };
+        let items = vec![
+            item_on_day(1),
+            item_on_day(1),
+            item_on_day(2),
+            item_on_day(3),
+            item_on_day(3),
+        ];
+        let order: Vec<usize> = (0..items.len()).collect();
+        assert_eq!(
+            super::date_sections(&items, &order),
+            vec![(0, 2), (2, 1), (3, 2)]
         );
     }
 

@@ -217,7 +217,7 @@ impl Ferrocull {
 
         self.thumbnail_jobs_in_flight += 1;
 
-        spawn_thumbnail_sipper(scanned_files)
+        spawn_thumbnail_sipper(scanned_files, std::sync::Arc::clone(&self.thumbnail_cache))
     }
 
     /// Handle EXIF loaded: create `Item` with `capture_time` already set.
@@ -225,6 +225,7 @@ impl Ferrocull {
     pub(super) fn handle_exif_loaded(
         &mut self,
         scanned: ScannedFile,
+        canonical_path: &Path,
         capture_time: CaptureTime,
         xmp_metadata: Option<&Metadata>,
     ) {
@@ -245,10 +246,9 @@ impl Ferrocull {
             return;
         }
 
-        let source_id = path.canonicalize().map_or_else(
-            |_| path.to_string_lossy().into_owned(),
-            |p| p.to_string_lossy().into_owned(),
-        );
+        // Canonicalization already happened on the scan worker; reuse it here
+        // rather than repeating the I/O on the update loop.
+        let source_id = canonical_path.to_string_lossy().into_owned();
 
         let is_downloaded = self.metadata.is_downloaded(&source_id);
 

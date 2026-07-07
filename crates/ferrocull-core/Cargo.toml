@@ -11,6 +11,7 @@ fast_image_resize = { version = "6", features = ["rayon"] }
 hex = "0.4"
 image = { workspace = true }
 kamadak-exif = { workspace = true }
+memchr = "2"
 quick-xml = "0.40"
 rayon = "1.12"
 rusqlite = { workspace = true }
@@ -21,6 +22,9 @@ ferrocull-media = { workspace = true }
 tempfile = { workspace = true }
 thiserror.workspace = true
 tracing.workspace = true
+# Link against the system libjpeg-turbo via pkg-config (default-features off
+# disables the vendored cmake build); enables downscale-during-decode.
+turbojpeg = { version = "1", default-features = false, features = ["pkg-config"] }
 twox-hash = "2.1"
 
 [lints]

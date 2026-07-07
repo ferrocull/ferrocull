@@ -9,11 +9,13 @@ mod sources;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::PathBuf,
+    rc::Rc,
+    sync::Arc,
 };
 
 use ferrocull_core::{
     AppSettings, ColorLabel, FileCategory, Hook, IngestConfig, JobCodeHistory, NamedProfile,
-    cache::ThumbnailCache,
+    cache::{PreviewCache, ThumbnailCache},
     media::{DateSelection, FilterMode, SortOrder},
     metadata_store,
     persistence::MediaDatabase,
@@ -33,12 +35,12 @@ use sipper::sipper;
 use crate::{
     media_view::{MediaView, ViewParams},
     messages::{
-        Message, Panel, Section, compare as compare_msg, destination as destination_msg,
+        Message, Panel, ScanEvent, Section, compare as compare_msg, destination as destination_msg,
         filters as filters_msg, grid as grid_msg, preview as preview_msg, sources as sources_msg,
     },
     styles,
     theme::spacing,
-    views::{self, GridCacheKey, collapsible_section},
+    views::{self, collapsible_section},
 };
 
 /// Tracks which config panel sections are expanded (present = expanded).
@@ -65,6 +67,12 @@ const LEFT_PANEL_WIDTH: f32 = 250.0;
 const RIGHT_PANEL_WIDTH: f32 = 300.0;
 
 const THUMBNAIL_SIZE: u32 = 256;
+
+/// Max scan events drained into one [`Message::ScanBatch`]. The pipeline emits
+/// two events per file, so this caps a batch at ~128 files — large enough to
+/// collapse the per-event rebuild storm, small enough to keep progress
+/// responsive.
+const SCAN_BATCH_LIMIT: usize = 256;
 
 struct ThumbnailProgress {
     total: usize,
@@ -204,7 +212,22 @@ struct Ferrocull {
     sections: SectionState,
     expanded_years: BTreeSet<i32>,
     expanded_months: BTreeSet<(i32, u32)>,
+    /// Shared thumbnail disk cache, opened once at startup. Cloned into each
+    /// blocking thumbnail-load task so no task re-opens the cache (a `dirs`
+    /// lookup + `create_dir_all` per thumbnail otherwise).
+    thumbnail_cache: Arc<ThumbnailCache>,
+    /// Shared on-disk cache of extracted full-screen preview JPEGs, opened once
+    /// at startup. Distinct from `preview_cache` (in-memory GPU allocations).
+    preview_disk_cache: Arc<PreviewCache>,
     loaded_thumbs: HashMap<PathBuf, iced::widget::image::Handle>,
+    /// Item indices whose thumbnails are currently in the load window (viewport
+    /// plus overscan). Drives which thumbnails load and which are evicted as the
+    /// grid scrolls — the update-side replacement for the old per-cell sensors.
+    thumb_window: HashSet<usize>,
+    /// Set when a scan batch reported freshly-cached thumbnails, so the next
+    /// window reconcile retries loading every in-window thumbnail that is now on
+    /// disk (not just cells that just entered the window).
+    thumb_generation_dirty: bool,
     hovered_thumbnail: Option<usize>,
     hovered_star: Option<i8>,
     focused_index: Option<usize>,
@@ -242,8 +265,9 @@ struct Ferrocull {
     /// Memoized grid row model. The row starts only change when the media view,
     /// sort/grouping, or derived column geometry change, but `on_scroll` fires
     /// many times per second — this caches the `O(items)` `section_counts` walk
-    /// so a scroll frame doesn't rebuild it.
-    grid_rows_cache: Option<(GridRowsKey, Vec<views::thumbnails::RowStart>)>,
+    /// so a scroll frame doesn't rebuild it. Held behind an `Rc` so the hot path
+    /// hands out a cheap refcount bump instead of cloning the row vector.
+    grid_rows_cache: Option<(GridRowsKey, Rc<[views::thumbnails::RowStart]>)>,
 }
 
 /// Invalidation key for [`Ferrocull::grid_rows`]'s memoized row model. Captures
@@ -276,6 +300,18 @@ impl Default for Ferrocull {
                 panic!("cannot open database at {}: {e}", db_path.display());
             }
         };
+        // Opened once here and shared (via `Arc`) into every blocking load task.
+        // A failure to create the cache directory would leave thumbnails
+        // unloadable for the whole session, so fail loudly at boot like the DB
+        // rather than degrade to a permanently blank grid.
+        let thumbnail_cache = Arc::new(
+            ThumbnailCache::open()
+                .unwrap_or_else(|e| panic!("cannot open thumbnail cache: {e}")),
+        );
+        let preview_disk_cache = Arc::new(
+            PreviewCache::open().unwrap_or_else(|e| panic!("cannot open preview cache: {e}")),
+        );
+
         let metadata = metadata_store::Store::new(db);
         let profiles = metadata.profiles();
         let job_code_history = JobCodeHistory::from_codes(metadata.job_code_history());
@@ -309,7 +345,11 @@ impl Default for Ferrocull {
             sections: SectionState::with_defaults(),
             expanded_years: BTreeSet::new(),
             expanded_months: BTreeSet::new(),
+            thumbnail_cache,
+            preview_disk_cache,
             loaded_thumbs: HashMap::new(),
+            thumb_window: HashSet::new(),
+            thumb_generation_dirty: false,
             hovered_thumbnail: None,
             hovered_star: None,
             focused_index: None,
@@ -646,36 +686,46 @@ impl scan::Input for ScanFile {
     }
 }
 
-/// Spawn sipper that extracts EXIF first (creating items), then generates thumbnails.
-fn spawn_thumbnail_sipper(files: Vec<ScannedFile>) -> Task<Message> {
+/// Spawn sipper that extracts EXIF first (creating items), then generates
+/// thumbnails, writing them through the shared [`ThumbnailCache`].
+fn spawn_thumbnail_sipper(files: Vec<ScannedFile>, cache: Arc<ThumbnailCache>) -> Task<Message> {
     let thumb_sipper = sipper(move |mut sender| async move {
-        let cache = ThumbnailCache::open().ok();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         rayon::spawn(move || {
             let inputs = files.into_iter().map(ScanFile).collect();
-            scan::run(inputs, THUMBNAIL_SIZE, cache.as_ref(), |event| {
+            scan::run(inputs, THUMBNAIL_SIZE, Some(cache.as_ref()), |event| {
                 drop(tx.send(event));
             });
         });
 
-        while let Some(event) = rx.recv().await {
-            sender.send(event).await;
+        // The pipeline fires two events per file across many rayon threads.
+        // Draining the channel in batches and forwarding one message per drain
+        // collapses that firehose into a single `update` pass per batch, so the
+        // grid rebuilds O(batches) times during ingest instead of O(events).
+        let mut buf = Vec::new();
+        while rx.recv_many(&mut buf, SCAN_BATCH_LIMIT).await > 0 {
+            let batch: Vec<ScanEvent> = buf
+                .drain(..)
+                .map(|event| match event {
+                    scan::Event::ExifLoaded {
+                        file,
+                        canonical_path,
+                        capture_time,
+                        xmp,
+                    } => ScanEvent::ExifLoaded(file.0, canonical_path, capture_time, xmp),
+                    scan::Event::ThumbnailReady { path, result } => {
+                        ScanEvent::ThumbnailCached(path, result)
+                    }
+                })
+                .collect();
+            sender.send(batch).await;
         }
     });
 
-    Task::sip(
-        thumb_sipper,
-        |event| match event {
-            scan::Event::ExifLoaded {
-                file,
-                capture_time,
-                xmp,
-            } => Message::ExifLoaded(file.0, capture_time, xmp),
-            scan::Event::ThumbnailReady { path, result } => Message::ThumbnailCached(path, result),
-        },
-        |()| Message::ThumbnailsComplete,
-    )
+    Task::sip(thumb_sipper, Message::ScanBatch, |()| {
+        Message::ThumbnailsComplete
+    })
 }
 
 fn boot() -> (Ferrocull, Task<Message>) {
@@ -748,11 +798,21 @@ fn device_events() -> impl iced::futures::Stream<Item = Message> {
     )
 }
 
+fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
+    let task = dispatch(state, message);
+    // Every message may have moved the scroll offset, resized the grid, or
+    // changed the visible set, so reconcile which thumbnails should be loaded
+    // after the state has settled. It is a cheap no-op when nothing relevant
+    // changed (no cells entered or left the window).
+    let sync = state.reconcile_thumbnail_window();
+    Task::batch([task, sync])
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "TEA dispatch: delegates to sub-functions, remaining arms are async result handlers"
 )]
-fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
+fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
     match message {
         Message::Compare(msg) => compare::update(state, msg),
         Message::Grid(msg) => grid::update(state, msg),
@@ -779,14 +839,20 @@ fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
             Task::none()
         }
 
-        Message::ExifLoaded(scanned, time, xmp) => {
-            state.handle_exif_loaded(scanned, time, xmp.as_ref());
-            Task::none()
-        }
-        Message::ThumbnailCached(_path, _result) => {
-            state.handle_thumbnail_cached();
-            // Dirty the grid so its sensors re-fire for newly cached thumbs.
-            state.media.mark_dirty();
+        Message::ScanBatch(events) => {
+            for event in events {
+                match event {
+                    ScanEvent::ExifLoaded(scanned, canonical_path, time, xmp) => {
+                        state.handle_exif_loaded(scanned, &canonical_path, time, xmp.as_ref());
+                    }
+                    ScanEvent::ThumbnailCached(_path, _result) => {
+                        state.handle_thumbnail_cached();
+                        // A newly-cached thumbnail is now loadable from disk, so
+                        // the next reconcile must retry every in-window thumbnail.
+                        state.thumb_generation_dirty = true;
+                    }
+                }
+            }
             Task::none()
         }
         Message::ScanComplete(files) => state.handle_scan_complete(files),
@@ -842,7 +908,6 @@ fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
         }
         Message::ThumbnailLoaded(path, handle) => {
             state.loaded_thumbs.insert(path, handle);
-            state.media.mark_dirty();
             Task::none()
         }
         Message::Tick => {
@@ -1151,26 +1216,6 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
 fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
     let command_held = state.modifiers.command();
 
-    let cache_key = GridCacheKey {
-        item_count: state.media.len(),
-        item_content_version: state.media.version(),
-        selected: state.selected.clone(),
-        filter_mode: state.config.filter_mode,
-        group_raw_jpeg: state.config.group_raw_jpeg,
-        hide_rejected: state.config.hide_rejected,
-        sort_order: state.config.sort_order,
-        ascending: state.config.ascending,
-        selected_dates: state.config.selected_dates,
-        selected_sources: state.config.selected_sources.clone(),
-        group_bursts: state.config.group_bursts,
-        expanded_bursts: state.media.expanded_bursts().clone(),
-        selected_ratings: state.config.selected_ratings.clone(),
-        selected_color_labels: state.config.selected_color_labels.clone(),
-        hovered_thumbnail: state.hovered_thumbnail,
-        hovered_star: state.hovered_star,
-        focused_index: state.focused_index,
-    };
-
     views::thumbnail_grid(
         state.media.items(),
         state.media.sorted_view(),
@@ -1180,7 +1225,14 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         state.media.burst_map(),
         state.today,
         state.window_scale,
-        &cache_key,
+        state.config.sort_order,
+        state.config.ascending,
+        state.config.group_raw_jpeg,
+        state.hovered_thumbnail,
+        state.hovered_star,
+        state.focused_index,
+        state.grid_scroll_y,
+        state.grid_viewport_height,
     )
     .map(move |event| match event {
         views::thumbnails::Event::CellClicked(path) => {
@@ -1204,12 +1256,6 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         }
         views::thumbnails::Event::BurstToggle(key) => {
             Message::Grid(grid_msg::Message::BurstToggled(key))
-        }
-        views::thumbnails::Event::ThumbnailVisible(idx) => {
-            Message::Grid(grid_msg::Message::ThumbnailVisible(idx))
-        }
-        views::thumbnails::Event::ThumbnailHidden(idx) => {
-            Message::Grid(grid_msg::Message::ThumbnailHidden(idx))
         }
         views::thumbnails::Event::Wheel(delta) => Message::Grid(grid_msg::Message::Wheel(delta)),
         views::thumbnails::Event::Scrolled {
