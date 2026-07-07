@@ -71,8 +71,6 @@ pub(crate) mod grid {
         SelectNone,
         RejectFile(PathBuf),
         BurstToggled(DateTime<Utc>),
-        ThumbnailVisible(usize),
-        ThumbnailHidden(usize),
         ThumbnailHover(usize, bool),
         StarHover(Option<i8>),
         FocusNext,
@@ -196,6 +194,20 @@ use ferrocull_core::{media::CaptureTime, xmp::Metadata};
 use ferrocull_devices::ScannedFile;
 use iced::keyboard::{Key, Modifiers};
 
+/// One unit of scan progress, drained from the pipeline in batches (see
+/// [`Message::ScanBatch`]). The pipeline emits two of these per file — EXIF
+/// first, thumbnail second — and that per-file order is preserved within a
+/// batch.
+#[derive(Debug, Clone)]
+pub(crate) enum ScanEvent {
+    /// EXIF/capture time resolved; carries the scanned file, its canonical path,
+    /// capture time, and XMP sidecar for item construction.
+    ExifLoaded(ScannedFile, PathBuf, CaptureTime, Option<Metadata>),
+    /// The file's thumbnail is on disk (freshly generated or a cache hit), or
+    /// generation failed.
+    ThumbnailCached(PathBuf, Result<(), String>),
+}
+
 /// Result of a download operation.
 #[derive(Debug, Clone)]
 pub(crate) struct DownloadResult {
@@ -241,8 +253,9 @@ pub(crate) enum Message {
     KeyPressed(Key, Modifiers),
     ModifiersChanged(Modifiers),
 
-    ExifLoaded(ScannedFile, CaptureTime, Option<Metadata>),
-    ThumbnailCached(PathBuf, Result<(), String>),
+    /// A drained batch of scan progress events, applied in one `update` pass so
+    /// the grid rebuilds once per batch instead of once per event.
+    ScanBatch(Vec<ScanEvent>),
     ScanComplete(Vec<ScannedFile>),
     ThumbnailsComplete,
     ThumbnailLoaded(PathBuf, iced::widget::image::Handle),

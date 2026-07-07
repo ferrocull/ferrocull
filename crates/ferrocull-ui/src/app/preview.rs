@@ -1,5 +1,13 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use ferrocull_core::{
+    cache::{PreviewCache, cache_key_from_disk},
+    thumbnail::extract_largest_preview,
+};
 use iced::Task;
 
 use super::{Ferrocull, ViewMode};
@@ -111,11 +119,12 @@ impl Ferrocull {
                 .insert(path.clone(), request_generation);
         }
 
+        let disk_cache = Arc::clone(&self.preview_disk_cache);
         Task::batch(paths_to_load.into_iter().map(move |path| {
+            let cache = Arc::clone(&disk_cache);
             Task::perform(
                 tokio::task::spawn_blocking(move || {
-                    let result = ferrocull_core::thumbnail::extract_largest_preview(&path)
-                        .map_err(|e| e.to_string());
+                    let result = load_or_extract_preview(&cache, &path);
                     (path, result)
                 }),
                 move |r| match r {
@@ -131,22 +140,23 @@ impl Ferrocull {
         }))
     }
 
-    /// Load a single thumbnail from disk cache if not already loaded.
+    /// Load a single thumbnail from disk cache if not already loaded. Decodes
+    /// the cached JPEG to RGBA off the render thread so a fast scroll doesn't
+    /// spike a frame decoding dozens of newly-revealed thumbnails at draw time.
     pub(super) fn load_thumbnail(&self, item_idx: usize) -> Task<Message> {
-        use ferrocull_core::cache::{ThumbnailCache, cache_key_from_disk};
-
         let item = self.media.item(item_idx);
         if self.loaded_thumbs.contains_key(&item.path) {
             return Task::none();
         }
 
         let path = item.path.clone();
+        let cache = Arc::clone(&self.thumbnail_cache);
         Task::perform(
             tokio::task::spawn_blocking(move || {
-                let cache = ThumbnailCache::open().ok()?;
                 let key = cache_key_from_disk(&path).ok()?;
-                let jpeg = cache.load(&key).ok()??;
-                Some((path, iced::widget::image::Handle::from_bytes(jpeg)))
+                let (jpeg, _capture_time) = cache.load(&key).ok()??;
+                let handle = decode_thumbnail(&jpeg, &path)?;
+                Some((path, handle))
             }),
             |r| {
                 r.unwrap_or_else(|e| {
@@ -157,4 +167,43 @@ impl Ferrocull {
         )
         .and_then(|(path, handle)| Task::done(Message::ThumbnailLoaded(path, handle)))
     }
+}
+
+/// Decode a cached thumbnail JPEG into an RGBA image handle. A corrupt cached
+/// JPEG is external data, so a decode failure is logged and treated as a cache
+/// miss (`None`), never a crash.
+fn decode_thumbnail(jpeg: &[u8], path: &Path) -> Option<iced::widget::image::Handle> {
+    match image::load_from_memory(jpeg) {
+        Ok(img) => {
+            let rgba = img.into_rgba8();
+            let (width, height) = (rgba.width(), rgba.height());
+            Some(iced::widget::image::Handle::from_rgba(
+                width,
+                height,
+                rgba.into_raw(),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), "corrupt cached thumbnail, ignoring: {e}");
+            None
+        }
+    }
+}
+
+/// Load an extracted preview JPEG from the disk cache, extracting and caching it
+/// on a miss. The disk cache is a performance optimization, not a source of
+/// truth, so read/write failures degrade to a fresh extraction (logged).
+fn load_or_extract_preview(cache: &PreviewCache, path: &Path) -> Result<Vec<u8>, String> {
+    let key = cache_key_from_disk(path).map_err(|e| e.to_string())?;
+    match cache.load(&key) {
+        Ok(Some(jpeg)) => return Ok(jpeg),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(path = %path.display(), "preview cache read failed: {e}"),
+    }
+
+    let jpeg = extract_largest_preview(path).map_err(|e| e.to_string())?;
+    if let Err(e) = cache.put(&key, &jpeg) {
+        tracing::warn!(path = %path.display(), "preview cache write failed: {e}");
+    }
+    Ok(jpeg)
 }

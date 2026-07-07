@@ -39,10 +39,14 @@ pub trait Input {
 /// A file that fails to open or read its head is logged and dropped silently —
 /// no event is emitted for it.
 pub enum Event<T> {
-    /// Capture time (EXIF, or mtime fallback) and XMP sidecar are available;
-    /// the input file is handed back for item construction.
+    /// Capture time (persisted from cache, EXIF, or mtime fallback) and XMP
+    /// sidecar are available; the input file is handed back for item
+    /// construction. `canonical_path` is the file's canonicalized path (or the
+    /// raw path when canonicalization fails), resolved here so the caller does
+    /// not repeat that I/O on its update loop.
     ExifLoaded {
         file: T,
+        canonical_path: PathBuf,
         capture_time: CaptureTime,
         xmp: Option<xmp::Metadata>,
     },
@@ -79,6 +83,52 @@ where
         let path = file.path().to_path_buf();
         let category = file.category();
 
+        // The XMP sidecar is a tiny separate file read on both the hit and miss
+        // paths, since external ratings can change between sessions.
+        let xmp = file
+            .xmp_sidecar()
+            .and_then(|sidecar| xmp::read_sidecar(sidecar).ok());
+
+        // Canonicalize once here (metadata I/O, not a body read): the result
+        // feeds both the cache key and the event, so the caller needn't repeat
+        // it on its update loop. On failure, fall back to the raw path and
+        // bypass the cache.
+        let (canonical_path, key) = match path.canonicalize() {
+            Ok(canonical) => {
+                let key = match cache::cache_key_from_canonical(&canonical) {
+                    Ok(k) => Some(k),
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e, "cache key derivation failed, bypassing cache");
+                        None
+                    }
+                };
+                (canonical, key)
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "canonicalize failed, bypassing cache");
+                (path.clone(), None)
+            }
+        };
+
+        // Cache hit: the thumbnail and its persisted capture time are both
+        // present, so we skip every read of the media body.
+        if let Some(ref k) = key
+            && let Some(c) = cache
+            && let Ok(Some((_, capture_time))) = c.load(k)
+        {
+            on_event(Event::ExifLoaded {
+                file,
+                canonical_path,
+                capture_time,
+                xmp,
+            });
+            on_event(Event::ThumbnailReady {
+                path,
+                result: Ok(()),
+            });
+            return;
+        }
+
         let (data, mut handle) = match preread(&path) {
             Ok(v) => v,
             Err(e) => {
@@ -96,33 +146,13 @@ where
                 .expect("modification time available");
             CaptureTime::new(DateTime::<Utc>::from(mtime), 0)
         });
-        let xmp = file
-            .xmp_sidecar()
-            .and_then(|sidecar| xmp::read_sidecar(sidecar).ok());
 
         on_event(Event::ExifLoaded {
             file,
+            canonical_path,
             capture_time,
             xmp,
         });
-
-        let key = match cache::cache_key_from_disk(&path) {
-            Ok(k) => Some(k),
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "cache key derivation failed, bypassing cache");
-                None
-            }
-        };
-        if let Some(ref k) = key
-            && let Some(c) = cache
-            && let Ok(Some(_)) = c.load(k)
-        {
-            on_event(Event::ThumbnailReady {
-                path,
-                result: Ok(()),
-            });
-            return;
-        }
 
         let mut data = data;
         let thumb_result = match category {
@@ -146,7 +176,7 @@ where
             && let Some(ref k) = key
             && let Some(c) = cache
         {
-            drop(c.put(k, img));
+            drop(c.put(k, img, capture_time));
         }
 
         on_event(Event::ThumbnailReady {
@@ -286,6 +316,16 @@ mod tests {
         assert!(
             matches!(second[1], Rec::Thumbnail(Ok(()))),
             "second run yields the cached thumbnail without decoding"
+        );
+
+        // The second run recovers capture time from the persisted sidecar,
+        // never reading the now-corrupt body.
+        let (Rec::Exif(first_time), Rec::Exif(second_time)) = (&first[0], &second[0]) else {
+            panic!("each run emits exif first");
+        };
+        assert_eq!(
+            first_time, second_time,
+            "capture time is recovered from cache metadata, matching the first run"
         );
     }
 }

@@ -1,7 +1,9 @@
 //! Thumbnail generation for images and RAW files.
 //!
 //! Strategy:
-//! - JPEG/PNG: Load with image crate, resize with `fast_image_resize` (SIMD, RGB/U8x3)
+//! - JPEG: Downscale during decode with libjpeg-turbo, then resize the rest of
+//!   the way with `fast_image_resize` (SIMD, RGB/U8x3)
+//! - PNG: Load with the image crate, same `fast_image_resize` path
 //! - RAW files: Extract embedded JPEG preview, same decode/resize path
 //!
 //! All public functions return JPEG bytes (`Vec<u8>`), suitable for both
@@ -35,6 +37,8 @@ pub enum Error {
     Io { path: PathBuf, source: io::Error },
     #[error("image processing error: {0}")]
     Image(#[from] ImageError),
+    #[error("JPEG decode error: {0}")]
+    JpegDecode(String),
     #[error("resize failed: {0}")]
     Resize(String),
     #[error("unsupported file format: {}", path.display())]
@@ -57,14 +61,13 @@ pub fn extract_largest_preview(path: &Path) -> Result<Vec<u8>, Error> {
             path: path.to_path_buf(),
         })?;
 
-    let data = fs::read(path).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let (orientation, _) = parse_exif_fields(&data);
-
     match category {
         FileCategory::Photo => {
+            let data = fs::read(path).map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let (orientation, _) = parse_exif_fields(&data);
             if orientation <= 1 {
                 return Ok(data);
             }
@@ -72,26 +75,72 @@ pub fn extract_largest_preview(path: &Path) -> Result<Vec<u8>, Error> {
             let oriented = apply_orientation_transform(img, orientation);
             encode_jpeg(&oriented.to_rgb8(), PREVIEW_JPEG_QUALITY)
         }
-        FileCategory::Raw => {
-            let spans = find_jpeg_spans(&data);
-            let &(start, len) =
-                spans
-                    .iter()
-                    .max_by_key(|(_, len)| *len)
-                    .ok_or(Error::NoEmbeddedPreview {
-                        path: path.to_path_buf(),
-                    })?;
-            if orientation <= 1 {
-                return Ok(data[start..start + len].to_vec());
-            }
-            let img = image::load_from_memory(&data[start..start + len])?;
-            let oriented = apply_orientation_transform(img, orientation);
-            encode_jpeg(&oriented.to_rgb8(), PREVIEW_JPEG_QUALITY)
-        }
+        FileCategory::Raw => extract_raw_largest_preview(path),
         FileCategory::Video | FileCategory::Sidecar => Err(Error::UnsupportedFormat {
             path: path.to_path_buf(),
         }),
     }
+}
+
+/// Threshold (bytes) above which an embedded JPEG span is treated as the
+/// full-size preview, allowing early termination before reading the rest of the
+/// RAW file. Full-size previews in CR2/NEF/ARW are typically >= 1 MB, while
+/// embedded thumbnails are ~50-500 KB.
+///
+/// Tradeoff: early exit may return a large-but-not-largest span. A RAW can hold
+/// several previews, and the first one past the threshold wins rather than the
+/// globally largest. That is acceptable for on-screen display, where any
+/// full-size-class preview is sufficient.
+const FULL_PREVIEW_BYTES: usize = 1_000_000;
+
+/// Extract the largest embedded JPEG preview from a RAW file for full-screen
+/// display, reading incrementally and stopping early once a full-size-class
+/// span is found (see `FULL_PREVIEW_BYTES`). Falls back to the largest span
+/// found by EOF if none crosses the threshold.
+fn extract_raw_largest_preview(path: &Path) -> Result<Vec<u8>, Error> {
+    let mut file = File::open(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut data = Vec::new();
+    let mut scanner = JpegScanner::new();
+    let mut buf = vec![0u8; READ_CHUNK_SIZE];
+
+    let span = loop {
+        let n = file.read(&mut buf).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if n == 0 {
+            break scanner.largest_span();
+        }
+        data.extend_from_slice(&buf[..n]);
+        scanner.scan(&data);
+
+        if let Some(span) = scanner.full_size_span() {
+            break Some(span);
+        }
+    };
+
+    let (start, len) = span.ok_or(Error::NoEmbeddedPreview {
+        path: path.to_path_buf(),
+    })?;
+    // Orientation lives in the TIFF header at the start of the file, which is
+    // already buffered by the time any span completes.
+    let (orientation, _) = parse_exif_fields(&data);
+    oriented_preview(&data[start..start + len], orientation)
+}
+
+/// Return embedded preview JPEG bytes, applying EXIF orientation only if needed.
+/// Orients at full resolution: previews keep their native size for full-screen
+/// display.
+fn oriented_preview(jpeg: &[u8], orientation: u32) -> Result<Vec<u8>, Error> {
+    if orientation <= 1 {
+        return Ok(jpeg.to_vec());
+    }
+    let img = image::load_from_memory(jpeg)?;
+    let oriented = apply_orientation_transform(img, orientation);
+    encode_jpeg(&oriented.to_rgb8(), PREVIEW_JPEG_QUALITY)
 }
 
 /// JPEG quality for thumbnails (small images, size matters more than quality).
@@ -167,9 +216,81 @@ fn encode_jpeg(img: &RgbImage, quality: u8) -> Result<Vec<u8>, Error> {
     Ok(buf)
 }
 
+/// True if `data` starts with the JPEG SOI + marker prefix (`FF D8 FF`).
+fn is_jpeg_magic(data: &[u8]) -> bool {
+    matches!(data, [0xFF, 0xD8, 0xFF, ..])
+}
+
+/// Decode a Photo (JPEG or PNG) for thumbnailing. JPEG takes the scaled
+/// libjpeg-turbo path; PNG (and anything else) falls back to the `image` crate.
+fn decode_photo_scaled(data: &[u8], target: u32) -> Result<DynamicImage, Error> {
+    if is_jpeg_magic(data) {
+        decode_jpeg_scaled(data, target)
+    } else {
+        Ok(image::load_from_memory(data)?)
+    }
+}
+
+/// Decode a JPEG with libjpeg-turbo, downscaling during decode to the smallest
+/// DCT scaling factor whose output still covers `target` on its longer edge.
+///
+/// This avoids fully decoding a 45MP JPEG to build a 256px thumbnail; the
+/// remaining fractional resize is left to `resize_fast`. Returns an
+/// `ImageRgb8`, so downstream `into_rgb8` is a no-op move.
+fn decode_jpeg_scaled(jpeg: &[u8], target: u32) -> Result<DynamicImage, Error> {
+    let mut decompressor =
+        turbojpeg::Decompressor::new().map_err(|e| Error::JpegDecode(e.to_string()))?;
+    let header = decompressor
+        .read_header(jpeg)
+        .map_err(|e| Error::JpegDecode(e.to_string()))?;
+
+    let target = target as usize;
+    // Factors ascending, so the first match is the largest downscale (smallest
+    // output) that still covers the target; fall back to 1:1 for tiny images.
+    let factor = [
+        turbojpeg::ScalingFactor::ONE_EIGHTH,
+        turbojpeg::ScalingFactor::ONE_QUARTER,
+        turbojpeg::ScalingFactor::ONE_HALF,
+        turbojpeg::ScalingFactor::ONE,
+    ]
+    .into_iter()
+    .find(|f| {
+        let s = header.scaled(*f);
+        s.width.max(s.height) >= target
+    })
+    .unwrap_or(turbojpeg::ScalingFactor::ONE);
+
+    decompressor
+        .set_scaling_factor(factor)
+        .map_err(|e| Error::JpegDecode(e.to_string()))?;
+
+    let scaled = header.scaled(factor);
+    let mut output = turbojpeg::Image {
+        pixels: vec![0u8; scaled.width * scaled.height * 3],
+        width: scaled.width,
+        pitch: scaled.width * 3,
+        height: scaled.height,
+        format: turbojpeg::PixelFormat::RGB,
+    };
+    decompressor
+        .decompress(jpeg, output.as_deref_mut())
+        .map_err(|e| Error::JpegDecode(e.to_string()))?;
+
+    let rgb = RgbImage::from_raw(
+        u32::try_from(scaled.width).expect("scaled width fits u32"),
+        u32::try_from(scaled.height).expect("scaled height fits u32"),
+        output.pixels,
+    )
+    .expect("turbojpeg buffer matches scaled dimensions");
+    Ok(DynamicImage::ImageRgb8(rgb))
+}
+
 /// Resize image using `fast_image_resize` (SIMD accelerated, RGB/U8x3).
-fn resize_fast(img: &DynamicImage, target_size: u32) -> Result<RgbImage, Error> {
-    let src = img.to_rgb8();
+///
+/// Takes ownership so an already-`ImageRgb8` decode (the common JPEG case) is
+/// unwrapped with `into_rgb8` instead of cloned via `to_rgb8`.
+fn resize_fast(img: DynamicImage, target_size: u32) -> Result<RgbImage, Error> {
+    let src = img.into_rgb8();
     let (src_w, src_h) = (src.width(), src.height());
 
     let (dst_w, dst_h) = scale_dimensions(src_w, src_h, target_size);
@@ -250,10 +371,11 @@ pub fn generate_thumbnail_from_bytes(data: &[u8], path: &Path, size: u32) -> Res
 
     let jpeg = match category {
         Some(FileCategory::Photo) => {
-            let img = image::load_from_memory(data)?;
-            let oriented = apply_orientation_transform(img, orientation);
-            let resized = resize_fast(&oriented, size)?;
-            encode_jpeg(&resized, THUMBNAIL_JPEG_QUALITY)?
+            let img = decode_photo_scaled(data, size)?;
+            let resized = resize_fast(img, size)?;
+            let oriented =
+                apply_orientation_transform(DynamicImage::ImageRgb8(resized), orientation);
+            encode_jpeg(&oriented.into_rgb8(), THUMBNAIL_JPEG_QUALITY)?
         }
         Some(FileCategory::Raw) => {
             generate_from_raw_bytes_with_orientation(data, size, orientation, path)?
@@ -277,12 +399,8 @@ fn generate_from_raw_bytes_with_orientation(
     let spans = find_jpeg_spans(data);
 
     for (start, len) in spans {
-        if let Ok(img) =
-            image::load_from_memory_with_format(&data[start..start + len], image::ImageFormat::Jpeg)
-        {
-            let oriented = apply_orientation_transform(img, orientation);
-            let resized = resize_fast(&oriented, size)?;
-            return encode_jpeg(&resized, THUMBNAIL_JPEG_QUALITY);
+        if let Ok(result) = try_decode_resize_encode(&data[start..start + len], orientation, size) {
+            return Ok(result);
         }
     }
 
@@ -322,23 +440,30 @@ impl JpegScanner {
     }
 
     /// Scan `data[self.offset..]` for new JPEG markers, updating internal state.
+    ///
+    /// `data` is a growing buffer fed across calls; scanning stops one byte
+    /// short of the end (`end = len - 1`) and resumes there next call, so a
+    /// marker pair straddling a chunk boundary (`0xFF` last, `0xD8`/`0xD9`
+    /// first) is caught once the following byte arrives.
     fn scan(&mut self, data: &[u8]) {
-        let mut i = self.offset;
-        while i < data.len().saturating_sub(1) {
-            if data[i] == 0xFF && data[i + 1] == 0xD8 {
-                self.open_sois.push(i);
-            } else if data[i] == 0xFF && data[i + 1] == 0xD9 {
-                let eoi_end = i + 2;
-                if let Some(soi) = self.open_sois.pop() {
-                    let len = eoi_end - soi;
-                    if len > 100 && is_valid_jpeg(&data[soi..eoi_end]) {
-                        self.spans.push((soi, len));
+        let end = data.len().saturating_sub(1);
+        for i in memchr::memchr_iter(0xFF, &data[self.offset..end]) {
+            let pos = self.offset + i;
+            match data[pos + 1] {
+                0xD8 => self.open_sois.push(pos),
+                0xD9 => {
+                    let eoi_end = pos + 2;
+                    if let Some(soi) = self.open_sois.pop() {
+                        let len = eoi_end - soi;
+                        if len > 100 && is_valid_jpeg(&data[soi..eoi_end]) {
+                            self.spans.push((soi, len));
+                        }
                     }
                 }
+                _ => {}
             }
-            i += 1;
         }
-        self.offset = i;
+        self.offset = end;
     }
 
     /// Return the first completed span >= `MIN_PREVIEW_BYTES` as (start, len).
@@ -347,6 +472,19 @@ impl JpegScanner {
             .iter()
             .find(|(_, len)| *len >= MIN_PREVIEW_BYTES)
             .copied()
+    }
+
+    /// Return the first completed span >= `FULL_PREVIEW_BYTES` as (start, len).
+    fn full_size_span(&self) -> Option<(usize, usize)> {
+        self.spans
+            .iter()
+            .find(|(_, len)| *len >= FULL_PREVIEW_BYTES)
+            .copied()
+    }
+
+    /// Return the largest completed span as (start, len).
+    fn largest_span(&self) -> Option<(usize, usize)> {
+        self.spans.iter().max_by_key(|(_, len)| *len).copied()
     }
 
     /// Consume the scanner, returning spans sorted by preference:
@@ -367,10 +505,10 @@ const READ_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 /// per-candidate failures aren't fatal — but the LAST attempt's error is what
 /// they surface to the user, which is more informative than a bare "no preview".
 fn try_decode_resize_encode(jpeg: &[u8], orientation: u32, size: u32) -> Result<Vec<u8>, Error> {
-    let img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg)?;
-    let oriented = apply_orientation_transform(img, orientation);
-    let resized = resize_fast(&oriented, size)?;
-    encode_jpeg(&resized, THUMBNAIL_JPEG_QUALITY)
+    let img = decode_jpeg_scaled(jpeg, size)?;
+    let resized = resize_fast(img, size)?;
+    let oriented = apply_orientation_transform(DynamicImage::ImageRgb8(resized), orientation);
+    encode_jpeg(&oriented.into_rgb8(), THUMBNAIL_JPEG_QUALITY)
 }
 
 /// Extract preview from RAW data, continuing to read from file if preview not found.
@@ -432,4 +570,55 @@ pub fn generate_raw_with_preread(
     Err(last_err.unwrap_or(Error::NoEmbeddedPreview {
         path: path.to_path_buf(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal byte sequence that passes `is_valid_jpeg` and the `len > 100`
+    /// filter: SOI + JFIF marker, zero padding (no stray 0xFF), then EOI.
+    fn minimal_jpeg() -> Vec<u8> {
+        let mut data = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        data.extend(std::iter::repeat_n(0x00, 100));
+        data.extend_from_slice(&[0xFF, 0xD9]);
+        data
+    }
+
+    #[test]
+    fn scan_finds_span_in_single_pass() {
+        let jpeg = minimal_jpeg();
+        let mut scanner = JpegScanner::new();
+        scanner.scan(&jpeg);
+        assert_eq!(scanner.spans, vec![(0, jpeg.len())]);
+    }
+
+    #[test]
+    fn scan_catches_eoi_split_across_chunk_boundary() {
+        let jpeg = minimal_jpeg();
+        let split = jpeg.len() - 1; // 0xFF of EOI lands at the chunk edge.
+
+        let mut scanner = JpegScanner::new();
+        // First chunk withholds the trailing 0xD9; scan leaves the final 0xFF
+        // unscanned, so no span completes yet.
+        scanner.scan(&jpeg[..split]);
+        assert!(scanner.spans.is_empty());
+        assert_eq!(scanner.open_sois, vec![0]);
+
+        // Growing buffer delivers the 0xD9; the split EOI is now recognized.
+        scanner.scan(&jpeg);
+        assert_eq!(scanner.spans, vec![(0, jpeg.len())]);
+    }
+
+    #[test]
+    fn orientation_applied_after_resize_swaps_dimensions() {
+        // 400x200 landscape -> resized to a 100px box -> 100x50.
+        let img = DynamicImage::ImageRgb8(RgbImage::new(400, 200));
+        let resized = resize_fast(img, 100).expect("resize succeeds");
+        assert_eq!((resized.width(), resized.height()), (100, 50));
+
+        // Orientation 6 (rotate 90) on the small image swaps to portrait 50x100.
+        let oriented = apply_orientation_transform(DynamicImage::ImageRgb8(resized), 6);
+        assert_eq!((oriented.width(), oriented.height()), (50, 100));
+    }
 }

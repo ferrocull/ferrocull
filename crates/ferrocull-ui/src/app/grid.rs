@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path, rc::Rc};
 
 use ferrocull_core::{
     ColorLabel,
@@ -14,12 +14,6 @@ use crate::{
 
 pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message> {
     match msg {
-        grid::Message::ThumbnailVisible(item_idx) => {
-            return state.load_thumbnail(item_idx);
-        }
-        grid::Message::ThumbnailHidden(item_idx) => {
-            state.loaded_thumbs.remove(&state.media.item(item_idx).path);
-        }
         grid::Message::FileFocused(path) => {
             let idx = state
                 .media
@@ -247,9 +241,9 @@ impl Ferrocull {
     ///
     /// Memoized on [`GridRowsKey`]: `on_scroll` calls this on every frame, but
     /// the row model only changes with the media view, sort/grouping, or column
-    /// geometry — so a plain scroll reuses the cached vector instead of
+    /// geometry — so a plain scroll hands out a cheap `Rc` clone instead of
     /// re-walking every item in `section_counts`.
-    fn grid_rows(&mut self, grid_width: f32) -> Vec<views::thumbnails::RowStart> {
+    fn grid_rows(&mut self, grid_width: f32) -> Rc<[views::thumbnails::RowStart]> {
         let grouped = self.config.sort_order == SortOrder::Time;
         let key = super::GridRowsKey {
             media_version: self.media.version(),
@@ -261,7 +255,7 @@ impl Ferrocull {
         if let Some((cached_key, rows)) = &self.grid_rows_cache
             && *cached_key == key
         {
-            return rows.clone();
+            return Rc::clone(rows);
         }
         let counts = views::thumbnails::section_counts(
             self.media.items(),
@@ -270,9 +264,80 @@ impl Ferrocull {
             grouped,
         );
         let (cols, cell_width) = views::thumbnails::grid_metrics(grid_width, self.window_scale);
-        let rows = views::thumbnails::row_starts(&counts, cols, cell_width, grouped);
-        self.grid_rows_cache = Some((key, rows.clone()));
+        let rows: Rc<[views::thumbnails::RowStart]> =
+            views::thumbnails::row_starts(&counts, cols, cell_width, grouped).into();
+        self.grid_rows_cache = Some((key, Rc::clone(&rows)));
         rows
+    }
+
+    /// Item indices whose rows fall in the current thumbnail load window
+    /// (viewport plus [`GRID_OVERSCAN`](views::thumbnails::GRID_OVERSCAN)).
+    fn window_item_indices(&mut self, grid_width: f32) -> HashSet<usize> {
+        let rows = self.grid_rows(grid_width);
+        let Some((first, last)) = views::thumbnails::visible_row_window(
+            &rows,
+            self.grid_scroll_y,
+            self.grid_viewport_height,
+            views::thumbnails::GRID_OVERSCAN,
+        ) else {
+            return HashSet::new();
+        };
+        let start = rows[first].ordinal;
+        let end = rows
+            .get(last + 1)
+            .map_or_else(|| self.media.visible_len(), |r| r.ordinal);
+        self.media
+            .indices_in_ordinal_range(start, end - start, self.config.ascending)
+            .into_iter()
+            .collect()
+    }
+
+    /// Reconcile which thumbnails are loaded with the current scroll window:
+    /// evict thumbnails whose cells left the window and spawn loads for cells
+    /// that just entered it. When a scan batch reported freshly-cached
+    /// thumbnails ([`Ferrocull::thumb_generation_dirty`]), also retry every
+    /// in-window cell that is still unloaded, so a thumbnail that finished
+    /// generating while its cell sat in view gets picked up.
+    ///
+    /// Replaces the per-cell `sensor` `on_show`/`on_hide` the virtualized grid
+    /// can no longer host (offscreen cells are not built). Called after every
+    /// `update`; cheap when the window did not move.
+    pub(super) fn reconcile_thumbnail_window(&mut self) -> Task<Message> {
+        let new_window = match self.grid_area_width {
+            Some(width) => self.window_item_indices(width),
+            // No scroll report yet — iced suppresses them while the content fits
+            // the viewport, so the visible set is bounded: load all of it.
+            None => self.media.sorted_view().values().copied().collect(),
+        };
+
+        // Evict thumbnails whose items left the window (bounds memory).
+        let leaving: Vec<std::path::PathBuf> = self
+            .loaded_thumbs
+            .keys()
+            .filter(|path| {
+                self.media
+                    .index_of(path)
+                    .is_none_or(|idx| !new_window.contains(&idx))
+            })
+            .cloned()
+            .collect();
+        for path in leaving {
+            self.loaded_thumbs.remove(&path);
+        }
+
+        let retry_all = std::mem::take(&mut self.thumb_generation_dirty);
+        let loads: Vec<Task<Message>> = new_window
+            .iter()
+            .filter(|&&idx| {
+                let entered = !self.thumb_window.contains(&idx);
+                (entered || retry_all)
+                    && !self.loaded_thumbs.contains_key(&self.media.item(idx).path)
+            })
+            .map(|&idx| self.load_thumbnail(idx))
+            .collect();
+
+        self.thumb_window = new_window;
+        Task::batch(loads)
     }
 
     /// Move focus to `idx` (if any) and scroll the grid the minimum needed to
