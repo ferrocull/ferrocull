@@ -269,6 +269,17 @@ impl MediaView {
         })
     }
 
+    /// Item index at display-order position `ordinal`, or `None` if out of
+    /// range. The inverse of [`ordinal_position`](Self::ordinal_position).
+    #[must_use]
+    pub(crate) fn index_at_ordinal(&self, ordinal: usize, ascending: bool) -> Option<usize> {
+        if ascending {
+            self.sorted_view.values().nth(ordinal).copied()
+        } else {
+            self.sorted_view.values().rev().nth(ordinal).copied()
+        }
+    }
+
     /// Bump the render-cache version without changing item data.
     ///
     /// Used when something the grid renders but `MediaView` does not own changed

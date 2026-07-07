@@ -38,7 +38,7 @@ use crate::{
     },
     styles,
     theme::spacing,
-    views::{self, GRID_SCROLLABLE_ID, GridCacheKey, collapsible_section},
+    views::{self, GridCacheKey, collapsible_section},
 };
 
 /// Tracks which config panel sections are expanded (present = expanded).
@@ -352,32 +352,6 @@ impl Ferrocull {
         self.media.last_index(self.config.ascending)
     }
 
-    /// Produce a task that scrolls the grid so `target_idx` is visible.
-    fn scroll_grid_to_item(&self, target_idx: usize) -> Task<Message> {
-        let Some(position) = self.ordinal_position(target_idx) else {
-            return Task::none();
-        };
-        let len = self.media.visible_len();
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "scroll position as float is fine"
-        )]
-        // Divide by the last index, not the count, so the final item snaps to the
-        // viewport bottom (offset 1.0) rather than being clipped off it.
-        let fraction = if len <= 1 {
-            0.0
-        } else {
-            position as f32 / (len - 1) as f32
-        };
-        iced::widget::operation::snap_to(
-            GRID_SCROLLABLE_ID,
-            scrollable::RelativeOffset {
-                x: 0.0,
-                y: fraction,
-            },
-        )
-    }
-
     fn adjacent_index(&self, current: usize, forward: bool) -> Option<usize> {
         self.media.adjacent_index(
             current,
@@ -637,17 +611,19 @@ where
 fn handle_arrow_key(key: &Key, in_preview: bool) -> Task<Message> {
     use keyboard::key::Named;
 
-    let forward = match key {
-        Key::Named(Named::ArrowRight | Named::ArrowDown) => true,
-        Key::Named(Named::ArrowLeft | Named::ArrowUp) => false,
+    // Preview steps one image either way; the grid navigates in two dimensions.
+    let msg = match (in_preview, key) {
+        (true, Key::Named(Named::ArrowRight | Named::ArrowDown)) => {
+            Message::Preview(preview_msg::Message::Next)
+        }
+        (true, Key::Named(Named::ArrowLeft | Named::ArrowUp)) => {
+            Message::Preview(preview_msg::Message::Prev)
+        }
+        (false, Key::Named(Named::ArrowRight)) => Message::Grid(grid_msg::Message::FocusNext),
+        (false, Key::Named(Named::ArrowLeft)) => Message::Grid(grid_msg::Message::FocusPrev),
+        (false, Key::Named(Named::ArrowDown)) => Message::Grid(grid_msg::Message::FocusDown),
+        (false, Key::Named(Named::ArrowUp)) => Message::Grid(grid_msg::Message::FocusUp),
         _ => return Task::none(),
-    };
-
-    let msg = match (in_preview, forward) {
-        (true, true) => Message::Preview(preview_msg::Message::Next),
-        (true, false) => Message::Preview(preview_msg::Message::Prev),
-        (false, true) => Message::Grid(grid_msg::Message::FocusNext),
-        (false, false) => Message::Grid(grid_msg::Message::FocusPrev),
     };
     Task::done(msg)
 }
