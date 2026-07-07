@@ -16,9 +16,13 @@ pub(super) fn update(state: &mut Ferrocull, msg: preview::Message) -> Task<Messa
                 state.preview_cache.clear();
                 state.preview_loading.clear();
                 state.hovered_star = None;
-                state.focused_index = Some(index);
-                if navigated_away {
-                    return state.scroll_grid_to_item(index);
+                // Rejecting or refiltering the previewed card can hide it; focus
+                // must stay on a visible item.
+                if state.media.is_visible(index) {
+                    state.focused_index = Some(index);
+                    if navigated_away {
+                        return state.scroll_focus_into_view(index);
+                    }
                 }
             }
         }

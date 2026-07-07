@@ -59,17 +59,21 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
         }
         grid::Message::StarHover(star) => state.hovered_star = star,
         grid::Message::FocusNext => {
-            state.focused_index = state.focused_index.map_or_else(
+            let idx = state.focused_index.map_or_else(
                 || state.first_index(),
                 |current| state.adjacent_index(current, true).or(Some(current)),
             );
+            return state.reveal_focus(idx);
         }
         grid::Message::FocusPrev => {
-            state.focused_index = state.focused_index.map_or_else(
+            let idx = state.focused_index.map_or_else(
                 || state.last_index(),
                 |current| state.adjacent_index(current, false).or(Some(current)),
             );
+            return state.reveal_focus(idx);
         }
+        grid::Message::FocusDown => return state.move_focus_by_row(true),
+        grid::Message::FocusUp => return state.move_focus_by_row(false),
         grid::Message::FocusOn(idx) => {
             state.focused_index = Some(idx);
         }
@@ -185,9 +189,7 @@ impl Ferrocull {
             views::thumbnails::ScrollReaction::Reanchor => self.reanchor_grid(grid_width),
             views::thumbnails::ScrollReaction::AdoptOffset => {
                 let rows = self.grid_rows(grid_width);
-                if let Some(row) = views::thumbnails::anchor_row(&rows, offset) {
-                    self.grid_anchor = rows[row].ordinal;
-                }
+                self.pin_anchor(&rows, offset);
                 self.grid_scroll_y = offset;
                 Task::none()
             }
@@ -211,8 +213,7 @@ impl Ferrocull {
         }
         let target = views::thumbnails::row_for_ordinal(&rows, self.grid_anchor)
             .expect("ordinal 0 always maps to the first row");
-        let max_offset = (self.grid_content_height - self.grid_viewport_height).max(0.0);
-        let y = rows[target].offset.min(max_offset);
+        let y = rows[target].offset.min(self.max_grid_offset());
         self.grid_scroll_y = y;
         iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y })
     }
@@ -226,6 +227,19 @@ impl Ferrocull {
         self.grid_scroll_y = 0.0;
         self.grid_wheel_lines = 0.0;
         iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y: 0.0 })
+    }
+
+    /// Largest scroll offset the grid can reach: content minus viewport, floored
+    /// at zero when the content is shorter than the viewport.
+    fn max_grid_offset(&self) -> f32 {
+        (self.grid_content_height - self.grid_viewport_height).max(0.0)
+    }
+
+    /// Pin the anchor to the row occupying the viewport top at `offset`.
+    fn pin_anchor(&mut self, rows: &[views::thumbnails::RowStart], offset: f32) {
+        if let Some(row) = views::thumbnails::anchor_row(rows, offset) {
+            self.grid_anchor = rows[row].ordinal;
+        }
     }
 
     /// Scroll anchors for every grid row under the current view and the
@@ -259,6 +273,99 @@ impl Ferrocull {
         let rows = views::thumbnails::row_starts(&counts, cols, cell_width, grouped);
         self.grid_rows_cache = Some((key, rows.clone()));
         rows
+    }
+
+    /// Move focus to `idx` (if any) and scroll the grid the minimum needed to
+    /// keep the newly focused card on screen.
+    fn reveal_focus(&mut self, idx: Option<usize>) -> Task<Message> {
+        self.focused_index = idx;
+        idx.map_or_else(Task::none, |i| self.scroll_focus_into_view(i))
+    }
+
+    /// Scroll so the row holding card `idx` is fully visible, aligning to
+    /// whichever viewport edge it fell past; a no-op when the card is already
+    /// visible. Uses the same anchor bookkeeping as the wheel handler so the
+    /// next viewport report does not read the move as a user scroll.
+    pub(super) fn scroll_focus_into_view(&mut self, idx: usize) -> Task<Message> {
+        let Some(width) = self.grid_area_width else {
+            return Task::none();
+        };
+        let rows = self.grid_rows(width);
+        let ordinal = self
+            .ordinal_position(idx)
+            .expect("no ordinal for focused index");
+        let target =
+            views::thumbnails::row_for_ordinal(&rows, ordinal).expect("no row for focused ordinal");
+        // Row anchors double as content-space row tops (monotonic, gap-adjusted).
+        let row_top = rows[target].offset;
+        let row_bot = rows
+            .get(target + 1)
+            .map_or(self.grid_content_height, |r| r.offset);
+        let view_top = self.grid_scroll_y;
+        let view_bot = view_top + self.grid_viewport_height;
+
+        let y = if row_top < view_top {
+            row_top
+        } else if row_bot > view_bot {
+            // Align the row's bottom to the viewport, but never past its top (a
+            // row taller than the viewport aligns to the top instead).
+            (row_bot - self.grid_viewport_height).min(row_top)
+        } else {
+            return Task::none();
+        };
+        let y = y.clamp(0.0, self.max_grid_offset());
+
+        self.grid_scroll_y = y;
+        self.pin_anchor(&rows, y);
+        iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y })
+    }
+
+    /// Move focus one grid row up or down, staying in the same column, then
+    /// reveal it. Clamps `col` into a shorter partial target row and stays put
+    /// at the top/bottom edge. Reuses the section-aware row model so the column
+    /// stays aligned across date-section breaks.
+    fn move_focus_by_row(&mut self, down: bool) -> Task<Message> {
+        let Some(width) = self.grid_area_width else {
+            return Task::none();
+        };
+        let rows = self.grid_rows(width);
+        if rows.is_empty() {
+            return Task::none();
+        }
+        let Some(current) = self.focused_index else {
+            let idx = if down {
+                self.first_index()
+            } else {
+                self.last_index()
+            };
+            return self.reveal_focus(idx);
+        };
+        let ordinal = self
+            .ordinal_position(current)
+            .expect("no ordinal for focused index");
+        let row =
+            views::thumbnails::row_for_ordinal(&rows, ordinal).expect("no row for focused ordinal");
+        let col = ordinal - rows[row].ordinal;
+        let target_row = if down {
+            if row + 1 >= rows.len() {
+                return Task::none();
+            }
+            row + 1
+        } else {
+            if row == 0 {
+                return Task::none();
+            }
+            row - 1
+        };
+        let row_end = rows
+            .get(target_row + 1)
+            .map_or_else(|| self.media.visible_len(), |r| r.ordinal);
+        let target_ordinal = (rows[target_row].ordinal + col).min(row_end - 1);
+        let target_idx = self
+            .media
+            .index_at_ordinal(target_ordinal, self.config.ascending)
+            .expect("no visible item at target ordinal");
+        self.reveal_focus(Some(target_idx))
     }
 
     fn handle_file_toggled(&mut self, path: &Path) {

@@ -77,6 +77,8 @@ pub(crate) mod grid {
         StarHover(Option<i8>),
         FocusNext,
         FocusPrev,
+        FocusUp,
+        FocusDown,
         FocusOn(usize),
         OpenPreview(usize),
         /// Wheel scrolled over the grid — snap row-by-row.
