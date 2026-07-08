@@ -5,7 +5,7 @@
 //! [`Event::ThumbnailReady`]. EXIF drives item creation upstream, so it must
 //! land first.
 //!
-//! Cache hits ([`cache::cache_key_from_disk`] + [`cache::ThumbnailCache`])
+//! Cache hits ([`cache::cache_key_from_canonical`] + [`cache::ThumbnailCache`])
 //! skip generation entirely.
 
 use std::{
