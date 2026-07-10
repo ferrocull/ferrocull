@@ -4,7 +4,8 @@
 
 use iced::{
     Border, Color, Shadow, Theme, Vector,
-    widget::{button, container, progress_bar},
+    border::Radius,
+    widget::{button, container, pick_list, progress_bar, text_input},
 };
 
 use crate::theme::{colors, radius};
@@ -132,6 +133,34 @@ pub(crate) fn filter_pill(selected: bool) -> impl Fn(&Theme, button::Status) -> 
             }
         }
     }
+}
+
+/// Right half of the merged pattern control: a text input whose left corners
+/// are squared so the preset picker sits flush against it.
+#[must_use]
+pub(crate) fn pattern_input(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = text_input::default(theme, status);
+    style.border.radius = Radius {
+        top_left: 0.0,
+        bottom_left: 0.0,
+        ..Radius::from(radius::XS)
+    };
+    style
+}
+
+/// Left half of the merged pattern control: a chevron-only pick list whose
+/// right corners are squared to continue the input's outline.
+#[must_use]
+pub(crate) fn pattern_picker(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let palette = theme.extended_palette();
+    let mut style = pick_list::default(theme, status);
+    style.background = palette.background.base.color.into();
+    style.border.radius = Radius {
+        top_right: 0.0,
+        bottom_right: 0.0,
+        ..Radius::from(radius::XS)
+    };
+    style
 }
 
 /// Amber progress bar for storage and import indicators.

@@ -118,6 +118,8 @@ pub(crate) mod destination {
         VideosDestChanged(String),
         PhotoPatternChanged(String),
         VideoPatternChanged(String),
+        /// Toggle membership of a pattern string in the saved-patterns list.
+        PatternSaveToggled(String),
         BrowsePhotosDest,
         BrowseVideosDest,
         PhotosDestPicked(Option<PathBuf>),

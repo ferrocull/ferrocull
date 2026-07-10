@@ -34,6 +34,14 @@ pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<M
             state.video_pattern = pattern;
             state.persist_settings();
         }
+        destination::Message::PatternSaveToggled(pattern) => {
+            if let Some(pos) = state.saved_patterns.iter().position(|p| *p == pattern) {
+                state.saved_patterns.remove(pos);
+            } else {
+                state.saved_patterns.insert(0, pattern);
+            }
+            state.persist_settings();
+        }
         destination::Message::BrowsePhotosDest => {
             return pick_folder(|opt| {
                 Message::Destination(destination::Message::PhotosDestPicked(opt))
