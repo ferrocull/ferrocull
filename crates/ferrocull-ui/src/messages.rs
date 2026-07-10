@@ -188,6 +188,56 @@ pub(crate) mod profile {
     }
 }
 
+pub(crate) mod settings {
+    use std::{path::PathBuf, sync::Arc};
+
+    use ferrocull_core::{ThemePreference, cache};
+
+    /// Settings popup category, shown as the left rail.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub(crate) enum Category {
+        #[default]
+        Appearance,
+        Storage,
+    }
+
+    impl Category {
+        pub(crate) const ALL: [Self; 2] = [Self::Appearance, Self::Storage];
+
+        pub(crate) fn label(self) -> &'static str {
+            match self {
+                Self::Appearance => "Appearance",
+                Self::Storage => "Storage",
+            }
+        }
+    }
+
+    /// Messages for the Settings popup.
+    #[derive(Debug, Clone)]
+    pub(crate) enum Message {
+        Open,
+        Close,
+        SelectCategory(Category),
+        /// Theme applies live (no confirmation).
+        ThemeChanged(ThemePreference),
+        /// Stage a new thumbnail resolution awaiting confirmation (destructive:
+        /// clears and regenerates the thumbnail cache).
+        ThumbnailSizeSelected(u32),
+        ConfirmThumbnailSize,
+        CancelThumbnailSize,
+        /// Open the folder picker for a new cache location.
+        BrowseCacheDir,
+        /// Folder picker result; `Some` stages the move awaiting confirmation.
+        CacheDirChosen(Option<PathBuf>),
+        ConfirmCacheDir,
+        CancelCacheDir,
+        /// Cache relocation finished: the new resolved root, or the relocation
+        /// error (shared for `Clone` — `cache::Error` wraps a non-`Clone`
+        /// `io::Error`).
+        CacheMoved(Result<PathBuf, Arc<cache::Error>>),
+    }
+}
+
 use std::path::PathBuf;
 
 use ferrocull_core::{media::CaptureTime, xmp::Metadata};
@@ -247,6 +297,7 @@ pub(crate) enum Message {
     Filters(filters::Message),
     Preview(preview::Message),
     Profile(profile::Message),
+    Settings(settings::Message),
 
     ToggleSection(Section),
     TogglePanel(Panel),

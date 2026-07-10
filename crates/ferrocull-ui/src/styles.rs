@@ -238,6 +238,69 @@ pub(crate) fn status_bar(theme: &Theme) -> container::Style {
     }
 }
 
+/// Full-screen dimming scrim behind the Settings popup. A warm near-black at
+/// partial opacity so the grid reads as pushed back, not hidden.
+#[must_use]
+pub(crate) fn scrim(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::from_rgba(0.06, 0.05, 0.05, 0.62).into()),
+        ..Default::default()
+    }
+}
+
+/// Elevated Settings card floating above the scrim.
+#[must_use]
+pub(crate) fn settings_card(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.weakest.color.into()),
+        border: Border {
+            color: palette.background.weaker.color,
+            width: 1.0,
+            radius: radius::LG.into(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+            offset: Vector::new(0.0, 8.0),
+            blur_radius: 32.0,
+        },
+        ..Default::default()
+    }
+}
+
+/// Category rail item — amber "selected frame" cue when active, subtle hover
+/// otherwise. Mirrors the date-tree selection so the rail reads as native.
+pub(crate) fn settings_rail_item(
+    selected: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme: &Theme, status: button::Status| {
+        let palette = theme.extended_palette();
+
+        let bg = match (selected, status) {
+            (true, button::Status::Hovered) => colors::ACCENT_MUTED.scale_alpha(0.38),
+            (true, _) => colors::ACCENT_MUTED.scale_alpha(0.28),
+            (false, button::Status::Hovered) => palette.background.neutral.color,
+            (false, _) => Color::TRANSPARENT,
+        };
+
+        let text_color = if selected {
+            colors::ACCENT
+        } else {
+            palette.background.base.text
+        };
+
+        button::Style {
+            background: Some(bg.into()),
+            text_color,
+            border: Border {
+                radius: radius::SM.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
 /// Collapsible section header with distinct background.
 pub(crate) fn section_toggle(expanded: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme: &Theme, status: button::Status| {

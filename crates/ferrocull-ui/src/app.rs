@@ -4,6 +4,7 @@ mod filters;
 mod grid;
 mod preview;
 mod profile;
+mod settings;
 mod sources;
 
 use std::{
@@ -15,8 +16,9 @@ use std::{
 
 use ferrocull_core::{
     AppSettings, ColorLabel, FileCategory, Hook, IngestConfig, JobCodeHistory, NamedProfile,
-    cache::{PreviewCache, ThumbnailCache},
-    media::{DateSelection, FilterMode, SortOrder},
+    Preferences, ViewPrefs,
+    cache::{PreviewCache, ThumbnailCache, default_cache_root},
+    media::{DateSelection, FilterMode},
     metadata_store,
     persistence::MediaDatabase,
     scan,
@@ -27,7 +29,8 @@ use iced::{
     futures::SinkExt,
     keyboard::{self, Event as KeyboardEvent, Key, Modifiers},
     widget::{
-        Space, button, column, container, progress_bar, row, scrollable, stack, text, tooltip,
+        Space, button, center, column, container, mouse_area, opaque, progress_bar, responsive,
+        row, scrollable, stack, text, tooltip,
     },
 };
 use sipper::sipper;
@@ -36,7 +39,8 @@ use crate::{
     media_view::{MediaView, ViewParams},
     messages::{
         Message, Panel, ScanEvent, Section, compare as compare_msg, destination as destination_msg,
-        filters as filters_msg, grid as grid_msg, preview as preview_msg, sources as sources_msg,
+        filters as filters_msg, grid as grid_msg, preview as preview_msg,
+        settings as settings_msg, sources as sources_msg,
     },
     styles,
     theme::spacing,
@@ -65,8 +69,6 @@ impl SectionState {
 
 const LEFT_PANEL_WIDTH: f32 = 250.0;
 const RIGHT_PANEL_WIDTH: f32 = 300.0;
-
-const THUMBNAIL_SIZE: u32 = 256;
 
 /// Max scan events drained into one [`Message::ScanBatch`]. The pipeline emits
 /// two events per file, so this caps a batch at ~128 files — large enough to
@@ -111,24 +113,43 @@ enum ViewMode {
     Compare(CompareState),
 }
 
+/// State for the Settings popup overlay. Created on open, dropped on close.
+/// Committed values live on [`Ferrocull`]; this holds only transient UI state
+/// and the destructive changes staged for confirmation.
+pub(crate) struct SettingsState {
+    pub(crate) category: settings_msg::Category,
+    /// Thumbnail resolution staged awaiting confirmation (destructive: clears
+    /// and regenerates the thumbnail cache). `None` when nothing is staged.
+    pub(crate) pending_thumbnail_size: Option<u32>,
+    /// Cache directory staged awaiting confirmation (destructive: moves files).
+    pub(crate) pending_cache_dir: Option<PathBuf>,
+    /// A cache relocation is running; its confirm control stays disabled until
+    /// the move settles.
+    pub(crate) cache_move_in_flight: bool,
+}
+
+impl SettingsState {
+    fn new() -> Self {
+        Self {
+            category: settings_msg::Category::default(),
+            pending_thumbnail_size: None,
+            pending_cache_dir: None,
+            cache_move_in_flight: false,
+        }
+    }
+}
+
 /// The user's filter/sort/grouping choices — the source of truth for what the
 /// grid shows. A distinct struct so `config.params()` borrows only these
 /// fields, leaving `&mut self.media` free at rebuild/insert sites.
 ///
-/// Burst *expansion* is not here — `MediaView` owns it, since only its burst
-/// re-keying logic can keep it consistent.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent user-toggle flags for the view configuration"
-)]
+/// The durable subset (persisted across launches) lives in the embedded
+/// [`ViewPrefs`]; the selection sets below are session-only and never
+/// persisted. Burst *expansion* is not here — `MediaView` owns it, since only
+/// its burst re-keying logic can keep it consistent.
 struct ViewConfig {
-    sort_order: SortOrder,
-    /// Display direction (applied at read time, so not part of `ViewParams`).
-    ascending: bool,
-    filter_mode: FilterMode,
-    hide_rejected: bool,
-    group_raw_jpeg: bool,
-    group_bursts: bool,
+    /// Durable prefs restored at startup and written back on change.
+    view: ViewPrefs,
     selected_sources: BTreeSet<PathBuf>,
     selected_dates: Option<DateSelection>,
     selected_ratings: BTreeSet<i8>,
@@ -136,14 +157,11 @@ struct ViewConfig {
 }
 
 impl ViewConfig {
-    fn with_defaults() -> Self {
+    /// Seed the view from persisted durable prefs. Selection sets start empty —
+    /// they reference session-specific content and are never persisted.
+    fn from_prefs(view: ViewPrefs) -> Self {
         Self {
-            sort_order: SortOrder::default(),
-            ascending: true,
-            filter_mode: FilterMode::default(),
-            hide_rejected: false,
-            group_raw_jpeg: true,
-            group_bursts: true,
+            view,
             selected_sources: BTreeSet::new(),
             selected_dates: None,
             selected_ratings: BTreeSet::new(),
@@ -154,11 +172,11 @@ impl ViewConfig {
     /// Borrow the config as [`ViewParams`] for a `MediaView` operation.
     fn params(&self) -> ViewParams<'_> {
         ViewParams {
-            sort_order: self.sort_order,
-            filter_mode: self.filter_mode,
-            hide_rejected: self.hide_rejected,
-            group_raw_jpeg: self.group_raw_jpeg,
-            group_bursts: self.group_bursts,
+            sort_order: self.view.sort_order,
+            filter_mode: self.view.filter_mode,
+            hide_rejected: self.view.hide_rejected,
+            group_raw_jpeg: self.view.group_raw_jpeg,
+            group_bursts: self.view.group_bursts,
             selected_sources: &self.selected_sources,
             selected_dates: self.selected_dates,
             selected_ratings: &self.selected_ratings,
@@ -182,6 +200,19 @@ struct Ferrocull {
     /// The user's filter/sort/grouping choices, passed to `MediaView` as
     /// [`ViewParams`].
     config: ViewConfig,
+    /// The Settings popup, present only while open (rendered as a top overlay
+    /// layer over the dimmed grid).
+    settings: Option<SettingsState>,
+    /// Committed theme preference (source of truth for persistence; mirrored
+    /// into the render-time cache via `theme::set_preference`).
+    theme_preference: ferrocull_core::ThemePreference,
+    /// Committed grid thumbnail resolution (longest edge, px), fed into the
+    /// thumbnail scan.
+    thumbnail_size: u32,
+    /// Committed cache root override. `None` uses the platform default
+    /// (`cache::default_cache_root`); the resolved root is
+    /// [`Self::cache_root`].
+    cache_dir: Option<PathBuf>,
     selected: BTreeSet<usize>,
     sources: Vec<Source>,
     photos_dest: String,
@@ -300,26 +331,43 @@ impl Default for Ferrocull {
                 panic!("cannot open database at {}: {e}", db_path.display());
             }
         };
-        // Opened once here and shared (via `Arc`) into every blocking load task.
-        // A failure to create the cache directory would leave thumbnails
-        // unloadable for the whole session, so fail loudly at boot like the DB
-        // rather than degrade to a permanently blank grid.
-        let thumbnail_cache = Arc::new(
-            ThumbnailCache::open()
-                .unwrap_or_else(|e| panic!("cannot open thumbnail cache: {e}")),
-        );
-        let preview_disk_cache = Arc::new(
-            PreviewCache::open().unwrap_or_else(|e| panic!("cannot open preview cache: {e}")),
-        );
-
         let metadata = metadata_store::Store::new(db);
         let profiles = metadata.profiles();
         let job_code_history = JobCodeHistory::from_codes(metadata.job_code_history());
         let settings = metadata.settings();
 
+        // Apply the persisted theme preference before the first frame so it
+        // opens with the correct appearance rather than the OS-detected one.
+        let theme_preference = settings.preferences.theme;
+        crate::theme::set_preference(theme_preference);
+
+        let thumbnail_size = settings.preferences.thumbnail_size;
+        let cache_dir = settings.preferences.cache_dir.clone();
+        let cache_root = cache_dir
+            .clone()
+            .or_else(default_cache_root)
+            .expect("cache root unresolved");
+
+        // Opened once here and shared (via `Arc`) into every blocking load task.
+        // A failure to create the cache directory would leave thumbnails
+        // unloadable for the whole session, so fail loudly at boot like the DB
+        // rather than degrade to a permanently blank grid.
+        let thumbnail_cache = Arc::new(
+            ThumbnailCache::open_in_root(&cache_root)
+                .unwrap_or_else(|e| panic!("cannot open thumbnail cache: {e}")),
+        );
+        let preview_disk_cache = Arc::new(
+            PreviewCache::open_in_root(&cache_root)
+                .unwrap_or_else(|e| panic!("cannot open preview cache: {e}")),
+        );
+
         Self {
             media: MediaView::new(),
-            config: ViewConfig::with_defaults(),
+            config: ViewConfig::from_prefs(settings.view),
+            settings: None,
+            theme_preference,
+            thumbnail_size,
+            cache_dir,
             selected: BTreeSet::new(),
             sources: Vec::new(),
             photos_dest: settings.ingest.photos_dest.to_string_lossy().into_owned(),
@@ -385,30 +433,30 @@ fn toggle_set<T: Ord>(set: &mut BTreeSet<T>, item: T) {
 
 impl Ferrocull {
     fn first_index(&self) -> Option<usize> {
-        self.media.first_index(self.config.ascending)
+        self.media.first_index(self.config.view.ascending)
     }
 
     fn last_index(&self) -> Option<usize> {
-        self.media.last_index(self.config.ascending)
+        self.media.last_index(self.config.view.ascending)
     }
 
     fn adjacent_index(&self, current: usize, forward: bool) -> Option<usize> {
         self.media.adjacent_index(
             current,
             forward,
-            self.config.ascending,
-            self.config.sort_order,
+            self.config.view.ascending,
+            self.config.view.sort_order,
         )
     }
 
     fn ordinal_position(&self, item_idx: usize) -> Option<usize> {
-        self.media.ordinal_position(item_idx, self.config.ascending)
+        self.media.ordinal_position(item_idx, self.config.view.ascending)
     }
 
     /// The logical group to fan out to: collapsed-burst members plus RAW+JPEG siblings.
     fn group_of(&self, idx: usize) -> Vec<usize> {
         self.media
-            .group_of(idx, self.config.group_bursts, self.config.group_raw_jpeg)
+            .group_of(idx, self.config.view.group_bursts, self.config.view.group_raw_jpeg)
     }
 
     /// Snapshots the persisted working settings and writes them to the store.
@@ -424,8 +472,26 @@ impl Ferrocull {
             },
             post_download_hooks: self.hooks.clone(),
             delete_after_download: self.delete_after_download,
+            preferences: Preferences {
+                theme: self.theme_preference,
+                thumbnail_size: self.thumbnail_size,
+                cache_dir: self.cache_dir.clone(),
+            },
+            view: self.config.view,
         };
         self.metadata.set_settings(&settings);
+    }
+
+    /// The resolved cache root: the configured override, else the platform
+    /// default. Used to display and relocate the cache.
+    fn cache_root(&self) -> Option<PathBuf> {
+        self.cache_dir.clone().or_else(default_cache_root)
+    }
+
+    /// A thumbnail scan is running (source scan or thumbnail regeneration),
+    /// which holds cache handles and stalls destructive settings changes.
+    fn scan_in_flight(&self) -> bool {
+        self.scanning || self.thumbnail_jobs_in_flight > 0
     }
 
     fn handle_thumbnail_cached(&mut self) {
@@ -441,6 +507,15 @@ impl Ferrocull {
 impl Ferrocull {
     fn handle_key_press(&mut self, key: &Key, modifiers: Modifiers) -> Task<Message> {
         use keyboard::key::Named;
+
+        // The Settings popup is modal: Esc dismisses it, and every other global
+        // shortcut is swallowed so grid/rating keys can't fire behind the scrim.
+        if self.settings.is_some() {
+            if matches!(key, Key::Named(Named::Escape)) {
+                self.settings = None;
+            }
+            return Task::none();
+        }
 
         match key {
             Key::Character(c) => {
@@ -543,6 +618,7 @@ impl Ferrocull {
                 }
                 'a' | 'A' => return Task::done(Message::Grid(grid_msg::Message::SelectAll)),
                 'd' | 'D' => return Task::done(Message::Grid(grid_msg::Message::SelectNone)),
+                ',' => return Task::done(Message::Settings(settings_msg::Message::Open)),
                 _ => {}
             }
         } else if !modifiers.shift() && !modifiers.alt() {
@@ -688,13 +764,17 @@ impl scan::Input for ScanFile {
 
 /// Spawn sipper that extracts EXIF first (creating items), then generates
 /// thumbnails, writing them through the shared [`ThumbnailCache`].
-fn spawn_thumbnail_sipper(files: Vec<ScannedFile>, cache: Arc<ThumbnailCache>) -> Task<Message> {
+fn spawn_thumbnail_sipper(
+    files: Vec<ScannedFile>,
+    thumbnail_size: u32,
+    cache: Arc<ThumbnailCache>,
+) -> Task<Message> {
     let thumb_sipper = sipper(move |mut sender| async move {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         rayon::spawn(move || {
             let inputs = files.into_iter().map(ScanFile).collect();
-            scan::run(inputs, THUMBNAIL_SIZE, Some(cache.as_ref()), |event| {
+            scan::run(inputs, thumbnail_size, Some(cache.as_ref()), |event| {
                 drop(tx.send(event));
             });
         });
@@ -729,10 +809,9 @@ fn spawn_thumbnail_sipper(files: Vec<ScannedFile>, cache: Arc<ThumbnailCache>) -
 }
 
 fn boot() -> (Ferrocull, Task<Message>) {
-    // Seed the theme cache synchronously so the first frame uses the correct
-    // OS preference rather than the Light fallback.
-    crate::theme::set_os_is_dark(crate::theme::detect_os_is_dark());
-
+    // `Ferrocull::default` applies the persisted theme preference (via
+    // `theme::set_preference`), seeding the theme cache synchronously so the
+    // first frame opens with the correct appearance.
     let state = Ferrocull::default();
     let task = sources::scan_storage_task();
     (state, task)
@@ -821,6 +900,7 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
         Message::Filters(msg) => filters::update(state, msg),
         Message::Preview(msg) => preview::update(state, msg),
         Message::Profile(msg) => profile::update(state, msg),
+        Message::Settings(msg) => settings::update(state, msg),
 
         Message::ToggleSection(section) => {
             state.sections.toggle(section);
@@ -979,15 +1059,21 @@ fn view(state: &Ferrocull) -> Element<'_, Message> {
 
     let main_content = column![main_row, status_bar(state)];
 
-    // Always use stack! so the widget tree root type is consistent across all
-    // modes. Without this, switching between stack![main, overlay] and bare
-    // main_content changes the root widget type, which makes iced discard the
-    // entire widget state tree — including the grid's scroll position.
+    // Always root the tree in a stack! so the root widget type stays consistent
+    // across all modes. Without this, switching between stack![main, overlay]
+    // and bare main_content changes the root widget type, which makes iced
+    // discard the entire widget state tree — including the grid's scroll
+    // position.
+    let mut root = stack![main_content];
     match state.view_mode {
-        ViewMode::Compare(ref cmp) => stack![main_content, compare_overlay(state, cmp)].into(),
-        ViewMode::Preview(ref p) => stack![main_content, preview_overlay(state, p)].into(),
-        ViewMode::Grid => stack![main_content].into(),
+        ViewMode::Compare(ref cmp) => root = root.push(compare_overlay(state, cmp)),
+        ViewMode::Preview(ref p) => root = root.push(preview_overlay(state, p)),
+        ViewMode::Grid => {}
     }
+    if let Some(ref settings) = state.settings {
+        root = root.push(settings_overlay(state, settings));
+    }
+    root.into()
 }
 
 /// Map a rating/color/reject item event to the corresponding grid message.
@@ -1076,6 +1162,80 @@ fn preview_overlay(state: &Ferrocull, p: &PreviewState) -> Element<'static, Mess
     views::preview::compose(top, image, bottom)
 }
 
+/// The Settings popup: a centered card (category rail + pane) over a dimmed
+/// scrim. Click-outside or `Esc` dismiss it; the card is `opaque` so clicks on
+/// it don't fall through to the scrim.
+///
+/// The card sizes as a ratio of the window, clamped to a min/max — big enough to
+/// breathe on large monitors without sprawling, and shrinking to fit small
+/// windows rather than overflowing.
+fn settings_overlay<'a>(state: &'a Ferrocull, s: &'a SettingsState) -> Element<'a, Message> {
+    use settings_msg::Category;
+
+    let card = responsive(move |size| {
+        let width = (size.width * 0.6).clamp(560.0, 900.0);
+        let height = (size.height * 0.78).clamp(440.0, 680.0);
+
+        let palette = crate::theme::palette();
+
+        let pane = match s.category {
+            Category::Appearance => views::settings::appearance_pane(state.theme_preference),
+            Category::Storage => views::settings::storage_pane(
+                s,
+                state.thumbnail_size,
+                state
+                    .cache_root()
+                    .expect("cache root unresolved")
+                    .display()
+                    .to_string(),
+                state.scan_in_flight(),
+            ),
+        };
+
+        let rail_divider = container(Space::new().width(1))
+            .width(1)
+            .height(Fill)
+            .style(|theme: &Theme| container::Style {
+                background: Some(theme.extended_palette().background.weaker.color.into()),
+                ..Default::default()
+            });
+
+        let body = row![
+            views::settings::rail(s.category),
+            rail_divider,
+            container(pane).width(Fill),
+        ]
+        .spacing(spacing::LG)
+        .height(Fill);
+
+        let interior = column![
+            text("Settings")
+                .size(16)
+                .color(palette.background.base.text),
+            body,
+        ]
+        .spacing(spacing::LG);
+
+        let card = container(interior)
+            .width(Length::Fixed(width))
+            .height(Length::Fixed(height))
+            .padding(spacing::LG)
+            .style(styles::settings_card);
+
+        center(opaque(Element::from(card).map(Message::Settings))).into()
+    });
+
+    opaque(
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .style(styles::scrim),
+        )
+        .on_press(Message::Settings(settings_msg::Message::Close)),
+    )
+}
+
 /// Clickable edge handle for collapsing/expanding panels.
 fn panel_edge_handle(panel: Panel, expanded: bool) -> Element<'static, Message> {
     let palette = crate::theme::palette();
@@ -1151,12 +1311,12 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
     let palette = crate::theme::palette();
 
     let filters_view = views::filters::filter_bar(
-        views::filters::sort_controls(state.config.sort_order, state.config.ascending),
-        views::filters::filter_mode_controls(state.config.filter_mode),
+        views::filters::sort_controls(state.config.view.sort_order, state.config.view.ascending),
+        views::filters::filter_mode_controls(state.config.view.filter_mode),
         views::filters::grouping_controls(
-            state.config.group_raw_jpeg,
-            state.config.group_bursts,
-            state.config.hide_rejected,
+            state.config.view.group_raw_jpeg,
+            state.config.view.group_bursts,
+            state.config.view.hide_rejected,
         ),
         views::filters::rating_filter(&state.config.selected_ratings),
         views::filters::color_label_filter(&state.config.selected_color_labels),
@@ -1172,8 +1332,8 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
     let has_filters_active = !state.config.selected_ratings.is_empty()
         || !state.config.selected_color_labels.is_empty()
         || state.config.selected_dates.is_some()
-        || state.config.filter_mode != FilterMode::default()
-        || state.config.hide_rejected;
+        || state.config.view.filter_mode != FilterMode::default()
+        || state.config.view.hide_rejected;
 
     let content: Element<'_, Message> =
         if state.media.is_view_empty() && !state.media.is_empty() && has_filters_active {
@@ -1225,9 +1385,9 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         state.media.burst_map(),
         state.today,
         state.window_scale,
-        state.config.sort_order,
-        state.config.ascending,
-        state.config.group_raw_jpeg,
+        state.config.view.sort_order,
+        state.config.view.ascending,
+        state.config.view.group_raw_jpeg,
         state.hovered_thumbnail,
         state.hovered_star,
         state.focused_index,
@@ -1462,6 +1622,18 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
         .gap(4)
         .snap_within_viewport(true);
 
+    let settings_btn = button(text("\u{2699}").size(16))
+        .padding([6, 10])
+        .style(styles::ghost_button)
+        .on_press(Message::Settings(settings_msg::Message::Open));
+    let settings_with_tip = tooltip(
+        settings_btn,
+        text("Settings").size(11),
+        tooltip::Position::Top,
+    )
+    .gap(4)
+    .snap_within_viewport(true);
+
     container(
         row![
             left_text,
@@ -1469,6 +1641,8 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
             center,
             Space::new().width(Fill),
             import_with_tip,
+            Space::new().width(spacing::SM),
+            settings_with_tip,
         ]
         .align_y(iced::Alignment::Center),
     )

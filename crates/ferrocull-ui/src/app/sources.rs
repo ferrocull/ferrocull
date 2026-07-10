@@ -217,7 +217,11 @@ impl Ferrocull {
 
         self.thumbnail_jobs_in_flight += 1;
 
-        spawn_thumbnail_sipper(scanned_files, std::sync::Arc::clone(&self.thumbnail_cache))
+        spawn_thumbnail_sipper(
+            scanned_files,
+            self.thumbnail_size,
+            std::sync::Arc::clone(&self.thumbnail_cache),
+        )
     }
 
     /// Handle EXIF loaded: create `Item` with `capture_time` already set.

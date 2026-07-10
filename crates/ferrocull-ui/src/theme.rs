@@ -4,20 +4,11 @@
 
 use std::cell::Cell;
 
+use ferrocull_core::ThemePreference;
 use iced::{
     Color, Theme,
     theme::{Palette, palette},
 };
-
-/// User's theme preference. `Auto` detects from OS.
-#[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code, reason = "variants used once theme picker UI is added")]
-pub(crate) enum Preference {
-    #[default]
-    Auto,
-    Dark,
-    Light,
-}
 
 #[derive(Clone, Copy)]
 struct CachedTheme {
@@ -26,7 +17,7 @@ struct CachedTheme {
 }
 
 thread_local! {
-    static PREFERENCE: Cell<Preference> = const { Cell::new(Preference::Auto) };
+    static PREFERENCE: Cell<ThemePreference> = const { Cell::new(ThemePreference::Auto) };
     static CACHED: Cell<Option<CachedTheme>> = const { Cell::new(None) };
 }
 
@@ -72,9 +63,9 @@ pub(crate) fn detect_os_is_dark() -> bool {
 /// has explicitly picked Dark or Light, OS detection is ignored.
 pub(crate) fn set_os_is_dark(os_is_dark: bool) {
     let is_dark = match PREFERENCE.with(Cell::get) {
-        Preference::Dark => true,
-        Preference::Light => false,
-        Preference::Auto => os_is_dark,
+        ThemePreference::Dark => true,
+        ThemePreference::Light => false,
+        ThemePreference::Auto => os_is_dark,
     };
     let theme = if is_dark { dark_theme() } else { light_theme() };
     CACHED.with(|c| {
@@ -86,8 +77,7 @@ pub(crate) fn set_os_is_dark(os_is_dark: bool) {
 }
 
 /// Set theme preference and re-resolve against current OS value.
-#[allow(dead_code, reason = "used once theme picker UI is added")]
-pub(crate) fn set_preference(pref: Preference) {
+pub(crate) fn set_preference(pref: ThemePreference) {
     PREFERENCE.with(|p| p.set(pref));
     set_os_is_dark(detect_os_is_dark());
 }
