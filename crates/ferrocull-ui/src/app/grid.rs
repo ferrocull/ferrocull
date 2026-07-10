@@ -244,10 +244,10 @@ impl Ferrocull {
     /// geometry — so a plain scroll hands out a cheap `Rc` clone instead of
     /// re-walking every item in `section_counts`.
     fn grid_rows(&mut self, grid_width: f32) -> Rc<[views::thumbnails::RowStart]> {
-        let grouped = self.config.sort_order == SortOrder::Time;
+        let grouped = self.config.view.sort_order == SortOrder::Time;
         let key = super::GridRowsKey {
             media_version: self.media.version(),
-            ascending: self.config.ascending,
+            ascending: self.config.view.ascending,
             grouped,
             width_bits: grid_width.to_bits(),
             scale_bits: self.window_scale.to_bits(),
@@ -260,7 +260,7 @@ impl Ferrocull {
         let counts = views::thumbnails::section_counts(
             self.media.items(),
             self.media.sorted_view(),
-            self.config.ascending,
+            self.config.view.ascending,
             grouped,
         );
         let (cols, cell_width) = views::thumbnails::grid_metrics(grid_width, self.window_scale);
@@ -287,7 +287,7 @@ impl Ferrocull {
             .get(last + 1)
             .map_or_else(|| self.media.visible_len(), |r| r.ordinal);
         self.media
-            .indices_in_ordinal_range(start, end - start, self.config.ascending)
+            .indices_in_ordinal_range(start, end - start, self.config.view.ascending)
             .into_iter()
             .collect()
     }
@@ -428,7 +428,7 @@ impl Ferrocull {
         let target_ordinal = (rows[target_row].ordinal + col).min(row_end - 1);
         let target_idx = self
             .media
-            .index_at_ordinal(target_ordinal, self.config.ascending)
+            .index_at_ordinal(target_ordinal, self.config.view.ascending)
             .expect("no visible item at target ordinal");
         self.reveal_focus(Some(target_idx))
     }

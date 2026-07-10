@@ -11,6 +11,7 @@ pub(crate) mod profiles;
 pub(crate) mod rating;
 pub(crate) mod rename;
 mod section;
+pub(crate) mod settings;
 pub(crate) mod sources;
 pub(crate) mod thumbnails;
 

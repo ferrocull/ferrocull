@@ -168,7 +168,9 @@ pub struct Item {
     pub color_label: Option<ColorLabel>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum SortOrder {
     #[default]
     Time,
@@ -243,7 +245,9 @@ impl SortKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum FilterMode {
     #[default]
     All,

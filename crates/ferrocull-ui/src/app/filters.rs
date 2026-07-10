@@ -38,21 +38,26 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
     match msg {
         filters::Message::SortChanged(order) => return state.handle_sort_changed(order),
         filters::Message::AscendingToggled => {
-            state.config.ascending = !state.config.ascending;
+            state.config.view.ascending = !state.config.view.ascending;
+            state.persist_settings();
             return state.reset_grid_scroll();
         }
         filters::Message::FilterChanged(mode) => {
-            state.config.filter_mode = mode;
+            state.config.view.filter_mode = mode;
+            state.persist_settings();
         }
         filters::Message::GroupRawJpegToggled => {
-            state.config.group_raw_jpeg = !state.config.group_raw_jpeg;
+            state.config.view.group_raw_jpeg = !state.config.view.group_raw_jpeg;
+            state.persist_settings();
         }
         filters::Message::GroupBurstsToggled => {
             // `rebuild` clears burst expansion when grouping is off.
-            state.config.group_bursts = !state.config.group_bursts;
+            state.config.view.group_bursts = !state.config.view.group_bursts;
+            state.persist_settings();
         }
         filters::Message::HideRejectedToggled => {
-            state.config.hide_rejected = !state.config.hide_rejected;
+            state.config.view.hide_rejected = !state.config.view.hide_rejected;
+            state.persist_settings();
         }
         filters::Message::RatingFilterToggled(rating) => {
             toggle_set(&mut state.config.selected_ratings, rating);
@@ -76,11 +81,12 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
             return Task::none();
         }
         filters::Message::ClearAll => {
-            state.config.filter_mode = FilterMode::default();
-            state.config.hide_rejected = false;
+            state.config.view.filter_mode = FilterMode::default();
+            state.config.view.hide_rejected = false;
             state.config.selected_dates = None;
             state.config.selected_ratings.clear();
             state.config.selected_color_labels.clear();
+            state.persist_settings();
         }
     }
     state.rebuild_view();
@@ -89,10 +95,11 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
 
 impl Ferrocull {
     fn handle_sort_changed(&mut self, order: SortOrder) -> Task<Message> {
-        if order == self.config.sort_order {
+        if order == self.config.view.sort_order {
             return Task::none();
         }
-        self.config.sort_order = order;
+        self.config.view.sort_order = order;
+        self.persist_settings();
         self.rebuild_view();
         self.reset_grid_scroll()
     }

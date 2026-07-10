@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     hooks::Hook,
-    media::ColorLabel,
+    media::{ColorLabel, FilterMode, SortOrder},
     profiles::{IngestConfig, Profile},
 };
 
@@ -23,6 +23,89 @@ pub struct AppSettings {
     pub post_download_hooks: Vec<Hook>,
     /// Delete source files after successful download and checksum verification.
     pub delete_after_download: bool,
+    /// App-level preferences edited via the Settings popup.
+    pub preferences: Preferences,
+    /// Durable grid view preferences (sort/filter/grouping). Selection sets are
+    /// deliberately not persisted — they reference session-specific content.
+    pub view: ViewPrefs,
+}
+
+/// Theme preference. `Auto` follows the OS dark-mode setting; `Dark`/`Light`
+/// force a fixed appearance. The UI resolves this into a concrete theme.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemePreference {
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
+impl ThemePreference {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Dark, Self::Light];
+}
+
+impl std::fmt::Display for ThemePreference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Auto => "Auto",
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+        })
+    }
+}
+
+/// App-level preferences: appearance and storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Preferences {
+    pub theme: ThemePreference,
+    /// Grid thumbnail resolution in pixels (longest edge).
+    pub thumbnail_size: u32,
+    /// Cache root holding the `thumbnails/` and `previews/` namespaces. `None`
+    /// resolves to the platform default (`cache::default_cache_root`).
+    pub cache_dir: Option<PathBuf>,
+}
+
+/// Default grid thumbnail resolution (longest edge, in pixels).
+pub const DEFAULT_THUMBNAIL_SIZE: u32 = 256;
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            theme: ThemePreference::default(),
+            thumbnail_size: DEFAULT_THUMBNAIL_SIZE,
+            cache_dir: None,
+        }
+    }
+}
+
+/// Durable grid view preferences restored at startup and written on change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent durable view-toggle flags, mirroring the UI's ViewConfig"
+)]
+pub struct ViewPrefs {
+    pub sort_order: SortOrder,
+    pub ascending: bool,
+    pub filter_mode: FilterMode,
+    pub hide_rejected: bool,
+    pub group_raw_jpeg: bool,
+    pub group_bursts: bool,
+}
+
+impl Default for ViewPrefs {
+    fn default() -> Self {
+        Self {
+            sort_order: SortOrder::default(),
+            ascending: true,
+            filter_mode: FilterMode::default(),
+            hide_rejected: false,
+            group_raw_jpeg: true,
+            group_bursts: true,
+        }
+    }
 }
 
 /// Errors from database operations.

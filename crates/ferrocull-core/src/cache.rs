@@ -43,11 +43,21 @@ impl ThumbnailCache {
     /// Returns `Error::NoCacheDir` if no cache directory can be determined,
     /// or `Error::Io` if directory creation fails.
     pub fn open() -> Result<Self, Error> {
-        let cache_dir = cache_subdir("thumbnails").ok_or(Error::NoCacheDir)?;
-        Self::open_at(cache_dir)
+        let root = default_cache_root().ok_or(Error::NoCacheDir)?;
+        Self::open_in_root(&root)
     }
 
-    /// Opens or creates a thumbnail cache rooted at `cache_dir`.
+    /// Opens or creates the thumbnail cache under `root` (in its `thumbnails/`
+    /// namespace).
+    ///
+    /// # Errors
+    /// Returns `Error::Io` if directory creation fails.
+    pub fn open_in_root(root: &Path) -> Result<Self, Error> {
+        Self::open_at(root.join(THUMBNAIL_NAMESPACE))
+    }
+
+    /// Opens or creates a thumbnail cache at the exact namespace directory
+    /// `cache_dir`.
     ///
     /// # Errors
     /// Returns `Error::Io` if directory creation fails.
@@ -55,6 +65,28 @@ impl ThumbnailCache {
         Ok(Self {
             cache_dir: open_namespace_dir(cache_dir)?,
         })
+    }
+
+    /// Deletes every cached thumbnail and sidecar, leaving an empty namespace
+    /// directory. Used when the thumbnail resolution changes: the cache key
+    /// carries no resolution, so stale entries must be dropped before
+    /// regenerating at the new size.
+    ///
+    /// # Errors
+    /// Returns `Error::Io` if removing or recreating the directory fails.
+    pub fn clear(&self) -> Result<(), Error> {
+        match fs::remove_dir_all(&self.cache_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::Io {
+                    path: self.cache_dir.clone(),
+                    source,
+                });
+            }
+        }
+        open_namespace_dir(self.cache_dir.clone())?;
+        Ok(())
     }
 
     /// Loads a cached thumbnail: its JPEG bytes and persisted [`CaptureTime`].
@@ -117,11 +149,21 @@ impl PreviewCache {
     /// Returns `Error::NoCacheDir` if no cache directory can be determined,
     /// or `Error::Io` if directory creation fails.
     pub fn open() -> Result<Self, Error> {
-        let cache_dir = cache_subdir("previews").ok_or(Error::NoCacheDir)?;
-        Self::open_at(cache_dir)
+        let root = default_cache_root().ok_or(Error::NoCacheDir)?;
+        Self::open_in_root(&root)
     }
 
-    /// Opens or creates a preview cache rooted at `cache_dir`.
+    /// Opens or creates the preview cache under `root` (in its `previews/`
+    /// namespace).
+    ///
+    /// # Errors
+    /// Returns `Error::Io` if directory creation fails.
+    pub fn open_in_root(root: &Path) -> Result<Self, Error> {
+        Self::open_at(root.join(PREVIEW_NAMESPACE))
+    }
+
+    /// Opens or creates a preview cache at the exact namespace directory
+    /// `cache_dir`.
     ///
     /// # Errors
     /// Returns `Error::Io` if directory creation fails.
@@ -242,16 +284,72 @@ pub fn cache_key_from_canonical(canonical: &Path) -> io::Result<String> {
     Ok(format!("{hash:032x}"))
 }
 
-/// Cache namespace directory (`{root}/{namespace}`) under the
-/// platform-appropriate cache root.
-fn cache_subdir(namespace: &str) -> Option<PathBuf> {
+/// Namespace directory names under a cache root.
+const THUMBNAIL_NAMESPACE: &str = "thumbnails";
+const PREVIEW_NAMESPACE: &str = "previews";
+
+/// The default cache root — the parent of the `thumbnails/` and `previews/`
+/// namespace directories — under the platform-appropriate cache location
+/// (`ferrocull/` on Linux, `Ferrocull/` elsewhere). `None` when no platform
+/// cache directory can be determined.
+#[must_use]
+pub fn default_cache_root() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     let root = "ferrocull";
 
     #[cfg(not(target_os = "linux"))]
     let root = "Ferrocull";
 
-    dirs::cache_dir().map(|p| p.join(root).join(namespace))
+    dirs::cache_dir().map(|p| p.join(root))
+}
+
+/// Moves the thumbnail and preview cache namespaces from `old_root` to
+/// `new_root`. Prefers `fs::rename`, falling back to copy+delete per file when
+/// the move crosses filesystems. A namespace with nothing cached yet is skipped.
+///
+/// # Errors
+/// Returns `Error::Io` if reading, creating, copying, or removing an entry fails.
+pub fn relocate(old_root: &Path, new_root: &Path) -> Result<(), Error> {
+    move_namespace(
+        &old_root.join(THUMBNAIL_NAMESPACE),
+        &new_root.join(THUMBNAIL_NAMESPACE),
+    )?;
+    move_namespace(
+        &old_root.join(PREVIEW_NAMESPACE),
+        &new_root.join(PREVIEW_NAMESPACE),
+    )
+}
+
+/// Moves every file in `from` into `to`, creating `to` first. Renames each
+/// entry, falling back to copy+delete across filesystems, then drops the emptied
+/// source directory (best effort). Cache namespaces are flat (only `{key}.jpg`
+/// and `{key}.meta` files), so a single-level walk suffices.
+fn move_namespace(from: &Path, to: &Path) -> Result<(), Error> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    let io_err = |path: &Path| {
+        let path = path.to_owned();
+        move |source| Error::Io { path, source }
+    };
+    fs::create_dir_all(to).map_err(io_err(to))?;
+
+    for entry in fs::read_dir(from).map_err(io_err(from))? {
+        let entry = entry.map_err(io_err(from))?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        match fs::rename(&src, &dst) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+                fs::copy(&src, &dst).map_err(io_err(&src))?;
+                fs::remove_file(&src).map_err(io_err(&src))?;
+            }
+            Err(e) => return Err(io_err(&src)(e)),
+        }
+    }
+
+    drop(fs::remove_dir(from));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -284,10 +382,72 @@ mod tests {
     }
 
     #[test]
+    fn clear_drops_entries_but_keeps_cache_usable() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let cache = ThumbnailCache::open_at(dir.path().join("thumbnails")).expect("open cache");
+
+        let capture = CaptureTime::new(DateTime::<Utc>::from_timestamp(1, 0).expect("valid timestamp"), 0);
+        cache.put("key", b"jpeg", capture).expect("put");
+        assert!(cache.load("key").expect("load").is_some(), "entry present");
+
+        cache.clear().expect("clear");
+        assert!(
+            cache.load("key").expect("load after clear").is_none(),
+            "clear drops the entry"
+        );
+
+        cache.put("key2", b"jpeg", capture).expect("put after clear");
+        assert!(
+            cache.load("key2").expect("load new").is_some(),
+            "cache still usable after clear"
+        );
+    }
+
+    #[test]
+    fn relocate_moves_both_namespaces() {
+        let old = tempfile::tempdir().expect("old root");
+        let new = tempfile::tempdir().expect("new root");
+        let capture = CaptureTime::new(DateTime::<Utc>::from_timestamp(1, 0).expect("valid timestamp"), 0);
+
+        let thumbs = ThumbnailCache::open_in_root(old.path()).expect("open thumbs");
+        let previews = PreviewCache::open_in_root(old.path()).expect("open previews");
+        thumbs.put("t", b"thumb", capture).expect("put thumb");
+        previews.put("p", b"preview").expect("put preview");
+        drop((thumbs, previews));
+
+        relocate(old.path(), new.path()).expect("relocate");
+
+        let moved_thumbs = ThumbnailCache::open_in_root(new.path()).expect("reopen thumbs");
+        let moved_previews = PreviewCache::open_in_root(new.path()).expect("reopen previews");
+        assert!(
+            moved_thumbs.load("t").expect("load thumb").is_some(),
+            "thumbnail followed the move"
+        );
+        assert!(
+            moved_previews.load("p").expect("load preview").is_some(),
+            "preview followed the move"
+        );
+
+        assert!(
+            !old.path().join(THUMBNAIL_NAMESPACE).join("t.jpg").exists(),
+            "old thumbnail entry is gone"
+        );
+    }
+
+    #[test]
+    fn relocate_skips_namespace_with_nothing_cached() {
+        let old = tempfile::tempdir().expect("old root");
+        let new = tempfile::tempdir().expect("new root");
+        // Neither namespace exists under `old` yet — relocate must not error.
+        relocate(old.path(), new.path()).expect("relocate with empty source");
+    }
+
+    #[test]
     fn preview_and_thumbnail_namespaces_are_independent() {
         // Real cache roots put the two namespaces in sibling directories.
-        let thumbs = cache_subdir("thumbnails");
-        let previews = cache_subdir("previews");
+        let root = default_cache_root();
+        let thumbs = root.as_ref().map(|r| r.join(THUMBNAIL_NAMESPACE));
+        let previews = root.as_ref().map(|r| r.join(PREVIEW_NAMESPACE));
         assert_ne!(thumbs, previews, "namespaces resolve to different dirs");
 
         // A key stored in one namespace is invisible to the other.
