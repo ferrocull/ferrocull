@@ -345,12 +345,43 @@ fn apply_orientation_transform(img: DynamicImage, orientation: u32) -> DynamicIm
     }
 }
 
-fn is_valid_jpeg(data: &[u8]) -> bool {
-    data.len() >= 10
-        && data[0] == 0xFF
-        && data[1] == 0xD8
-        && data[2] == 0xFF
-        && matches!(data[3], 0xE0..=0xEF | 0xDB | 0xC0..=0xCF)
+/// True if the span is a JPEG our decode pipeline can display: a well-formed
+/// marker stream whose frame header is Huffman baseline/extended/progressive
+/// (SOF0/1/2). Expects `data` to start with SOI, which the scanner guarantees
+/// by construction.
+///
+/// RAW files embed their sensor data as JPEG-framed streams too (lossless
+/// SOF3, arithmetic-coded variants), and stray `FFD8`/`FFD9` pairs inside
+/// compressed data produce garbage spans. The full-screen preview path
+/// returns span bytes without decoding them, so the scanner is the only gate.
+fn is_displayable_jpeg(data: &[u8]) -> bool {
+    let mut pos = 2; // past SOI
+    loop {
+        // Skip fill bytes (0xFF padding before a marker).
+        while pos < data.len() && data[pos] == 0xFF && data.get(pos + 1) == Some(&0xFF) {
+            pos += 1;
+        }
+        let (Some(&0xFF), Some(&marker)) = (data.get(pos), data.get(pos + 1)) else {
+            return false;
+        };
+        match marker {
+            0xC0..=0xC2 => return true,
+            // Lossless (C3, C7, CF), hierarchical (C5, C6, CD, CE),
+            // arithmetic (C9..CB), and DAC (CC) frames are undecodable
+            // downstream; SOS or EOI before any SOF is malformed. C4 (DHT)
+            // and C8 (reserved) sit inside the C0-CF block but are ordinary
+            // length segments, not frame markers.
+            0xC3 | 0xC5..=0xC7 | 0xC9..=0xCF | 0xDA | 0xD9 => return false,
+            // Standalone markers (no length segment).
+            0x01 | 0xD0..=0xD8 => pos += 2,
+            _ => {
+                let Some(seg) = data.get(pos + 2..pos + 4) else {
+                    return false;
+                };
+                pos += 2 + usize::from(u16::from_be_bytes([seg[0], seg[1]]));
+            }
+        }
+    }
 }
 
 /// Parse EXIF capture time from file bytes (only reads header portion).
@@ -455,7 +486,7 @@ impl JpegScanner {
                     let eoi_end = pos + 2;
                     if let Some(soi) = self.open_sois.pop() {
                         let len = eoi_end - soi;
-                        if len > 100 && is_valid_jpeg(&data[soi..eoi_end]) {
+                        if len > 100 && is_displayable_jpeg(&data[soi..eoi_end]) {
                             self.spans.push((soi, len));
                         }
                     }
@@ -576,12 +607,13 @@ pub fn generate_raw_with_preread(
 mod tests {
     use super::*;
 
-    /// Minimal byte sequence that passes `is_valid_jpeg` and the `len > 100`
-    /// filter: SOI + JFIF marker, zero padding (no stray 0xFF), then EOI.
+    /// Minimal byte sequence that passes the scanner's filters: SOI, an APP0
+    /// segment of zero padding (no stray 0xFF), an SOF0 frame header, then
+    /// EOI. 106 bytes total (> 100).
     fn minimal_jpeg() -> Vec<u8> {
-        let mut data = vec![0xFF, 0xD8, 0xFF, 0xE0];
-        data.extend(std::iter::repeat_n(0x00, 100));
-        data.extend_from_slice(&[0xFF, 0xD9]);
+        let mut data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x62];
+        data.extend(std::iter::repeat_n(0x00, 0x60));
+        data.extend_from_slice(&[0xFF, 0xC0, 0xFF, 0xD9]);
         data
     }
 
@@ -608,6 +640,32 @@ mod tests {
         // Growing buffer delivers the 0xD9; the split EOI is now recognized.
         scanner.scan(&jpeg);
         assert_eq!(scanner.spans, vec![(0, jpeg.len())]);
+    }
+
+    #[test]
+    fn scan_rejects_span_with_undecodable_frame_header() {
+        // A false span as found inside NEF raw sensor data: a stray SOI
+        // immediately followed by a DAC marker (0xCC), closed by a stray EOI.
+        let mut data = vec![0xFF, 0xD8, 0xFF, 0xCC];
+        data.extend(std::iter::repeat_n(0x00, 100));
+        data.extend_from_slice(&[0xFF, 0xD9]);
+
+        let mut scanner = JpegScanner::new();
+        scanner.scan(&data);
+        assert!(scanner.spans.is_empty());
+    }
+
+    #[test]
+    fn scan_accepts_span_with_dht_before_frame_header() {
+        // C4 (DHT) sits inside the C0-CF block but is a length segment, not a
+        // frame marker; the walk must skip it and accept the SOF0 behind it.
+        let mut data = vec![0xFF, 0xD8, 0xFF, 0xC4, 0x00, 0x62];
+        data.extend(std::iter::repeat_n(0x00, 0x60));
+        data.extend_from_slice(&[0xFF, 0xC0, 0xFF, 0xD9]);
+
+        let mut scanner = JpegScanner::new();
+        scanner.scan(&data);
+        assert_eq!(scanner.spans, vec![(0, data.len())]);
     }
 
     #[test]
