@@ -39,8 +39,8 @@ use crate::{
     media_view::{MediaView, ViewParams},
     messages::{
         Message, Panel, ScanEvent, Section, compare as compare_msg, destination as destination_msg,
-        filters as filters_msg, grid as grid_msg, preview as preview_msg,
-        settings as settings_msg, sources as sources_msg,
+        filters as filters_msg, grid as grid_msg, preview as preview_msg, settings as settings_msg,
+        sources as sources_msg,
     },
     styles,
     theme::spacing,
@@ -219,6 +219,8 @@ struct Ferrocull {
     videos_dest: String,
     photo_pattern: String,
     video_pattern: String,
+    /// App-level rename patterns the user saved for reuse, most-recent first.
+    saved_patterns: Vec<String>,
     download_progress: Option<DownloadProgress>,
     /// Failure count from last download (shown in status bar until next action).
     last_download_failures: usize,
@@ -374,6 +376,7 @@ impl Default for Ferrocull {
             videos_dest: settings.ingest.videos_dest.to_string_lossy().into_owned(),
             photo_pattern: settings.ingest.photo_pattern,
             video_pattern: settings.ingest.video_pattern,
+            saved_patterns: settings.saved_patterns,
             download_progress: None,
             last_download_failures: 0,
             status_message: None,
@@ -450,13 +453,17 @@ impl Ferrocull {
     }
 
     fn ordinal_position(&self, item_idx: usize) -> Option<usize> {
-        self.media.ordinal_position(item_idx, self.config.view.ascending)
+        self.media
+            .ordinal_position(item_idx, self.config.view.ascending)
     }
 
     /// The logical group to fan out to: collapsed-burst members plus RAW+JPEG siblings.
     fn group_of(&self, idx: usize) -> Vec<usize> {
-        self.media
-            .group_of(idx, self.config.view.group_bursts, self.config.view.group_raw_jpeg)
+        self.media.group_of(
+            idx,
+            self.config.view.group_bursts,
+            self.config.view.group_raw_jpeg,
+        )
     }
 
     /// Snapshots the persisted working settings and writes them to the store.
@@ -478,6 +485,7 @@ impl Ferrocull {
                 cache_dir: self.cache_dir.clone(),
             },
             view: self.config.view,
+            saved_patterns: self.saved_patterns.clone(),
         };
         self.metadata.set_settings(&settings);
     }
@@ -1454,9 +1462,13 @@ fn config_panel(state: &Ferrocull) -> Element<'_, Message> {
     let destination_content =
         views::destination::destination_panel(&state.photos_dest, &state.videos_dest)
             .map(Message::Destination);
-    let rename_content =
-        views::rename::rename_panel(&state.photo_pattern, &state.video_pattern, state.today)
-            .map(Message::Destination);
+    let rename_content = views::rename::rename_panel(
+        &state.photo_pattern,
+        &state.video_pattern,
+        &state.saved_patterns,
+        state.today,
+    )
+    .map(Message::Destination);
     let backup_content =
         views::backup::backup_panel(&state.backup_destinations).map(Message::Destination);
     let hooks_content = views::hooks::hooks_panel(&state.hooks).map(Message::Profile);

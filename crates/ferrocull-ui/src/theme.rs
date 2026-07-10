@@ -109,6 +109,8 @@ pub(crate) mod colors {
     pub(crate) const BADGE_BURST: Color = rgb(0x8C, 0x7B, 0x6A); // Warm taupe
     pub(crate) const BADGE_BURST_HOVER: Color = rgb(0xA8, 0x96, 0x82); // Lightened taupe
 
+    pub(crate) const TEXT_MUTED: Color = rgb(0x8C, 0x7B, 0x6A); // Warm taupe, for secondary text
+
     // Indexed to match ColorLabel discriminants 1-7
     pub(crate) const COLOR_LABEL_1: Color = rgb(0xD9, 0x4F, 0x4F); // Warm red
     pub(crate) const COLOR_LABEL_2: Color = rgb(0xE5, 0xC0, 0x4D); // Gold

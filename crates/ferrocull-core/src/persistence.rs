@@ -28,6 +28,8 @@ pub struct AppSettings {
     /// Durable grid view preferences (sort/filter/grouping). Selection sets are
     /// deliberately not persisted — they reference session-specific content.
     pub view: ViewPrefs,
+    /// App-level rename patterns the user saved for reuse, most-recent first.
+    pub saved_patterns: Vec<String>,
 }
 
 /// Theme preference. `Auto` follows the OS dark-mode setting; `Dark`/`Light`
