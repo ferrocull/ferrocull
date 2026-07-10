@@ -270,7 +270,7 @@ impl FilterMode {
     pub fn matches(self, item: &Item) -> bool {
         match self {
             Self::All => true,
-            Self::NewOnly => !item.is_downloaded && item.rating != -1,
+            Self::NewOnly => !item.is_downloaded,
             Self::PhotosOnly => item.media_type == FileCategory::Photo,
             Self::VideosOnly => item.media_type == FileCategory::Video,
             Self::RawOnly => item.media_type == FileCategory::Raw,
