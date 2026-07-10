@@ -76,7 +76,11 @@ pub(super) fn update(state: &mut Ferrocull, msg: settings::Message) -> Task<Mess
 /// carries no resolution, so stale entries would shadow the new size), then
 /// regenerate over the loaded media at the new size.
 fn confirm_thumbnail_size(state: &mut Ferrocull) -> Task<Message> {
-    let Some(size) = state.settings.as_ref().and_then(|s| s.pending_thumbnail_size) else {
+    let Some(size) = state
+        .settings
+        .as_ref()
+        .and_then(|s| s.pending_thumbnail_size)
+    else {
         return Task::none();
     };
     // A scan in flight holds cache handles; the confirm control is disabled
@@ -105,7 +109,11 @@ fn confirm_thumbnail_size(state: &mut Ferrocull) -> Task<Message> {
 /// Commit a staged cache location: move the cache files off the update loop,
 /// reporting back via [`settings::Message::CacheMoved`].
 fn confirm_cache_dir(state: &mut Ferrocull) -> Task<Message> {
-    let Some(new_dir) = state.settings.as_ref().and_then(|s| s.pending_cache_dir.clone()) else {
+    let Some(new_dir) = state
+        .settings
+        .as_ref()
+        .and_then(|s| s.pending_cache_dir.clone())
+    else {
         return Task::none();
     };
     if state.scan_in_flight() {
@@ -197,6 +205,10 @@ impl Ferrocull {
         }
         self.thumbnail_jobs_in_flight += 1;
 
-        spawn_thumbnail_sipper(files, self.thumbnail_size, Arc::clone(&self.thumbnail_cache))
+        spawn_thumbnail_sipper(
+            files,
+            self.thumbnail_size,
+            Arc::clone(&self.thumbnail_cache),
+        )
     }
 }
