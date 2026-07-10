@@ -243,8 +243,12 @@ where
 
 /// Decode-pool stage: generate the thumbnail from the pre-read bytes, cache
 /// it, and emit [`Event::ThumbnailReady`].
-fn decode_stage<T, F>(read: ReadFile, thumbnail_size: u32, cache: Option<&ThumbnailCache>, on_event: &F)
-where
+fn decode_stage<T, F>(
+    read: ReadFile,
+    thumbnail_size: u32,
+    cache: Option<&ThumbnailCache>,
+    on_event: &F,
+) where
     F: Fn(Event<T>),
 {
     let ReadFile {

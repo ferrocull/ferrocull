@@ -21,7 +21,9 @@ pub use history::JobCodeHistory;
 pub use hooks::Hook;
 pub use media::ColorLabel;
 pub use pattern::{Pattern, RenderContext};
-pub use persistence::{AppSettings, DEFAULT_THUMBNAIL_SIZE, Preferences, ThemePreference, ViewPrefs};
+pub use persistence::{
+    AppSettings, DEFAULT_THUMBNAIL_SIZE, Preferences, ThemePreference, ViewPrefs,
+};
 pub use profiles::{IngestConfig, NamedProfile, Profile};
 
 /// A media file with optional related files (RAW+JPEG pairs, sidecars).

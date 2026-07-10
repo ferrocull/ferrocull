@@ -386,7 +386,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let cache = ThumbnailCache::open_at(dir.path().join("thumbnails")).expect("open cache");
 
-        let capture = CaptureTime::new(DateTime::<Utc>::from_timestamp(1, 0).expect("valid timestamp"), 0);
+        let capture = CaptureTime::new(
+            DateTime::<Utc>::from_timestamp(1, 0).expect("valid timestamp"),
+            0,
+        );
         cache.put("key", b"jpeg", capture).expect("put");
         assert!(cache.load("key").expect("load").is_some(), "entry present");
 
@@ -396,7 +399,9 @@ mod tests {
             "clear drops the entry"
         );
 
-        cache.put("key2", b"jpeg", capture).expect("put after clear");
+        cache
+            .put("key2", b"jpeg", capture)
+            .expect("put after clear");
         assert!(
             cache.load("key2").expect("load new").is_some(),
             "cache still usable after clear"
@@ -407,7 +412,10 @@ mod tests {
     fn relocate_moves_both_namespaces() {
         let old = tempfile::tempdir().expect("old root");
         let new = tempfile::tempdir().expect("new root");
-        let capture = CaptureTime::new(DateTime::<Utc>::from_timestamp(1, 0).expect("valid timestamp"), 0);
+        let capture = CaptureTime::new(
+            DateTime::<Utc>::from_timestamp(1, 0).expect("valid timestamp"),
+            0,
+        );
 
         let thumbs = ThumbnailCache::open_in_root(old.path()).expect("open thumbs");
         let previews = PreviewCache::open_in_root(old.path()).expect("open previews");
@@ -457,7 +465,9 @@ mod tests {
         let thumb_cache =
             ThumbnailCache::open_at(dir.path().join("thumbnails")).expect("open thumbnail cache");
 
-        preview_cache.put("shared", b"preview").expect("put preview");
+        preview_cache
+            .put("shared", b"preview")
+            .expect("put preview");
         assert!(
             thumb_cache.load("shared").expect("thumb load").is_none(),
             "a preview key does not leak into the thumbnail cache"
