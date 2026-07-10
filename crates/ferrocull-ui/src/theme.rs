@@ -107,6 +107,7 @@ pub(crate) mod colors {
     pub(crate) const OVERLAY_DOWNLOADED: Color = Color::from_rgba(0.08, 0.07, 0.06, 0.55); // Warm black
     pub(crate) const BADGE_REJECTED: Color = Color::from_rgba(0.75, 0.15, 0.15, 0.92);
     pub(crate) const BADGE_BURST: Color = rgb(0x8C, 0x7B, 0x6A); // Warm taupe
+    pub(crate) const BADGE_BURST_HOVER: Color = rgb(0xA8, 0x96, 0x82); // Lightened taupe
 
     // Indexed to match ColorLabel discriminants 1-7
     pub(crate) const COLOR_LABEL_1: Color = rgb(0xD9, 0x4F, 0x4F); // Warm red

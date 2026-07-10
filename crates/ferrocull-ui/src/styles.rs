@@ -429,6 +429,25 @@ pub(crate) fn rounded_badge(bg: Color) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// Burst count badge button: warm taupe pill that brightens on hover/press.
+pub(crate) fn burst_badge(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => colors::BADGE_BURST_HOVER,
+        _ => colors::BADGE_BURST,
+    };
+
+    button::Style {
+        background: Some(bg.into()),
+        text_color: palette.background.base.text,
+        border: Border {
+            radius: radius::SM.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 /// Solid fill container (color overlay, color label bar).
 pub(crate) fn solid_fill(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_theme| container::Style {
