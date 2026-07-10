@@ -12,8 +12,8 @@ use ferrocull_core::{
 use iced::{
     Color, ContentFit, Element, Fill, Shrink,
     widget::{
-        Space, Stack, center, column, container, grid, image, mouse_area, opaque, responsive,
-        scrollable, text,
+        Space, Stack, button, center, column, container, grid, image, mouse_area, opaque,
+        responsive, scrollable, text,
     },
 };
 
@@ -872,11 +872,10 @@ fn rated_badge<Message: 'static>(rating: i8) -> Element<'static, Message> {
 
 /// Burst count badge positioned in top-right corner.
 fn burst_badge(count: usize, burst_key: DateTime<Utc>) -> Element<'static, CellEvent> {
-    let badge = container(text(format!("{count}")).size(10))
+    let clickable_badge = button(text(format!("{count}")).size(10))
         .padding([2, 6])
-        .style(styles::rounded_badge(colors::BADGE_BURST));
-
-    let clickable_badge = mouse_area(badge).on_press(CellEvent::BurstToggle(burst_key));
+        .style(styles::burst_badge)
+        .on_press(CellEvent::BurstToggle(burst_key));
 
     container(clickable_badge)
         .width(Fill)
