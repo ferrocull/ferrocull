@@ -454,3 +454,21 @@ pub(crate) fn ghost_button(theme: &Theme, status: button::Status) -> button::Sty
         ..Default::default()
     }
 }
+
+/// Borderless icon button: no background box in any state. The glyph reads
+/// muted at rest and tints amber on hover/press — the color is the affordance.
+pub(crate) fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let text_color = match status {
+        button::Status::Hovered => colors::ACCENT_HOVER,
+        button::Status::Pressed => colors::ACCENT,
+        _ => palette.background.weak.text,
+    };
+
+    button::Style {
+        background: None,
+        text_color,
+        border: Border::default(),
+        ..Default::default()
+    }
+}

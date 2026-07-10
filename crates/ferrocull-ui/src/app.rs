@@ -1323,9 +1323,25 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
     )
     .map(Message::Filters);
 
-    let header = container(filters_view)
-        .padding([spacing::SM, spacing::MD])
-        .width(Fill);
+    let settings_btn = button(text("\u{2699}").size(16))
+        .padding(spacing::XS)
+        .style(styles::icon_button)
+        .on_press(Message::Settings(settings_msg::Message::Open));
+    let settings_with_tip = tooltip(
+        settings_btn,
+        text("Settings").size(11),
+        tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .snap_within_viewport(true);
+
+    let header = container(
+        row![settings_with_tip, container(filters_view).width(Fill)]
+            .spacing(spacing::SM)
+            .align_y(iced::Alignment::Center),
+    )
+    .padding(iced::Padding::from([spacing::SM, spacing::MD]).left(spacing::XS))
+    .width(Fill);
 
     let grid = thumbnail_grid(state);
 
@@ -1622,18 +1638,6 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
         .gap(4)
         .snap_within_viewport(true);
 
-    let settings_btn = button(text("\u{2699}").size(16))
-        .padding([6, 10])
-        .style(styles::ghost_button)
-        .on_press(Message::Settings(settings_msg::Message::Open));
-    let settings_with_tip = tooltip(
-        settings_btn,
-        text("Settings").size(11),
-        tooltip::Position::Top,
-    )
-    .gap(4)
-    .snap_within_viewport(true);
-
     container(
         row![
             left_text,
@@ -1641,8 +1645,6 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
             center,
             Space::new().width(Fill),
             import_with_tip,
-            Space::new().width(spacing::SM),
-            settings_with_tip,
         ]
         .align_y(iced::Alignment::Center),
     )
