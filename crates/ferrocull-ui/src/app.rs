@@ -20,7 +20,7 @@ use ferrocull_core::{
     cache::{PreviewCache, ThumbnailCache, default_cache_root},
     media::{DateSelection, FilterMode},
     metadata_store,
-    persistence::MediaDatabase,
+    persistence::{MediaDatabase, PanelWidths},
     scan,
 };
 use ferrocull_devices::{ScannedFile, Source};
@@ -45,6 +45,7 @@ use crate::{
     styles,
     theme::spacing,
     views::{self, collapsible_section},
+    widgets::{Splitter, splitter},
 };
 
 /// Tracks which config panel sections are expanded (present = expanded).
@@ -67,8 +68,8 @@ impl SectionState {
     }
 }
 
-const LEFT_PANEL_WIDTH: f32 = 250.0;
-const RIGHT_PANEL_WIDTH: f32 = 300.0;
+const PANEL_MIN_WIDTH: f32 = 150.0;
+const PANEL_MAX_WIDTH: f32 = 600.0;
 
 /// Max scan events drained into one [`Message::ScanBatch`]. The pipeline emits
 /// two events per file, so this caps a batch at ~128 files — large enough to
@@ -267,6 +268,7 @@ struct Ferrocull {
     modifiers: Modifiers,
     left_panel_visible: bool,
     right_panel_visible: bool,
+    panel_widths: PanelWidths,
     preview_cache: HashMap<PathBuf, iced::widget::image::Allocation>,
     /// In-flight preview requests, keyed by path and tagged with generation.
     preview_loading: HashMap<PathBuf, u64>,
@@ -407,6 +409,7 @@ impl Default for Ferrocull {
             modifiers: Modifiers::default(),
             left_panel_visible: true,
             right_panel_visible: true,
+            panel_widths: settings.panel_widths,
             preview_cache: HashMap::new(),
             preview_loading: HashMap::new(),
             preview_generation: 0,
@@ -486,6 +489,7 @@ impl Ferrocull {
             },
             view: self.config.view,
             saved_patterns: self.saved_patterns.clone(),
+            panel_widths: self.panel_widths,
         };
         self.metadata.set_settings(&settings);
     }
@@ -921,6 +925,18 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::PanelResized(panel, width) => {
+            let clamped = width.clamp(PANEL_MIN_WIDTH, PANEL_MAX_WIDTH);
+            match panel {
+                Panel::Left => state.panel_widths.left = clamped,
+                Panel::Right => state.panel_widths.right = clamped,
+            }
+            Task::none()
+        }
+        Message::PanelResizeEnd => {
+            state.persist_settings();
+            Task::none()
+        }
         Message::KeyPressed(ref key, modifiers) => state.handle_key_press(key, modifiers),
         Message::ModifiersChanged(modifiers) => {
             state.modifiers = modifiers;
@@ -1048,21 +1064,22 @@ fn view(state: &Ferrocull) -> Element<'_, Message> {
     let mut main_row = row![].height(Fill);
 
     if state.left_panel_visible {
-        main_row = main_row
-            .push(sources_panel(state))
-            .push(panel_edge_handle(Panel::Left, true));
+        main_row =
+            main_row
+                .push(sources_panel(state))
+                .push(panel_edge_handle(state, Panel::Left, true));
     } else {
-        main_row = main_row.push(panel_edge_handle(Panel::Left, false));
+        main_row = main_row.push(panel_edge_handle(state, Panel::Left, false));
     }
 
     main_row = main_row.push(thumbnails_panel(state));
 
     if state.right_panel_visible {
         main_row = main_row
-            .push(panel_edge_handle(Panel::Right, true))
+            .push(panel_edge_handle(state, Panel::Right, true))
             .push(config_panel(state));
     } else {
-        main_row = main_row.push(panel_edge_handle(Panel::Right, false));
+        main_row = main_row.push(panel_edge_handle(state, Panel::Right, false));
     }
 
     let main_content = column![main_row, status_bar(state)];
@@ -1245,7 +1262,7 @@ fn settings_overlay<'a>(state: &'a Ferrocull, s: &'a SettingsState) -> Element<'
 }
 
 /// Clickable edge handle for collapsing/expanding panels.
-fn panel_edge_handle(panel: Panel, expanded: bool) -> Element<'static, Message> {
+fn panel_edge_handle(state: &Ferrocull, panel: Panel, expanded: bool) -> Element<'_, Message> {
     let palette = crate::theme::palette();
 
     let icon = match (panel, expanded) {
@@ -1255,12 +1272,6 @@ fn panel_edge_handle(panel: Panel, expanded: bool) -> Element<'static, Message> 
 
     let width = if expanded { 8.0 } else { 14.0 };
 
-    let content = container(text(icon).size(9).color(palette.background.strong.text))
-        .width(width)
-        .height(Fill)
-        .center_x(width)
-        .center_y(Fill);
-
     let label = match (panel, expanded) {
         (Panel::Left, true) => "Hide sources",
         (Panel::Left, false) => "Show sources",
@@ -1268,12 +1279,36 @@ fn panel_edge_handle(panel: Panel, expanded: bool) -> Element<'static, Message> 
         (Panel::Right, false) => "Show config",
     };
 
-    let btn = button(content)
-        .padding(0)
-        .style(styles::panel_handle(expanded))
-        .on_press(Message::TogglePanel(panel));
+    let content = container(text(icon).size(9).color(palette.background.strong.text))
+        .width(width)
+        .height(Fill)
+        .center_x(width)
+        .center_y(Fill);
 
-    tooltip(btn, text(label).size(10), tooltip::Position::Right)
+    let handle: Element<'_, Message> = if expanded {
+        let (panel_width, side) = match panel {
+            Panel::Left => (state.panel_widths.left, splitter::Side::Left),
+            Panel::Right => (state.panel_widths.right, splitter::Side::Right),
+        };
+
+        Splitter::new(
+            content.style(styles::panel_handle_expanded),
+            panel_width,
+            side,
+        )
+        .on_resize(move |w| Message::PanelResized(panel, w))
+        .on_resize_end(Message::PanelResizeEnd)
+        .on_click(Message::TogglePanel(panel))
+        .into()
+    } else {
+        button(content)
+            .padding(0)
+            .style(styles::panel_handle_collapsed)
+            .on_press(Message::TogglePanel(panel))
+            .into()
+    };
+
+    tooltip(handle, text(label).size(10), tooltip::Position::Right)
         .gap(4)
         .snap_within_viewport(true)
         .into()
@@ -1309,7 +1344,7 @@ fn sources_panel(state: &Ferrocull) -> Element<'_, Message> {
     ];
 
     container(content)
-        .width(LEFT_PANEL_WIDTH)
+        .width(state.panel_widths.left)
         .height(Fill)
         .style(styles::panel)
         .into()
@@ -1532,7 +1567,7 @@ fn config_panel(state: &Ferrocull) -> Element<'_, Message> {
     let content = column![header, scrollable(scrollable_content).height(Fill)];
 
     container(content)
-        .width(RIGHT_PANEL_WIDTH)
+        .width(state.panel_widths.right)
         .height(Fill)
         .style(styles::panel)
         .into()

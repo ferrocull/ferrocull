@@ -359,38 +359,41 @@ pub(crate) fn section_toggle(expanded: bool) -> impl Fn(&Theme, button::Status) 
     }
 }
 
-/// Panel edge handle for collapse/expand.
-pub(crate) fn panel_handle(expanded: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |theme: &Theme, status: button::Status| {
-        let palette = theme.extended_palette();
+/// Collapsed panel edge handle (expand button).
+pub(crate) fn panel_handle_collapsed(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
 
-        let (bg, text_color) = match status {
-            button::Status::Hovered => (
-                palette.background.neutral.color,
-                palette.background.weak.text,
-            ),
-            button::Status::Pressed => (
-                palette.background.strong.color,
-                palette.background.strong.text,
-            ),
-            button::Status::Active | button::Status::Disabled => {
-                if expanded {
-                    (
-                        palette.background.weaker.color,
-                        palette.background.strong.text,
-                    )
-                } else {
-                    (palette.background.weak.color, palette.background.weak.text)
-                }
-            }
-        };
-
-        button::Style {
-            background: Some(bg.into()),
-            text_color,
-            border: Border::default(),
-            ..Default::default()
+    let (bg, text_color) = match status {
+        button::Status::Hovered => (
+            palette.background.neutral.color,
+            palette.background.weak.text,
+        ),
+        button::Status::Pressed => (
+            palette.background.strong.color,
+            palette.background.strong.text,
+        ),
+        button::Status::Active | button::Status::Disabled => {
+            (palette.background.weak.color, palette.background.weak.text)
         }
+    };
+
+    button::Style {
+        background: Some(bg.into()),
+        text_color,
+        border: Border::default(),
+        ..Default::default()
+    }
+}
+
+/// Expanded panel-edge splitter handle. A container has no hover state — the
+/// resize cursor supplies the affordance.
+#[must_use]
+pub(crate) fn panel_handle_expanded(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.weaker.color.into()),
+        text_color: Some(palette.background.strong.text),
+        ..Default::default()
     }
 }
 

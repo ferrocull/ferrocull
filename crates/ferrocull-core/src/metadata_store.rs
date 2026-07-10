@@ -332,7 +332,7 @@ mod tests {
     fn preferences_and_view_prefs_roundtrip() {
         use crate::{
             media::{FilterMode, SortOrder},
-            persistence::{Preferences, ThemePreference, ViewPrefs},
+            persistence::{PanelWidths, Preferences, ThemePreference, ViewPrefs},
         };
 
         let mut store = store();
@@ -344,6 +344,8 @@ mod tests {
         assert!(defaults.preferences.cache_dir.is_none());
         assert!(defaults.view.ascending);
         assert!(defaults.view.group_raw_jpeg);
+        assert_eq!(defaults.panel_widths.left, 250.0);
+        assert_eq!(defaults.panel_widths.right, 300.0);
 
         let settings = AppSettings {
             preferences: Preferences {
@@ -358,6 +360,10 @@ mod tests {
                 hide_rejected: true,
                 group_raw_jpeg: false,
                 group_bursts: false,
+            },
+            panel_widths: PanelWidths {
+                left: 320.0,
+                right: 180.0,
             },
             ..AppSettings::default()
         };
@@ -375,5 +381,7 @@ mod tests {
         assert_eq!(loaded.view.filter_mode, FilterMode::RawOnly);
         assert!(loaded.view.hide_rejected);
         assert!(!loaded.view.group_raw_jpeg);
+        assert_eq!(loaded.panel_widths.left, 320.0);
+        assert_eq!(loaded.panel_widths.right, 180.0);
     }
 }
