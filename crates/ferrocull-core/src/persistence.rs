@@ -30,6 +30,8 @@ pub struct AppSettings {
     pub view: ViewPrefs,
     /// App-level rename patterns the user saved for reuse, most-recent first.
     pub saved_patterns: Vec<String>,
+    /// User-adjusted sidebar panel widths, restored on startup.
+    pub panel_widths: PanelWidths,
 }
 
 /// Theme preference. `Auto` follows the OS dark-mode setting; `Dark`/`Light`
@@ -106,6 +108,23 @@ impl Default for ViewPrefs {
             hide_rejected: false,
             group_raw_jpeg: true,
             group_bursts: true,
+        }
+    }
+}
+
+/// User-adjusted sidebar panel widths, in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PanelWidths {
+    pub left: f32,
+    pub right: f32,
+}
+
+impl Default for PanelWidths {
+    fn default() -> Self {
+        Self {
+            left: 250.0,
+            right: 300.0,
         }
     }
 }

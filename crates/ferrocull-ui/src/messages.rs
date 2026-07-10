@@ -303,6 +303,8 @@ pub(crate) enum Message {
 
     ToggleSection(Section),
     TogglePanel(Panel),
+    PanelResized(Panel, f32),
+    PanelResizeEnd,
     KeyPressed(Key, Modifiers),
     ModifiersChanged(Modifiers),
 
