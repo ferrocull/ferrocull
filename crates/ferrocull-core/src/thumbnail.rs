@@ -82,51 +82,25 @@ pub fn extract_largest_preview(path: &Path) -> Result<Vec<u8>, Error> {
     }
 }
 
-/// Threshold (bytes) above which an embedded JPEG span is treated as the
-/// full-size preview, allowing early termination before reading the rest of the
-/// RAW file. Full-size previews in CR2/NEF/ARW are typically >= 1 MB, while
-/// embedded thumbnails are ~50-500 KB.
-///
-/// Tradeoff: early exit may return a large-but-not-largest span. A RAW can hold
-/// several previews, and the first one past the threshold wins rather than the
-/// globally largest. That is acceptable for on-screen display, where any
-/// full-size-class preview is sufficient.
-const FULL_PREVIEW_BYTES: usize = 1_000_000;
-
-/// Extract the largest embedded JPEG preview from a RAW file for full-screen
-/// display, reading incrementally and stopping early once a full-size-class
-/// span is found (see `FULL_PREVIEW_BYTES`). Falls back to the largest span
-/// found by EOF if none crosses the threshold.
+/// Extract the highest-resolution embedded JPEG preview from a RAW file for
+/// full-screen display. Reads the whole file and picks the span with the most
+/// pixels, parsed from each candidate's SOF frame header. Byte size is not a
+/// reliable proxy for resolution — a more-compressed preview can be larger in
+/// pixels yet smaller in bytes — so the scan runs to EOF rather than stopping at
+/// the first full-size-class span.
 fn extract_raw_largest_preview(path: &Path) -> Result<Vec<u8>, Error> {
-    let mut file = File::open(path).map_err(|source| Error::Io {
+    let data = fs::read(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    let mut data = Vec::new();
     let mut scanner = JpegScanner::new();
-    let mut buf = vec![0u8; READ_CHUNK_SIZE];
+    scanner.scan(&data);
 
-    let span = loop {
-        let n = file.read(&mut buf).map_err(|source| Error::Io {
+    let (start, len) = scanner
+        .largest_by_pixels(&data)
+        .ok_or(Error::NoEmbeddedPreview {
             path: path.to_path_buf(),
-            source,
         })?;
-        if n == 0 {
-            break scanner.largest_span();
-        }
-        data.extend_from_slice(&buf[..n]);
-        scanner.scan(&data);
-
-        if let Some(span) = scanner.full_size_span() {
-            break Some(span);
-        }
-    };
-
-    let (start, len) = span.ok_or(Error::NoEmbeddedPreview {
-        path: path.to_path_buf(),
-    })?;
-    // Orientation lives in the TIFF header at the start of the file, which is
-    // already buffered by the time any span completes.
     let (orientation, _) = parse_exif_fields(&data);
     oriented_preview(&data[start..start + len], orientation)
 }
@@ -355,6 +329,14 @@ fn apply_orientation_transform(img: DynamicImage, orientation: u32) -> DynamicIm
 /// compressed data produce garbage spans. The full-screen preview path
 /// returns span bytes without decoding them, so the scanner is the only gate.
 fn is_displayable_jpeg(data: &[u8]) -> bool {
+    displayable_dimensions(data).is_some()
+}
+
+/// Walk the JPEG marker stream and return the frame's `(width, height)` in
+/// pixels if it is a displayable Huffman baseline/extended/progressive frame
+/// (SOF0/1/2), else `None`. See [`is_displayable_jpeg`] for which frames count
+/// as displayable and why. Expects `data` to start with SOI.
+fn displayable_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     let mut pos = 2; // past SOI
     loop {
         // Skip fill bytes (0xFF padding before a marker).
@@ -362,22 +344,27 @@ fn is_displayable_jpeg(data: &[u8]) -> bool {
             pos += 1;
         }
         let (Some(&0xFF), Some(&marker)) = (data.get(pos), data.get(pos + 1)) else {
-            return false;
+            return None;
         };
         match marker {
-            0xC0..=0xC2 => return true,
+            // SOF layout after the marker: length(2), precision(1),
+            // height(2), width(2) — height at pos+5, width at pos+7. A
+            // truncated header yields None, rejecting the span.
+            0xC0..=0xC2 => {
+                let height = u16::from_be_bytes([*data.get(pos + 5)?, *data.get(pos + 6)?]);
+                let width = u16::from_be_bytes([*data.get(pos + 7)?, *data.get(pos + 8)?]);
+                return Some((u32::from(width), u32::from(height)));
+            }
             // Lossless (C3, C7, CF), hierarchical (C5, C6, CD, CE),
             // arithmetic (C9..CB), and DAC (CC) frames are undecodable
             // downstream; SOS or EOI before any SOF is malformed. C4 (DHT)
             // and C8 (reserved) sit inside the C0-CF block but are ordinary
             // length segments, not frame markers.
-            0xC3 | 0xC5..=0xC7 | 0xC9..=0xCF | 0xDA | 0xD9 => return false,
+            0xC3 | 0xC5..=0xC7 | 0xC9..=0xCF | 0xDA | 0xD9 => return None,
             // Standalone markers (no length segment).
             0x01 | 0xD0..=0xD8 => pos += 2,
             _ => {
-                let Some(seg) = data.get(pos + 2..pos + 4) else {
-                    return false;
-                };
+                let seg = data.get(pos + 2..pos + 4)?;
                 pos += 2 + usize::from(u16::from_be_bytes([seg[0], seg[1]]));
             }
         }
@@ -505,17 +492,20 @@ impl JpegScanner {
             .copied()
     }
 
-    /// Return the first completed span >= `FULL_PREVIEW_BYTES` as (start, len).
-    fn full_size_span(&self) -> Option<(usize, usize)> {
+    /// Return the completed span with the most pixels as (start, len), reading
+    /// dimensions from each span's SOF header. `data` is the buffer the spans
+    /// index into.
+    fn largest_by_pixels(&self, data: &[u8]) -> Option<(usize, usize)> {
         self.spans
             .iter()
-            .find(|(_, len)| *len >= FULL_PREVIEW_BYTES)
+            .max_by_key(|(start, len)| {
+                // Every stored span passed the scanner's SOF gate, so its
+                // dimensions parse.
+                let (w, h) = displayable_dimensions(&data[*start..*start + *len])
+                    .expect("scanner only stores spans with a displayable SOF header");
+                u64::from(w) * u64::from(h)
+            })
             .copied()
-    }
-
-    /// Return the largest completed span as (start, len).
-    fn largest_span(&self) -> Option<(usize, usize)> {
-        self.spans.iter().max_by_key(|(_, len)| *len).copied()
     }
 
     /// Consume the scanner, returning spans sorted by preference:
@@ -607,14 +597,33 @@ pub fn generate_raw_with_preread(
 mod tests {
     use super::*;
 
-    /// Minimal byte sequence that passes the scanner's filters: SOI, an APP0
-    /// segment of zero padding (no stray 0xFF), an SOF0 frame header, then
-    /// EOI. 106 bytes total (> 100).
-    fn minimal_jpeg() -> Vec<u8> {
-        let mut data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x62];
-        data.extend(std::iter::repeat_n(0x00, 0x60));
-        data.extend_from_slice(&[0xFF, 0xC0, 0xFF, 0xD9]);
+    /// A minimal SOF0 frame header (baseline, 8-bit, one component) carrying
+    /// `width` x `height`. `displayable_dimensions` reads the dimensions from
+    /// this segment.
+    fn sof0(width: u16, height: u16) -> Vec<u8> {
+        let mut seg = vec![0xFF, 0xC0, 0x00, 0x0B, 0x08];
+        seg.extend_from_slice(&height.to_be_bytes());
+        seg.extend_from_slice(&width.to_be_bytes());
+        seg.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
+        seg
+    }
+
+    /// Byte sequence that passes the scanner's filters: SOI, an APP0 padding
+    /// segment of `pad` zero bytes (no stray 0xFF), an SOF0 frame header
+    /// carrying `width` x `height`, then EOI.
+    fn jpeg_with_dimensions(width: u16, height: u16, pad: usize) -> Vec<u8> {
+        let app0_len = u16::try_from(pad + 2).expect("padding fits a JPEG segment length");
+        let mut data = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        data.extend_from_slice(&app0_len.to_be_bytes());
+        data.extend(std::iter::repeat_n(0x00, pad));
+        data.extend(sof0(width, height));
+        data.extend_from_slice(&[0xFF, 0xD9]);
         data
+    }
+
+    /// A well-formed span comfortably over the scanner's 100-byte floor.
+    fn minimal_jpeg() -> Vec<u8> {
+        jpeg_with_dimensions(64, 48, 0x60)
     }
 
     #[test]
@@ -661,11 +670,42 @@ mod tests {
         // frame marker; the walk must skip it and accept the SOF0 behind it.
         let mut data = vec![0xFF, 0xD8, 0xFF, 0xC4, 0x00, 0x62];
         data.extend(std::iter::repeat_n(0x00, 0x60));
-        data.extend_from_slice(&[0xFF, 0xC0, 0xFF, 0xD9]);
+        data.extend(sof0(64, 48));
+        data.extend_from_slice(&[0xFF, 0xD9]);
 
         let mut scanner = JpegScanner::new();
         scanner.scan(&data);
         assert_eq!(scanner.spans, vec![(0, data.len())]);
+    }
+
+    #[test]
+    fn displayable_dimensions_reads_sof_frame_size() {
+        let jpeg = jpeg_with_dimensions(1920, 1280, 0x60);
+        assert_eq!(displayable_dimensions(&jpeg), Some((1920, 1280)));
+    }
+
+    #[test]
+    fn largest_by_pixels_prefers_resolution_over_byte_size() {
+        // A byte-heavy low-res preview followed by a byte-light high-res one.
+        // Selection must go by pixel count, not span length.
+        let low_res = jpeg_with_dimensions(160, 120, 4000);
+        let high_res = jpeg_with_dimensions(2000, 1500, 0x60);
+        assert!(
+            high_res.len() < low_res.len(),
+            "high-res span must be smaller in bytes for this test to be meaningful"
+        );
+
+        let mut data = low_res;
+        let high_start = data.len();
+        data.extend_from_slice(&high_res);
+
+        let mut scanner = JpegScanner::new();
+        scanner.scan(&data);
+        assert_eq!(scanner.spans.len(), 2);
+        assert_eq!(
+            scanner.largest_by_pixels(&data),
+            Some((high_start, high_res.len()))
+        );
     }
 
     #[test]
