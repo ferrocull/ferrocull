@@ -8,11 +8,11 @@ use crate::{
     theme::{colors, spacing},
 };
 
-/// Delete after download toggle with warning.
+/// Delete-after-ingest toggle with warning.
 pub(crate) fn delete_panel(enabled: bool) -> Element<'static, Message> {
     let toggle = checkbox(enabled)
-        .label("Delete source files after download")
-        .on_toggle(|_| Message::DeleteAfterDownloadToggled)
+        .label("Delete source files after ingest")
+        .on_toggle(|_| Message::DeleteAfterIngestToggled)
         .size(14)
         .text_size(12);
 

@@ -54,21 +54,33 @@ pub(crate) mod grid {
     use chrono::{DateTime, Utc};
     use ferrocull_core::ColorLabel;
 
+    /// Focus-movement direction for arrow-key navigation.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Direction {
+        Left,
+        Right,
+        Up,
+        Down,
+    }
+
     /// Messages for grid and media item interactions.
     #[derive(Debug, Clone)]
     pub(crate) enum Message {
         /// Click on thumbnail: sets focus to this item.
         FileFocused(PathBuf),
-        /// Cmd/Ctrl+Click on thumbnail: toggles selection.
-        FileSelectionToggled(PathBuf),
-        /// Keyboard +: explicitly select file.
-        FileSelected(PathBuf),
-        /// Keyboard -: explicitly deselect file.
-        FileDeselected(PathBuf),
+        /// Cmd/Ctrl+Click on thumbnail: toggles the tag.
+        FileTagToggled(PathBuf),
+        /// Shift+Click on thumbnail: tags the contiguous range from the focused
+        /// item to this one, inclusive, and moves focus here.
+        RangeTagTo(PathBuf),
+        /// Keyboard +: explicitly tag file.
+        FileTagged(PathBuf),
+        /// Keyboard -: explicitly untag file.
+        FileUntagged(PathBuf),
         FileRated(PathBuf, i8),
         FileColorLabelSet(PathBuf, Option<ColorLabel>),
-        SelectAll,
-        SelectNone,
+        TagAll,
+        UntagAll,
         RejectFile(PathBuf),
         BurstToggled(DateTime<Utc>),
         ThumbnailHover(usize, bool),
@@ -77,7 +89,23 @@ pub(crate) mod grid {
         FocusPrev,
         FocusUp,
         FocusDown,
+        /// Shift+Arrow: move focus like the plain arrow and tag every item
+        /// between the old and new focus, inclusive.
+        ExtendFocus(Direction),
+        /// Move focus one viewport's worth of rows.
+        FocusPageDown,
+        FocusPageUp,
+        /// Move focus to the first item in the loaded view.
+        FocusHome,
+        /// Move focus to the last item in the loaded view.
+        FocusEnd,
         FocusOn(usize),
+        /// `B` key: toggle collapse/expand of the focused item's burst.
+        ToggleFocusedBurst,
+        /// Ctrl+Z: revert the most recent metadata mutation.
+        Undo,
+        /// Ctrl+Shift+Z / Ctrl+Y: re-apply the most recently undone mutation.
+        Redo,
         OpenPreview(usize),
         /// Wheel scrolled over the grid — snap row-by-row.
         Wheel(iced::mouse::ScrollDelta),
@@ -129,8 +157,12 @@ pub(crate) mod destination {
         AddBackupClicked,
         RemoveBackup(usize),
         BackupDestPicked(Option<PathBuf>),
-        DeleteAfterDownloadToggled,
-        StartDownload,
+        DeleteAfterIngestToggled,
+        StartIngest,
+        /// Toggle the ingest-failure details popup.
+        ToggleIngestFailures,
+        /// Re-run ingest for exactly the files that failed last time.
+        RetryFailedIngest,
     }
 }
 
@@ -260,11 +292,11 @@ pub(crate) enum ScanEvent {
     ThumbnailCached(PathBuf, Result<(), String>),
 }
 
-/// Result of a download operation.
+/// Result of an ingest operation.
 #[derive(Debug, Clone)]
-pub(crate) struct DownloadResult {
+pub(crate) struct IngestResult {
     pub successes: Vec<SuccessInfo>,
-    pub failure_count: usize,
+    pub failures: Vec<FailureInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -272,6 +304,13 @@ pub(crate) struct SuccessInfo {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub checksum: String,
+}
+
+/// One failed file from an ingest run, kept for the details popup and retry.
+#[derive(Debug, Clone)]
+pub(crate) struct FailureInfo {
+    pub source: PathBuf,
+    pub error: String,
 }
 
 /// Config panel section identifiers.
@@ -302,10 +341,19 @@ pub(crate) enum Message {
     Settings(settings::Message),
 
     ToggleSection(Section),
+    /// Toggle the keyboard-shortcut reference overlay (`?` / F1).
+    ToggleShortcuts,
     TogglePanel(Panel),
     PanelResized(Panel, f32),
     PanelResizeEnd,
-    KeyPressed(Key, Modifiers),
+    /// Carries both the base key (layout key without modifiers, for
+    /// letter/digit bindings) and the modified key (with modifiers applied,
+    /// for characters like `?` that live on different keys per layout).
+    KeyPressed {
+        key: Key,
+        modified_key: Key,
+        modifiers: Modifiers,
+    },
     ModifiersChanged(Modifiers),
 
     /// A drained batch of scan progress events, applied in one `update` pass so
@@ -314,8 +362,8 @@ pub(crate) enum Message {
     ScanComplete(Vec<ScannedFile>),
     ThumbnailsComplete,
     ThumbnailLoaded(PathBuf, iced::widget::image::Handle),
-    DownloadProgressUpdate(usize),
-    DownloadComplete(DownloadResult),
+    IngestProgressUpdate(usize),
+    IngestComplete(IngestResult),
     PreviewLoaded(u64, PathBuf, Result<Vec<u8>, String>),
     PreviewAllocated(
         u64,

@@ -37,7 +37,7 @@ The specific `.xmp` [[sidecar]] that carries XMP metadata Ferrocull cares about 
 _Avoid_: XMP file, Metadata file.
 
 **Burst**:
-A run of **3 or more** consecutive media files whose capture times are each within 1 second of the previous one. Two shots within a second do not form a burst — the minimum is three. Bursts are detected from EXIF `DateTimeOriginal` + `SubSecTimeOriginal` and can be visually collapsed in the grid; rating/labelling/tagging a burst member applies to all members.
+A run of **3 or more** consecutive media files whose capture times are each within 1 second of the previous one. Two shots within a second do not form a burst — the minimum is three. Bursts are detected from EXIF `DateTimeOriginal` + `SubSecTimeOriginal` and can be visually collapsed in the grid; rating/labelling/tagging a burst member applies to all members. Collapse/expand is toggled by clicking the burst count badge or pressing `B` on the focused item (a Ferrocull binding — Photo Mechanic has no equivalent).
 _Avoid_: Sequence, Series.
 
 **Source**:
@@ -55,8 +55,9 @@ _Avoid_: Target, Output folder.
 A signed integer in `[-1, 5]` attached to a media file, matching the XMP `xmp:Rating` wire format:
 - `-1` — **Rejected** (the file is thrown out; `X` key)
 - `0` — **Unrated** (the default; no `xmp:Rating` written)
-- `1`..`5` — star rating (`Shift+1` through `Shift+5`)
+- `1`..`5` — star rating (`1` through `5`)
 Rejection and star rating are not orthogonal — a file is in exactly one of these states at a time.
+Binding unmodified digits to star ratings is a deliberate divergence from Photo Mechanic, where digits set the color class.
 _Avoid_: Rank, Score. Don't speak of "rejected" as a separate field — it's the `-1` rating.
 
 ### Compare mode

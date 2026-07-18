@@ -98,7 +98,7 @@ impl Ferrocull {
         // Validate at the boundary — once we add to `sources`/`selected_sources`,
         // downstream code (`scan_source_directory`) trusts the path is a directory.
         if !folder_path.is_dir() {
-            self.status_message = Some(format!("not a directory: {}", folder_path.display()));
+            self.error(format!("not a directory: {}", folder_path.display()));
             return Task::none();
         }
 
@@ -129,7 +129,7 @@ impl Ferrocull {
         let storage_devices = match result {
             Ok(devices) => devices,
             Err(e) => {
-                self.status_message = Some(format!("source scan failed: {e}"));
+                self.error(format!("source scan failed: {e}"));
                 return;
             }
         };
@@ -170,7 +170,7 @@ impl Ferrocull {
                     }
                 }
             }
-            Err(e) => self.status_message = Some(e),
+            Err(e) => self.error(e),
         }
     }
 
@@ -190,7 +190,7 @@ impl Ferrocull {
                 }
                 self.rebuild_view();
             }
-            Err(e) => self.status_message = Some(e),
+            Err(e) => self.error(e),
         }
     }
 
@@ -254,7 +254,7 @@ impl Ferrocull {
         // rather than repeating the I/O on the update loop.
         let source_id = canonical_path.to_string_lossy().into_owned();
 
-        let is_downloaded = self.metadata.is_downloaded(&source_id);
+        let is_ingested = self.metadata.is_ingested(&source_id);
 
         let (rating, color_label) = self.metadata.load(&source_id, xmp_metadata);
 
@@ -263,7 +263,7 @@ impl Ferrocull {
             source_id,
             media_type: scanned.media_type,
             capture_time,
-            is_downloaded,
+            is_ingested,
             jpeg_pair,
             paired: scanned.paired,
             sidecars: scanned.sidecars,
