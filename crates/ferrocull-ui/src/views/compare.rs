@@ -176,18 +176,12 @@ fn layout_toggle_btn(
     is_active: bool,
     on_press: Message,
 ) -> iced::widget::Button<'static, Message> {
-    let palette = crate::theme::palette();
-    let color = if is_active {
-        colors::ACCENT
-    } else {
-        palette.background.base.text
-    };
     let style = if is_active {
         styles::primary_button
     } else {
         styles::secondary_button
     };
-    button(text(label).size(11).color(color))
+    button(text(label).size(11))
         .padding([6, 10])
         .style(style)
         .on_press(on_press)

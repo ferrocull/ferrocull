@@ -1,5 +1,5 @@
 use iced::{
-    Color, Element,
+    Element,
     widget::{button, column, row, text, text_input},
 };
 
@@ -40,7 +40,7 @@ fn dest_section(
                 .on_input(on_change)
                 .size(12)
                 .width(180),
-            button(text("Browse").size(11).color(Color::WHITE))
+            button(text("Browse").size(11))
                 .on_press(on_browse)
                 .padding([4, 8])
                 .style(styles::primary_button),

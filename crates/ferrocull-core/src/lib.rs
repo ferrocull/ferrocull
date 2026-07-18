@@ -1,9 +1,9 @@
 pub mod backup;
 pub mod cache;
 pub(crate) mod copy;
-pub mod download;
 pub(crate) mod history;
 pub mod hooks;
+pub mod ingest;
 pub mod media;
 pub mod metadata_store;
 pub mod pattern;

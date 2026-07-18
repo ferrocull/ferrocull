@@ -1,13 +1,13 @@
 use ferrocull_core::Hook;
 use iced::{
-    Color, Element, Fill, Length,
+    Element, Fill, Length,
     widget::{Space, button, checkbox, column, container, row, scrollable, text, text_input},
 };
 
 use crate::{messages::profile::Message, styles, theme::spacing};
 
 pub(crate) fn hooks_panel(hooks: &[Hook]) -> Element<'static, Message> {
-    let header = text("Post-Download Hooks").size(13);
+    let header = text("Post-Ingest Hooks").size(13);
 
     let mut content = column![header].spacing(spacing::SM);
 
@@ -56,7 +56,7 @@ pub(crate) fn hooks_panel(hooks: &[Hook]) -> Element<'static, Message> {
     content
         .push(Space::new().height(spacing::XS))
         .push(
-            button(text("Add Hook...").size(11).color(Color::WHITE))
+            button(text("Add Hook...").size(11))
                 .on_press(Message::HookAddRequested)
                 .padding([4, 8])
                 .style(styles::primary_button),

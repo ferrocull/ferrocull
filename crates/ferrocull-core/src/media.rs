@@ -153,7 +153,7 @@ pub struct Item {
     /// Media type determined at scan time (RAW, Photo, or Video).
     pub media_type: FileCategory,
     pub capture_time: CaptureTime,
-    pub is_downloaded: bool,
+    pub is_ingested: bool,
     /// For RAW files: path to paired JPEG (if exists). JPEGs never have this set.
     pub jpeg_pair: Option<PathBuf>,
     /// All paired files from the source card (JPEG, companion video, etc.).
@@ -270,7 +270,7 @@ impl FilterMode {
     pub fn matches(self, item: &Item) -> bool {
         match self {
             Self::All => true,
-            Self::NewOnly => !item.is_downloaded,
+            Self::NewOnly => !item.is_ingested,
             Self::PhotosOnly => item.media_type == FileCategory::Photo,
             Self::VideosOnly => item.media_type == FileCategory::Video,
             Self::RawOnly => item.media_type == FileCategory::Raw,

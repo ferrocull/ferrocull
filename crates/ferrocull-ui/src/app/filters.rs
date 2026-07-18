@@ -21,13 +21,13 @@ impl Ferrocull {
         let message = match (outcome.focused_lost, outcome.selection_pruned) {
             (false, 0) => return,
             (true, 0) => "Focused item hidden".to_owned(),
-            (false, n) => format!("{n} selected item{} hidden", if n == 1 { "" } else { "s" }),
+            (false, n) => format!("{n} selected item{} hidden", super::plural(n)),
             (true, n) => format!(
                 "Focused item and {n} selected item{} hidden",
-                if n == 1 { "" } else { "s" }
+                super::plural(n)
             ),
         };
-        self.status_message = Some(message);
+        self.error(message);
     }
 }
 

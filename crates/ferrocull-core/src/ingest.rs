@@ -17,18 +17,24 @@ pub enum Error {
     InvalidDestinationPath { path: PathBuf, rendered: String },
     #[error(transparent)]
     Copy(#[from] copy::Error),
+    #[error("failed to write XMP sidecar at '{}'", dest.display())]
+    Xmp {
+        dest: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
-/// A download job containing source files and destination directory.
+/// An ingest job containing source files and destination directory.
 #[derive(Debug, Clone)]
 pub struct Job {
     pub files: Vec<MediaFile>,
     pub dest_base: PathBuf,
     pub videos_dest: PathBuf,
-    pub delete_after_download: bool,
+    pub delete_after_ingest: bool,
 }
 
-/// Progress update for the download operation.
+/// Progress update for the ingest operation.
 #[derive(Debug, Clone, Copy)]
 pub struct Progress<'a> {
     pub current_file_index: usize,
@@ -60,9 +66,9 @@ pub struct Failure {
 /// Write an XMP sidecar next to the destination if the file has metadata worth preserving.
 ///
 /// Returns `Ok(())` when there's nothing to write or the write succeeded; `Err` carries
-/// the underlying I/O failure so the caller can decide whether to fail the download or
-/// just surface a warning. XMP carries user-authored data (ratings, labels), so silent
-/// loss is worth flagging up-stack.
+/// the underlying I/O failure so the caller can fail the file's ingest. XMP carries
+/// user-authored data (ratings, labels); a failed write must block source deletion, or
+/// the rating/label would exist nowhere on disk.
 fn write_xmp_sidecar(media_file: &MediaFile, dest: &Path) -> io::Result<()> {
     let Some(payload) = metadata_store::ingest_payload(media_file) else {
         return Ok(());
@@ -82,7 +88,7 @@ fn delete_source_files(
         tracing::warn!(
             path = %media_file.path.display(),
             error = %e,
-            "failed to delete source after download"
+            "failed to delete source after ingest"
         );
         return false;
     }
@@ -127,7 +133,7 @@ fn same_contents(left: &Path, right: &Path) -> Result<bool, io::Error> {
 
 /// Copy paired and sidecar files alongside the primary destination.
 ///
-/// Returns `(copied_or_matched, all_verified)`: paths safe to delete after download
+/// Returns `(copied_or_matched, all_verified)`: paths safe to delete after ingest
 /// (copied successfully, or existed at destination with identical contents) and
 /// whether every extra was either successfully copied or verified.
 fn copy_extras(
@@ -221,16 +227,16 @@ fn resolve_destination_path(
     Ok(base.join(relative))
 }
 
-/// Executes a download job, copying all files to the destination.
+/// Executes an ingest job, copying all files to the destination.
 ///
 /// Videos are routed to `videos_dest`, everything else to `dest_base`.
 ///
-/// If `delete_after_download` is true, deletes source files after successful
+/// If `delete_after_ingest` is true, deletes source files after successful
 /// copy and checksum verification. Deletion failures are logged but do not
 /// affect the overall success status.
 ///
 /// Returns a result for each file in the job.
-pub fn execute_download(job: &Job, mut progress_fn: impl FnMut(Progress<'_>)) -> Vec<FileResult> {
+pub fn execute_ingest(job: &Job, mut progress_fn: impl FnMut(Progress<'_>)) -> Vec<FileResult> {
     let total_files = job.files.len();
     let primary_sources: HashSet<PathBuf> = job.files.iter().map(|f| f.path.clone()).collect();
 
@@ -272,27 +278,34 @@ pub fn execute_download(job: &Job, mut progress_fn: impl FnMut(Progress<'_>)) ->
 
             match result {
                 Ok(checksum) => {
+                    // Write the XMP sidecar before any source deletion. A failed write
+                    // fails the file so delete_source_files never runs — otherwise the
+                    // rating/label would exist nowhere on disk.
+                    if let Err(xmp_error) = write_xmp_sidecar(media_file, &dest) {
+                        return Err(Failure {
+                            source,
+                            destination: dest.clone(),
+                            error: Error::Xmp {
+                                dest,
+                                source: xmp_error,
+                            },
+                        });
+                    }
+
                     let (copied_or_matched, all_verified) = copy_extras(
                         media_file,
                         dest.parent().expect("dest is a file within a directory"),
                         &primary_sources,
                     );
-                    if let Err(e) = write_xmp_sidecar(media_file, &dest) {
-                        tracing::warn!(
-                            path = %dest.display(),
-                            error = %e,
-                            "XMP sidecar write failed; rating/label may not travel with the file",
-                        );
-                    }
 
-                    if job.delete_after_download && !all_verified {
+                    if job.delete_after_ingest && !all_verified {
                         tracing::warn!(
                             path = %source.display(),
                             "keeping source files because some paired/sidecar copies were not verified"
                         );
                     }
 
-                    let source_deleted = job.delete_after_download
+                    let source_deleted = job.delete_after_ingest
                         && all_verified
                         && delete_source_files(media_file, &primary_sources, &copied_or_matched);
 

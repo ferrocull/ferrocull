@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-/// A user-configured post-download hook (persisted in settings/profiles).
+/// A user-configured post-ingest hook (persisted in settings/profiles).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hook {
     pub name: String,
@@ -25,7 +25,7 @@ pub struct Spec<'a> {
 #[derive(Debug, Clone)]
 pub struct Context {
     pub dest_dir: PathBuf,
-    pub files_downloaded: Vec<PathBuf>,
+    pub files_ingested: Vec<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,10 +42,10 @@ pub enum Error {
     },
 }
 
-/// Create a temp file listing all downloaded paths, one per line.
+/// Create a temp file listing all ingested paths, one per line.
 fn create_file_list(ctx: &Context) -> Result<tempfile::NamedTempFile, Error> {
     let mut f = tempfile::NamedTempFile::new().map_err(Error::TempFile)?;
-    for path in &ctx.files_downloaded {
+    for path in &ctx.files_ingested {
         writeln!(f, "{}", path.display()).map_err(Error::TempFile)?;
     }
     Ok(f)
@@ -63,10 +63,7 @@ fn run_single(hook: &Spec<'_>, ctx: &Context, file_list_path: &Path) -> Result<(
         .arg(shell_arg)
         .arg(hook.command)
         .env("FERROCULL_DEST_DIR", &ctx.dest_dir)
-        .env(
-            "FERROCULL_FILE_COUNT",
-            ctx.files_downloaded.len().to_string(),
-        )
+        .env("FERROCULL_FILE_COUNT", ctx.files_ingested.len().to_string())
         .env("FERROCULL_FILE_LIST", file_list_path)
         .output()
         .map_err(|source| Error::Spawn {

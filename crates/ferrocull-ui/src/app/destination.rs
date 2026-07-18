@@ -6,15 +6,15 @@ use std::{
 use ferrocull_core::{
     FileCategory, MediaFile, Pattern, RenderContext,
     backup::{self, execute_backup},
-    download::{self, FileResult, execute_download},
     hooks::{Context, Spec, run_hooks},
+    ingest::{self, FileResult, execute_ingest},
     media::Item,
 };
 use iced::Task;
 use sipper::sipper;
 
 use super::{Ferrocull, pick_folder};
-use crate::messages::{DownloadResult, Message, SuccessInfo, destination};
+use crate::messages::{FailureInfo, IngestResult, Message, SuccessInfo, destination};
 
 pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<Message> {
     match msg {
@@ -89,11 +89,18 @@ pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<M
             state.persist_settings();
         }
         destination::Message::BackupDestPicked(Some(path)) => state.handle_backup_picked(path),
-        destination::Message::DeleteAfterDownloadToggled => {
-            state.delete_after_download = !state.delete_after_download;
+        destination::Message::DeleteAfterIngestToggled => {
+            state.delete_after_ingest = !state.delete_after_ingest;
             state.persist_settings();
         }
-        destination::Message::StartDownload => return state.handle_start_download(),
+        destination::Message::StartIngest => return state.handle_start_ingest(),
+        destination::Message::ToggleIngestFailures => {
+            state.ingest_failures_open = !state.ingest_failures_open;
+        }
+        destination::Message::RetryFailedIngest => {
+            state.ingest_failures_open = false;
+            return state.handle_retry_failed_ingest();
+        }
     }
     Task::none()
 }
@@ -155,20 +162,25 @@ fn run_backups(
     }
 }
 
-fn results_to_download_result(results: Vec<FileResult>) -> DownloadResult {
-    let failure_count = results.iter().filter(|r| r.is_err()).count();
-    let successes = results
-        .into_iter()
-        .filter_map(Result::ok)
-        .map(|s| SuccessInfo {
-            source: s.source,
-            destination: s.destination,
-            checksum: s.checksum,
-        })
-        .collect();
-    DownloadResult {
+fn results_to_ingest_result(results: Vec<FileResult>) -> IngestResult {
+    let mut successes = Vec::new();
+    let mut failures = Vec::new();
+    for result in results {
+        match result {
+            Ok(s) => successes.push(SuccessInfo {
+                source: s.source,
+                destination: s.destination,
+                checksum: s.checksum,
+            }),
+            Err(f) => failures.push(FailureInfo {
+                source: f.source,
+                error: f.error.to_string(),
+            }),
+        }
+    }
+    IngestResult {
         successes,
-        failure_count,
+        failures,
     }
 }
 
@@ -230,26 +242,56 @@ fn item_to_media_file(
 }
 
 impl Ferrocull {
-    /// Handle download start: create sipper for progress tracking.
-    fn handle_start_download(&mut self) -> Task<Message> {
+    /// Handle ingest start: ingest the current selection.
+    fn handle_start_ingest(&mut self) -> Task<Message> {
+        let indices: Vec<usize> = self.selected.iter().copied().collect();
+        self.start_ingest_for(&indices)
+    }
+
+    /// Re-run ingest for exactly the files that failed last time.
+    fn handle_retry_failed_ingest(&mut self) -> Task<Message> {
+        let total = self.last_ingest_failures.len();
+        // filter_map, not map+expect: a rescan between failure and retry can
+        // legitimately drop failed sources from the loaded set.
+        let indices: Vec<usize> = self
+            .last_ingest_failures
+            .iter()
+            .filter_map(|failure| self.media.index_of(&failure.source))
+            .collect();
+        if indices.is_empty() {
+            self.error(format!(
+                "{total} failed file(s) are no longer loaded — rescan the source and ingest again"
+            ));
+            return Task::none();
+        }
+        if indices.len() < total {
+            self.echo(format!(
+                "Retrying {} of {total} failed files — the rest are no longer loaded",
+                indices.len()
+            ));
+        }
+        self.start_ingest_for(&indices)
+    }
+
+    /// Ingest the given items: create sipper for progress tracking.
+    fn start_ingest_for(&mut self, indices: &[usize]) -> Task<Message> {
         let photo_pattern = match Pattern::parse(&self.photo_pattern) {
             Ok(pattern) => pattern,
             Err(e) => {
-                self.status_message = Some(format!("Invalid photo pattern: {e}"));
+                self.error(format!("Invalid photo pattern: {e}"));
                 return Task::none();
             }
         };
         let video_pattern = match Pattern::parse(&self.video_pattern) {
             Ok(pattern) => pattern,
             Err(e) => {
-                self.status_message = Some(format!("Invalid video pattern: {e}"));
+                self.error(format!("Invalid video pattern: {e}"));
                 return Task::none();
             }
         };
         let sequence = Cell::new(0u32);
 
-        let selected: Vec<MediaFile> = self
-            .selected
+        let selected: Vec<MediaFile> = indices
             .iter()
             .map(|&idx| self.media.item(idx))
             .map(|item| {
@@ -271,25 +313,26 @@ impl Ferrocull {
         let total_files = selected.len();
         let photos_dest = PathBuf::from(&self.photos_dest);
         let videos_dest = PathBuf::from(&self.videos_dest);
-        let job = download::Job {
+        let job = ingest::Job {
             files: selected,
             dest_base: photos_dest.clone(),
             videos_dest: videos_dest.clone(),
-            delete_after_download: self.delete_after_download,
+            delete_after_ingest: self.delete_after_ingest,
         };
 
-        self.last_download_failures = 0;
-        self.download_progress = Some(super::DownloadProgress {
+        self.last_ingest_failures.clear();
+        self.ingest_failures_open = false;
+        self.ingest_progress = Some(super::IngestProgress {
             total_files,
             files_completed: 0,
         });
 
         let backup_dests = self.backup_destinations.clone();
-        let download_sipper = sipper(move |mut sender| async move {
+        let ingest_sipper = sipper(move |mut sender| async move {
             let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
 
             let handle = tokio::task::spawn_blocking(move || {
-                let results = execute_download(&job, |progress| {
+                let results = execute_ingest(&job, |progress| {
                     if progress.file_bytes_copied == progress.file_total_bytes {
                         let _ = progress_tx.send(progress.current_file_index + 1);
                     }
@@ -306,39 +349,39 @@ impl Ferrocull {
                 sender.send(progress).await;
             }
 
-            let results = handle.await.unwrap_or_else(|e| {
-                tracing::error!("download task panicked: {e}");
-                Vec::new()
-            });
-            results_to_download_result(results)
+            let results = handle.await.expect("ingest task panicked");
+            results_to_ingest_result(results)
         });
 
         Task::sip(
-            download_sipper,
-            Message::DownloadProgressUpdate,
-            Message::DownloadComplete,
+            ingest_sipper,
+            Message::IngestProgressUpdate,
+            Message::IngestComplete,
         )
     }
 
-    pub(super) fn handle_download_complete(&mut self, result: &DownloadResult) -> Task<Message> {
-        self.download_progress = None;
-        self.last_download_failures = result.failure_count;
+    pub(super) fn handle_ingest_complete(&mut self, result: &IngestResult) -> Task<Message> {
+        self.ingest_progress = None;
+        self.last_ingest_failures.clone_from(&result.failures);
         for success in &result.successes {
             let idx = self
                 .media
                 .index_of(&success.source)
-                .expect("a downloaded file's path must resolve to a media item");
+                .expect("an ingested file's path must resolve to a media item");
             self.selected.remove(&idx);
             self.media
-                .mutate_item(idx, &self.config.params(), |item| item.is_downloaded = true);
+                .mutate_item(idx, &self.config.params(), |item| item.is_ingested = true);
             let source_id = self.media.item(idx).source_id.clone();
 
             self.metadata
-                .record_download(&source_id, &success.checksum, &success.destination);
+                .record_ingest(&source_id, &success.checksum, &success.destination);
         }
         if !result.successes.is_empty() {
             self.status_message = None;
-            // Reconcile selection/focus: a now-downloaded file may leave a
+            // Recorded undo/redo entries reference pre-ingest tag state that no
+            // longer holds — a stale undo would re-tag already-ingested files.
+            self.undo_stack = crate::undo::Stack::default();
+            // Reconcile selection/focus: a now-ingested file may leave a
             // "new only" filter.
             self.reconcile_selection();
         }
@@ -349,7 +392,7 @@ impl Ferrocull {
 
         let ctx = Context {
             dest_dir: PathBuf::from(&self.photos_dest),
-            files_downloaded: result
+            files_ingested: result
                 .successes
                 .iter()
                 .map(|s| s.destination.clone())
@@ -368,7 +411,7 @@ impl Ferrocull {
                     .collect();
                 for (i, hook_result) in run_hooks(&hook_specs, &ctx).into_iter().enumerate() {
                     if let Err(e) = hook_result {
-                        tracing::warn!(hook = i, error = %e, "post-download hook failed");
+                        tracing::warn!(hook = i, error = %e, "post-ingest hook failed");
                     }
                 }
             }),

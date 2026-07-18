@@ -25,19 +25,25 @@ pub(crate) fn panel(theme: &Theme) -> container::Style {
     }
 }
 
+/// Disabled fill for primary/danger buttons: weak-step background with the
+/// base text at reduced alpha — muted but still legible in both themes.
+fn disabled_tonal(palette: &iced::theme::palette::Extended) -> (Color, Color, f32) {
+    (
+        palette.background.weak.color,
+        palette.background.base.text.scale_alpha(0.75),
+        0.0,
+    )
+}
+
 /// Amber accent button for primary actions.
 #[must_use]
 pub(crate) fn primary_button(theme: &Theme, status: button::Status) -> button::Style {
     let palette = theme.extended_palette();
     let (bg, text, shadow_alpha) = match status {
-        button::Status::Active => (colors::ACCENT, Color::WHITE, 0.15),
-        button::Status::Hovered => (colors::ACCENT_HOVER, Color::WHITE, 0.2),
-        button::Status::Pressed => (colors::ACCENT_MUTED, Color::WHITE, 0.1),
-        button::Status::Disabled => (
-            palette.background.strong.text,
-            palette.background.weak.text,
-            0.0,
-        ),
+        button::Status::Active => (colors::ACCENT, colors::ON_ACCENT, 0.15),
+        button::Status::Hovered => (colors::ACCENT_HOVER, colors::ON_ACCENT, 0.2),
+        button::Status::Pressed => (colors::ACCENT_PRESSED, colors::ON_ACCENT, 0.1),
+        button::Status::Disabled => disabled_tonal(palette),
     };
 
     button::Style {
@@ -163,7 +169,7 @@ pub(crate) fn pattern_picker(theme: &Theme, status: pick_list::Status) -> pick_l
     style
 }
 
-/// Amber progress bar for storage and import indicators.
+/// Amber progress bar for storage and ingest indicators.
 #[must_use]
 pub(crate) fn storage_progress(theme: &Theme) -> progress_bar::Style {
     let palette = theme.extended_palette();
@@ -183,10 +189,13 @@ pub(crate) fn storage_progress(theme: &Theme) -> progress_bar::Style {
 pub(crate) fn danger_button(theme: &Theme, status: button::Status) -> button::Style {
     let palette = theme.extended_palette();
     let (bg, text) = match status {
-        button::Status::Active => (colors::DANGER, Color::WHITE),
+        button::Status::Active => (colors::DANGER_REST, Color::WHITE),
         button::Status::Hovered => (colors::DANGER_HOVER, Color::WHITE),
         button::Status::Pressed => (colors::DANGER_PRESSED, Color::WHITE),
-        button::Status::Disabled => (palette.background.strong.text, palette.background.weak.text),
+        button::Status::Disabled => {
+            let (bg, text, _) = disabled_tonal(palette);
+            (bg, text)
+        }
     };
 
     button::Style {
@@ -313,7 +322,7 @@ pub(crate) fn settings_rail_item(
         };
 
         let text_color = if selected {
-            colors::ACCENT
+            selected_amber_text(palette, status)
         } else {
             palette.background.base.text
         };
@@ -327,6 +336,17 @@ pub(crate) fn settings_rail_item(
             },
             ..Default::default()
         }
+    }
+}
+
+/// Text on the amber selection tint (date tree, settings rail). Dark theme
+/// keeps the amber voice — brightened on hover where the tint deepens; light
+/// theme needs a dark amber ink to stay legible on the tint.
+fn selected_amber_text(palette: &iced::theme::palette::Extended, status: button::Status) -> Color {
+    match (palette.is_dark, status) {
+        (true, button::Status::Hovered) => colors::ACCENT_HOVER,
+        (true, _) => colors::ACCENT,
+        (false, _) => colors::ACCENT_DEEP,
     }
 }
 
@@ -403,14 +423,14 @@ pub(crate) fn date_tree_item(selected: bool) -> impl Fn(&Theme, button::Status) 
         let palette = theme.extended_palette();
 
         let bg = match (selected, status) {
-            (true, button::Status::Hovered) => colors::ACCENT_MUTED.scale_alpha(0.55),
-            (true, _) => colors::ACCENT_MUTED.scale_alpha(0.4),
+            (true, button::Status::Hovered) => colors::ACCENT_MUTED.scale_alpha(0.38),
+            (true, _) => colors::ACCENT_MUTED.scale_alpha(0.28),
             (false, button::Status::Hovered) => palette.background.neutral.color,
             (false, _) => Color::TRANSPARENT,
         };
 
         let text_color = if selected {
-            colors::ACCENT
+            selected_amber_text(palette, status)
         } else {
             palette.background.base.text
         };
@@ -441,6 +461,8 @@ pub(crate) fn thumbnail_card(bg: Color, border: Border) -> impl Fn(&Theme) -> co
 pub(crate) fn overlay_badge(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(colors::OVERLAY_BADGE.into()),
+        // Fixed dark fill: badge ink is explicit, never the theme text color.
+        text_color: Some(colors::BADGE_TEXT),
         border: Border {
             radius: radius::SM.into(),
             ..Default::default()
@@ -449,10 +471,12 @@ pub(crate) fn overlay_badge(_theme: &Theme) -> container::Style {
     }
 }
 
-/// Rounded badge with custom background (rejected, burst, preview icon).
+/// Rounded badge with custom dark background (rejected, preview icon). Text
+/// is the explicit badge ink — the fills stay dark in both themes.
 pub(crate) fn rounded_badge(bg: Color) -> impl Fn(&Theme) -> container::Style {
     move |_theme| container::Style {
         background: Some(bg.into()),
+        text_color: Some(colors::BADGE_TEXT),
         border: Border {
             radius: radius::SM.into(),
             ..Default::default()
@@ -461,9 +485,8 @@ pub(crate) fn rounded_badge(bg: Color) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
-/// Burst count badge button: warm taupe pill that brightens on hover/press.
-pub(crate) fn burst_badge(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = theme.extended_palette();
+/// Burst count badge button: deep warm-taupe pill that lightens on hover/press.
+pub(crate) fn burst_badge(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
         button::Status::Hovered | button::Status::Pressed => colors::BADGE_BURST_HOVER,
         _ => colors::BADGE_BURST,
@@ -471,7 +494,22 @@ pub(crate) fn burst_badge(theme: &Theme, status: button::Status) -> button::Styl
 
     button::Style {
         background: Some(bg.into()),
-        text_color: palette.background.base.text,
+        text_color: colors::BADGE_TEXT,
+        border: Border {
+            radius: radius::SM.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Quiet skeleton tile for a thumbnail that hasn't decoded yet: a flat step
+/// off the card background, no border, no glyph — pending, not an error.
+#[must_use]
+pub(crate) fn skeleton_tile(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.weakest.color.into()),
         border: Border {
             radius: radius::SM.into(),
             ..Default::default()
@@ -502,6 +540,24 @@ pub(crate) fn ghost_button(theme: &Theme, status: button::Status) -> button::Sty
         background: Some(bg.into()),
         text_color: palette.background.base.text,
         border: Border::default(),
+        ..Default::default()
+    }
+}
+
+/// Key-cap pill for the keyboard-shortcut overlay: a small tonal chip carrying
+/// mono key text. A weak-step fill with a 1px weaker border reads as a physical
+/// cap without competing with the shortcut descriptions.
+#[must_use]
+pub(crate) fn keycap(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.weak.color.into()),
+        text_color: Some(palette.background.base.text),
+        border: Border {
+            color: palette.background.weaker.color,
+            width: 1.0,
+            radius: radius::XS.into(),
+        },
         ..Default::default()
     }
 }

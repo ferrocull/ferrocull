@@ -232,6 +232,35 @@ pub(crate) fn step_row(rows: &[RowStart], offset: f32, steps: i32) -> Option<usi
     }
 }
 
+/// Row one viewport page from `row` (down or up): the farthest row whose offset
+/// stays within `viewport_height` of the current row's offset, but always at
+/// least one row of travel so paging makes progress on short viewports. Clamps
+/// to the row list; `None` when `row` is already at the edge of travel.
+pub(crate) fn page_row(
+    rows: &[RowStart],
+    row: usize,
+    viewport_height: f32,
+    down: bool,
+) -> Option<usize> {
+    if down {
+        if row + 1 >= rows.len() {
+            return None;
+        }
+        let limit = rows[row].offset + viewport_height;
+        let candidate = rows
+            .partition_point(|r| r.offset <= limit + ROW_EPS)
+            .saturating_sub(1);
+        Some(candidate.clamp(row + 1, rows.len() - 1))
+    } else {
+        if row == 0 {
+            return None;
+        }
+        let limit = rows[row].offset - viewport_height;
+        let candidate = rows.partition_point(|r| r.offset < limit - ROW_EPS);
+        Some(candidate.min(row - 1))
+    }
+}
+
 /// Row currently at the viewport top: the last anchor at or before `offset`.
 pub(crate) fn anchor_row(rows: &[RowStart], offset: f32) -> Option<usize> {
     rows.iter().rposition(|r| r.offset <= offset + ROW_EPS)
@@ -367,9 +396,6 @@ pub(crate) fn capture_date(item: &Item) -> NaiveDate {
     item.capture_time.second.with_timezone(&Local).date_naive()
 }
 
-/// Background color for selected cards - warm-tinted to match darkroom palette.
-const SELECTED_BG: Color = Color::from_rgb(0.28, 0.26, 0.24);
-
 /// Formats a date for display as a section header.
 /// "Today", "Yesterday", weekday name for this week, or "Jan 5" for older.
 fn format_date_header(date: NaiveDate, today: NaiveDate) -> Cow<'static, str> {
@@ -397,7 +423,7 @@ struct BurstBadgeInfo {
 /// Visual interaction state for a thumbnail cell.
 #[derive(Clone, Copy)]
 struct CellState {
-    is_selected: bool,
+    is_tagged: bool,
     is_hovered: bool,
     is_focused: bool,
 }
@@ -439,10 +465,17 @@ pub(crate) fn thumbnail_grid<'a>(
 ) -> Element<'a, Event> {
     // Empty state needs none of the grid/scrollable machinery.
     if sorted_view.is_empty() {
-        return center(text("Select a source to scan for photos").size(14))
-            .width(Fill)
-            .height(Fill)
-            .into();
+        return center(
+            text(
+                "Insert a memory card — sources appear automatically.\n\
+                 Or add a folder with \u{201c}Add Directory\u{2026}\u{201d} in the Sources panel.",
+            )
+            .size(14)
+            .align_x(iced::Alignment::Center),
+        )
+        .width(Fill)
+        .height(Fill)
+        .into();
     }
 
     let group_by_date = sort_order == SortOrder::Time;
@@ -469,7 +502,7 @@ pub(crate) fn thumbnail_grid<'a>(
             let is_hovered = hovered_thumbnail == Some(idx);
             let cell_hovered_star = if is_hovered { hovered_star } else { None };
             let state = CellState {
-                is_selected: selected.contains(&idx),
+                is_tagged: selected.contains(&idx),
                 is_hovered,
                 is_focused: focused_index == Some(idx),
             };
@@ -690,8 +723,8 @@ fn thumbnail_card(
     let palette = crate::theme::palette();
     let card_bg = if item.rating == -1 {
         colors::REJECTED_BG
-    } else if state.is_selected {
-        SELECTED_BG
+    } else if state.is_tagged {
+        crate::theme::tagged_wash()
     } else {
         palette.background.weak.color
     };
@@ -713,7 +746,7 @@ fn thumbnail_card(
         radius: radius::MD.into(),
         width: 2.0,
         color: if state.is_focused {
-            colors::ACCENT
+            crate::theme::focus_color_for(item.rating == -1)
         } else {
             Color::TRANSPARENT
         },
@@ -743,10 +776,14 @@ fn cell_overlays(
 ) -> Stack<'static, CellEvent> {
     let mut stack = Stack::new().width(Fill).height(Fill).push(base);
 
-    if item.rating == -1 {
-        stack = stack.push(rejected_badge());
-    } else if item.is_downloaded {
-        stack = stack.push(color_overlay(colors::OVERLAY_DOWNLOADED));
+    if item.rating != -1 && item.is_ingested {
+        stack = stack.push(color_overlay(colors::OVERLAY_INGESTED));
+    }
+
+    // Top-left status badges: rejected X and tagged check share one row so
+    // both stay visible when a rejected frame is also in the working set.
+    if item.rating == -1 || state.is_tagged {
+        stack = stack.push(status_badges(item.rating == -1, state.is_tagged));
     }
 
     if show_pair {
@@ -787,12 +824,13 @@ fn bottom_info_overlay(
     hovered_star: Option<i8>,
     filename: String,
 ) -> Element<'static, CellEvent> {
-    let palette = crate::theme::palette();
-    let stars = star_rating_row(rating, hovered_star, 12.0).map(|e| match e {
+    // On the fixed dark info bar every glyph uses the explicit badge ink —
+    // theme text would go dark-on-dark in the light theme.
+    let stars = star_rating_row(rating, hovered_star, 12.0, colors::BADGE_TEXT).map(|e| match e {
         StarEvent::Rated(r) => CellEvent::Rated(r),
         StarEvent::Hover(s) => CellEvent::StarHover(s),
     });
-    let name = text(filename).size(9).color(palette.background.base.text);
+    let name = text(filename).size(9).color(colors::BADGE_TEXT);
 
     let info_column = column![stars, name]
         .spacing(1)
@@ -810,11 +848,14 @@ fn bottom_info_overlay(
         .into()
 }
 
+/// Quiet skeleton for a thumbnail still decoding — a flat tonal tile, no
+/// glyph. Undecodable files never reach a distinct state here: extraction
+/// failures degrade to a cache miss upstream, so "pending" is the only case.
 fn placeholder<Message: 'static>() -> Element<'static, Message> {
-    container(center(text("?").size(24)))
+    container(Space::new())
         .width(Fill)
         .height(Fill)
-        .style(container::bordered_box)
+        .style(styles::skeleton_tile)
         .into()
 }
 
@@ -841,12 +882,30 @@ fn color_overlay<Message: 'static>(color: Color) -> Element<'static, Message> {
         .into()
 }
 
-fn rejected_badge<Message: 'static>() -> Element<'static, Message> {
-    let badge = container(text("X").size(10))
-        .padding([2, 6])
-        .style(styles::rounded_badge(colors::BADGE_REJECTED));
+/// Top-left status row: red X pill when rejected, amber check pill when
+/// tagged. The check is the guaranteed tag mark — visible over any photo and
+/// in both themes, unlike the card wash.
+fn status_badges<Message: 'static>(rejected: bool, tagged: bool) -> Element<'static, Message> {
+    let mut badges = iced::widget::Row::new().spacing(spacing::XS);
 
-    container(badge)
+    if rejected {
+        // U+2717 ballot X — the same reject mark the "Hide ✗" filter uses.
+        badges = badges.push(
+            container(text("\u{2717}").size(10))
+                .padding([2, 6])
+                .style(styles::rounded_badge(colors::BADGE_REJECTED)),
+        );
+    }
+
+    if tagged {
+        badges = badges.push(
+            container(text("\u{2713}").size(10).color(colors::ACCENT))
+                .padding([2, 5])
+                .style(styles::overlay_badge),
+        );
+    }
+
+    container(badges)
         .width(Fill)
         .height(Fill)
         .align_x(iced::alignment::Horizontal::Left)
@@ -857,9 +916,13 @@ fn rejected_badge<Message: 'static>() -> Element<'static, Message> {
 
 /// Rating indicator badge positioned in bottom-left corner (shown when not hovered).
 fn rated_badge<Message: 'static>(rating: i8) -> Element<'static, Message> {
-    let badge = container(text(format!("★{rating}")).size(10).color(colors::WARNING))
-        .padding([2, 4])
-        .style(styles::overlay_badge);
+    let badge = container(
+        text(format!("★{rating}"))
+            .size(10)
+            .color(colors::RATING_STAR),
+    )
+    .padding([2, 4])
+    .style(styles::overlay_badge);
 
     container(badge)
         .width(Fill)
@@ -872,7 +935,8 @@ fn rated_badge<Message: 'static>(rating: i8) -> Element<'static, Message> {
 
 /// Burst count badge positioned in top-right corner.
 fn burst_badge(count: usize, burst_key: DateTime<Utc>) -> Element<'static, CellEvent> {
-    let clickable_badge = button(text(format!("{count}")).size(10))
+    // ▣ is a stacked-frames cue with text presentation (never emoji-colored).
+    let clickable_badge = button(text(format!("\u{25A3} {count}")).size(10))
         .padding([2, 6])
         .style(styles::burst_badge)
         .on_press(CellEvent::BurstToggle(burst_key));
@@ -888,7 +952,14 @@ fn burst_badge(count: usize, burst_key: DateTime<Utc>) -> Element<'static, CellE
 
 /// Color label bar at the bottom of the thumbnail card.
 fn color_label_bar<Message: 'static>(label: ColorLabel) -> Element<'static, Message> {
-    let color = COLOR_LABELS[u8::from(label) as usize];
+    // Light theme uses darkened variants so the bar reads as a mark on
+    // warm-white; hue identity (user XMP data) is preserved.
+    let labels = if crate::theme::palette().is_dark {
+        &COLOR_LABELS
+    } else {
+        &crate::theme::COLOR_LABELS_LIGHT
+    };
+    let color = labels[u8::from(label) as usize];
 
     let bar = container("")
         .width(Fill)
@@ -902,9 +973,11 @@ fn color_label_bar<Message: 'static>(label: ColorLabel) -> Element<'static, Mess
         .into()
 }
 
-/// Preview icon (magnifying glass) positioned in bottom-right corner on hover.
+/// Preview affordance (zoom-in glyph) positioned in bottom-right corner on
+/// hover. ⊕ has text presentation, so it renders in the badge ink, not as a
+/// colored emoji.
 fn preview_icon() -> Element<'static, CellEvent> {
-    let icon = container(text("\u{1F50D}").size(14))
+    let icon = container(text("\u{2295}").size(14))
         .padding([4, 6])
         .style(styles::rounded_badge(
             colors::OVERLAY_BADGE.scale_alpha(0.7),
@@ -1007,6 +1080,29 @@ mod tests {
         assert_eq!(step_row(&rows, o[2], 1), None);
         assert_eq!(step_row(&rows, o[2] + 40.0, 1), None);
         assert_eq!(step_row(&rows, o[0], -1), None);
+    }
+
+    #[test]
+    fn page_row_travels_a_viewport_and_clamps_at_the_ends() {
+        use super::page_row;
+        let rows = rows_every(20, 100.0); // offsets 0..=1900
+
+        // A 350-tall viewport from row 2 (200): the last row within 200+350=550
+        // is row 5; going up from row 10 (1000): first row at/after 650 is 7.
+        assert_eq!(page_row(&rows, 2, 350.0, true), Some(5));
+        assert_eq!(page_row(&rows, 10, 350.0, false), Some(7));
+
+        // Near the ends the page clamps to the first/last row.
+        assert_eq!(page_row(&rows, 18, 350.0, true), Some(19));
+        assert_eq!(page_row(&rows, 1, 350.0, false), Some(0));
+
+        // At the edges there is nowhere to go.
+        assert_eq!(page_row(&rows, 19, 350.0, true), None);
+        assert_eq!(page_row(&rows, 0, 350.0, false), None);
+
+        // A tiny (or unreported, 0.0) viewport still makes one row of progress.
+        assert_eq!(page_row(&rows, 5, 0.0, true), Some(6));
+        assert_eq!(page_row(&rows, 5, 0.0, false), Some(4));
     }
 
     #[test]
@@ -1273,7 +1369,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2024, 1, day, 12, 0, 0).unwrap(),
                 0,
             ),
-            is_downloaded: false,
+            is_ingested: false,
             jpeg_pair: None,
             paired: Vec::new(),
             sidecars: Vec::new(),

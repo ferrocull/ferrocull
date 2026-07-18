@@ -90,7 +90,7 @@ fn confirm_thumbnail_size(state: &mut Ferrocull) -> Task<Message> {
     }
 
     if let Err(e) = state.thumbnail_cache.clear() {
-        state.status_message = Some(format!("could not clear thumbnail cache: {e}"));
+        state.error(format!("could not clear thumbnail cache: {e}"));
         return Task::none();
     }
 
@@ -152,7 +152,7 @@ fn handle_cache_moved(
     let new_root = match result {
         Ok(root) => root,
         Err(e) => {
-            state.status_message = Some(format!("cache move failed: {e}"));
+            state.error(format!("cache move failed: {e}"));
             return;
         }
     };

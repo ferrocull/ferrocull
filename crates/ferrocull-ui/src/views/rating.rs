@@ -57,26 +57,28 @@ pub(crate) fn color_label_row(
     container(swatches).center_x(Fill).into()
 }
 
+/// `empty_color` is the hollow-star ink: callers on theme surfaces pass a
+/// palette text color, callers on fixed dark badges pass the badge ink.
 pub(crate) fn star_rating_row(
     current_rating: i8,
     hovered_star: Option<i8>,
     font_size: f32,
+    empty_color: Color,
 ) -> Element<'static, StarEvent> {
     let display_rating = hovered_star.unwrap_or(current_rating);
     let filled_color = if hovered_star.is_some() {
-        colors::WARNING.scale_alpha(0.6)
+        colors::RATING_STAR.scale_alpha(0.6)
     } else {
-        colors::WARNING
+        colors::RATING_STAR
     };
 
-    let palette = crate::theme::palette();
     let star_spacing = if font_size > 14.0 { 4.0 } else { 2.0 };
 
     let stars = row((1..=5i8).map(|i| {
         let (symbol, color) = if i <= display_rating {
             ("★", filled_color)
         } else {
-            ("☆", palette.background.weak.text)
+            ("☆", empty_color)
         };
 
         let new_rating = if i == current_rating { 0 } else { i };
@@ -111,10 +113,11 @@ pub(crate) fn item_controls(
     let palette = crate::theme::palette();
     let is_rejected = rating == -1;
 
-    let rating_widget = star_rating_row(rating, hovered_star, 18.0).map(|e| match e {
-        StarEvent::Rated(r) => ItemEvent::Rated(r),
-        StarEvent::Hover(s) => ItemEvent::StarHover(s),
-    });
+    let rating_widget = star_rating_row(rating, hovered_star, 18.0, palette.background.weak.text)
+        .map(|e| match e {
+            StarEvent::Rated(r) => ItemEvent::Rated(r),
+            StarEvent::Hover(s) => ItemEvent::StarHover(s),
+        });
 
     let color_widget = color_label_row(color_label, 14.0).map(ItemEvent::ColorLabelSet);
 
@@ -123,14 +126,12 @@ pub(crate) fn item_controls(
     } else {
         styles::secondary_button
     };
-    let reject_btn = button(
-        text(if is_rejected { "Unmark" } else { "Reject (X)" })
-            .size(11)
-            .color(palette.background.base.text),
-    )
-    .padding([6, 12])
-    .style(reject_style)
-    .on_press(ItemEvent::Rejected);
+    // No explicit ink: each style supplies its own readable text_color (white on
+    // the danger fill when rejected, base text on the secondary fill otherwise).
+    let reject_btn = button(text(if is_rejected { "Unmark" } else { "Reject (X)" }).size(11))
+        .padding([6, 12])
+        .style(reject_style)
+        .on_press(ItemEvent::Rejected);
 
     row![
         rating_widget,

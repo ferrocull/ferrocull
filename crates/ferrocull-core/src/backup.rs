@@ -30,7 +30,7 @@ impl Destination {
     }
 }
 
-/// A backup job: copy a downloaded file to multiple destinations.
+/// A backup job: copy an ingested file to multiple destinations.
 #[derive(Debug)]
 pub struct Job<'a> {
     pub source_file: PathBuf,

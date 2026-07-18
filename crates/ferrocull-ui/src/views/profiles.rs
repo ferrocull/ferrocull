@@ -1,6 +1,6 @@
 use ferrocull_core::NamedProfile;
 use iced::{
-    Color, Element, Fill, Length,
+    Element, Fill, Length,
     widget::{Space, button, column, container, row, scrollable, text, text_input},
 };
 
@@ -41,7 +41,7 @@ pub(crate) fn profiles_panel(
                     text(name.clone()).size(11)
                 };
 
-                let load_btn = button(text("Load").size(10).color(Color::WHITE))
+                let load_btn = button(text("Load").size(10))
                     .on_press(Message::ProfileSelected(name.clone()))
                     .padding([2, 6])
                     .style(styles::primary_button);
@@ -73,7 +73,7 @@ pub(crate) fn profiles_panel(
             .on_input(Message::NameChanged)
             .size(11)
             .width(Fill),
-        button(text("Save").size(11).color(Color::WHITE))
+        button(text("Save").size(11))
             .on_press(Message::SaveRequested)
             .padding([4, 8])
             .style(styles::primary_button),

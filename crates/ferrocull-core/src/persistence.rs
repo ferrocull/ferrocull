@@ -1,4 +1,4 @@
-//! Persistent media database for download history, ratings, and color labels.
+//! Persistent media database for ingest history, ratings, and color labels.
 
 use std::{
     fs, io,
@@ -20,9 +20,9 @@ use crate::{
 #[serde(default)]
 pub struct AppSettings {
     pub ingest: IngestConfig,
-    pub post_download_hooks: Vec<Hook>,
-    /// Delete source files after successful download and checksum verification.
-    pub delete_after_download: bool,
+    pub post_ingest_hooks: Vec<Hook>,
+    /// Delete source files after successful ingest and checksum verification.
+    pub delete_after_ingest: bool,
     /// App-level preferences edited via the Settings popup.
     pub preferences: Preferences,
     /// Durable grid view preferences (sort/filter/grouping). Selection sets are
@@ -187,15 +187,15 @@ impl MediaDatabase {
 
     fn init_tables(conn: &Connection) -> Result<(), Error> {
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS downloads (
+            "CREATE TABLE IF NOT EXISTS ingests (
                 source_id TEXT PRIMARY KEY,
                 checksum TEXT NOT NULL,
                 dest_path TEXT NOT NULL,
-                downloaded_at TEXT NOT NULL
+                ingested_at TEXT NOT NULL
             )",
             [],
         )
-        .map_err(db_err("create downloads table"))?;
+        .map_err(db_err("create ingests table"))?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS ratings (
@@ -238,8 +238,8 @@ impl MediaDatabase {
         .map_err(db_err("create settings table"))
     }
 
-    /// Records a successful download.
-    pub fn record_download(
+    /// Records a successful ingest.
+    pub fn record_ingest(
         &mut self,
         source_id: &str,
         checksum: &str,
@@ -250,25 +250,25 @@ impl MediaDatabase {
 
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO downloads (source_id, checksum, dest_path, downloaded_at)
+                "INSERT OR REPLACE INTO ingests (source_id, checksum, dest_path, ingested_at)
              VALUES (?1, ?2, ?3, ?4)",
                 params![source_id, checksum, dest_str, now],
             )
             .map(drop)
-            .map_err(db_err("record download"))
+            .map_err(db_err("record ingest"))
     }
 
-    /// Returns whether a file has been downloaded.
-    pub fn is_downloaded(&self, source_id: &str) -> Result<bool, Error> {
+    /// Returns whether a file has been ingested.
+    pub fn is_ingested(&self, source_id: &str) -> Result<bool, Error> {
         self.conn
             .query_row(
-                "SELECT 1 FROM downloads WHERE source_id = ?1",
+                "SELECT 1 FROM ingests WHERE source_id = ?1",
                 params![source_id],
                 |_| Ok(()),
             )
             .optional()
             .map(|row| row.is_some())
-            .map_err(db_err("query download status"))
+            .map_err(db_err("query ingest status"))
     }
 
     /// Sets the rating for a file. Valid range: `-1..=5` (`-1` rejected, `0` unrated, `1..=5` stars).

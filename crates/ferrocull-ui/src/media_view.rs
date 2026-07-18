@@ -80,8 +80,20 @@ pub(crate) struct MediaView {
     /// hides it (its group representative). Rebuilt from scratch on
     /// [`Self::rebuild`].
     hidden_jpeg_paths: HashMap<PathBuf, usize>,
+    /// Live count of items with a star rating (`rating >= 1`), maintained at
+    /// every insertion and rating mutation so the status-bar tally never scans
+    /// the store. Counts all loaded items, visible or not.
+    rated_count: usize,
+    /// Live count of rejected items (`rating == -1`), maintained alongside
+    /// [`Self::rated_count`].
+    rejected_count: usize,
     /// Monotonic counter for grid render-cache invalidation.
     version: u64,
+}
+
+/// Whether a rating counts as rated (`>= 1`) and/or rejected (`== -1`).
+const fn rating_class(rating: i8) -> (bool, bool) {
+    (rating >= 1, rating == -1)
 }
 
 impl MediaView {
@@ -108,6 +120,18 @@ impl MediaView {
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Number of loaded items with a star rating (`rating >= 1`).
+    #[must_use]
+    pub(crate) fn rated_count(&self) -> usize {
+        self.rated_count
+    }
+
+    /// Number of loaded items that are rejected (`rating == -1`).
+    #[must_use]
+    pub(crate) fn rejected_count(&self) -> usize {
+        self.rejected_count
     }
 
     #[must_use]
@@ -301,11 +325,41 @@ impl MediaView {
         }
     }
 
+    /// Item indices between `a` and `b` in display order, inclusive of both
+    /// endpoints, returned in display order. Both endpoints must be visible.
+    #[must_use]
+    pub(crate) fn indices_between(&self, a: usize, b: usize, ascending: bool) -> Vec<usize> {
+        let oa = self
+            .ordinal_position(a, ascending)
+            .expect("range endpoint not visible");
+        let ob = self
+            .ordinal_position(b, ascending)
+            .expect("range endpoint not visible");
+        let (start, end) = if oa <= ob { (oa, ob) } else { (ob, oa) };
+        self.indices_in_ordinal_range(start, end - start + 1, ascending)
+    }
+
+    /// Adjust the rated/rejected tallies for one item's rating change.
+    fn apply_rating_delta(&mut self, prev: i8, next: i8) {
+        let (was_rated, was_rejected) = rating_class(prev);
+        let (now_rated, now_rejected) = rating_class(next);
+        match (was_rated, now_rated) {
+            (true, false) => self.rated_count -= 1,
+            (false, true) => self.rated_count += 1,
+            _ => {}
+        }
+        match (was_rejected, now_rejected) {
+            (true, false) => self.rejected_count -= 1,
+            (false, true) => self.rejected_count += 1,
+            _ => {}
+        }
+    }
+
     /// Apply `mutate` to a single item and reconcile the derived view for it in
     /// place — O(log n) plus the affected burst run, never a full rebuild.
     ///
     /// `mutate` must not change `capture_time` (bursts are keyed on it);
-    /// rating/color/download changes are all it is used for.
+    /// rating/color/ingest changes are all it is used for.
     pub(crate) fn mutate_item(
         &mut self,
         idx: usize,
@@ -315,12 +369,14 @@ impl MediaView {
         let capture_time = self.items[idx].capture_time;
         let was_passing = self.burst_order.contains(&(capture_time, idx));
         let was_shown = self.is_visible(idx);
+        let prev_rating = self.items[idx].rating;
 
         mutate(&mut self.items[idx]);
         debug_assert_eq!(
             capture_time, self.items[idx].capture_time,
             "mutate_item must not change capture_time"
         );
+        self.apply_rating_delta(prev_rating, self.items[idx].rating);
         self.version += 1;
 
         let now_passing = passes(&self.items[idx], params, &self.hidden_jpeg_paths);
@@ -353,6 +409,9 @@ impl MediaView {
         let idx = self.items.len();
         let jpeg_pair = item.jpeg_pair.clone();
         let path = item.path.clone();
+        let (rated, rejected) = rating_class(item.rating);
+        self.rated_count += usize::from(rated);
+        self.rejected_count += usize::from(rejected);
         self.items.push(item);
         self.item_index.insert(path, idx);
         self.version += 1;
@@ -435,21 +494,45 @@ impl MediaView {
         }
     }
 
-    /// Toggle whether a burst is expanded, updating only its members' visibility.
+    /// Whether burst `key` is currently expanded.
+    #[must_use]
+    pub(crate) fn is_burst_expanded(&self, key: DateTime<Utc>) -> bool {
+        self.expanded_bursts.contains(&key)
+    }
+
+    /// Toggle whether a burst is expanded, updating only its members'
+    /// visibility. A no-op when `key` no longer names a live burst.
     pub(crate) fn toggle_burst_expansion(&mut self, key: DateTime<Utc>, params: &ViewParams) {
-        if !self.expanded_bursts.remove(&key) {
+        let expanded = !self.expanded_bursts.contains(&key);
+        self.set_burst_expansion(key, expanded, params);
+    }
+
+    /// Set whether burst `key` is expanded to an explicit state, updating only
+    /// its members' visibility. Returns `false` without mutating anything when
+    /// `key` no longer names a live burst — an undo/redo replaying a toggle of a
+    /// burst a later rebuild has since dissolved or re-keyed.
+    pub(crate) fn set_burst_expansion(
+        &mut self,
+        key: DateTime<Utc>,
+        expanded: bool,
+        params: &ViewParams,
+    ) -> bool {
+        if !self.burst_map.contains_key(&key) {
+            return false;
+        }
+        if expanded {
             self.expanded_bursts.insert(key);
+        } else {
+            self.expanded_bursts.remove(&key);
         }
         self.version += 1;
-        let Some(members) = self.burst_map.get(&key) else {
-            return;
-        };
-        for m in members.clone() {
+        for m in self.burst_map[&key].clone() {
             let show = self.should_show(m, params);
             if show != self.is_visible(m) {
                 self.set_shown(m, show, params.sort_order);
             }
         }
+        true
     }
 
     /// Prune `selected` and `focused` against the current visible set, reporting
@@ -762,7 +845,7 @@ mod tests {
             source_id: name.to_owned(),
             media_type: FileCategory::Raw,
             capture_time: CaptureTime::new(second, subsec_nanos),
-            is_downloaded: false,
+            is_ingested: false,
             jpeg_pair: None,
             paired: Vec::new(),
             sidecars: Vec::new(),
@@ -1203,6 +1286,34 @@ mod tests {
             None,
             "collapsed burst member has no ordinal position"
         );
+    }
+
+    #[test]
+    fn indices_between_covers_the_inclusive_display_range_in_either_direction() {
+        let params = Params::new();
+        let items = [
+            item_at("a.raw", 10, 0),
+            item_at("b.raw", 20, 0),
+            item_at("c.raw", 30, 0),
+            item_at("d.raw", 40, 0),
+        ];
+        let view = build_incremental(&items, &params);
+        let idx = |name: &str| view.index_of(Path::new(name)).unwrap();
+        let (a, b, c, d) = (
+            idx("/src/a.raw"),
+            idx("/src/b.raw"),
+            idx("/src/c.raw"),
+            idx("/src/d.raw"),
+        );
+
+        // Anchor before target and after target yield the same inclusive range.
+        assert_eq!(view.indices_between(b, d, true), vec![b, c, d]);
+        assert_eq!(view.indices_between(d, b, true), vec![b, c, d]);
+        // Single item range.
+        assert_eq!(view.indices_between(c, c, true), vec![c]);
+        // Descending display order returns the range in display order.
+        assert_eq!(view.indices_between(d, b, false), vec![d, c, b]);
+        assert_eq!(view.indices_between(a, a, false), vec![a]);
     }
 
     #[test]

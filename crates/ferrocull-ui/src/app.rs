@@ -25,7 +25,7 @@ use ferrocull_core::{
 };
 use ferrocull_devices::{ScannedFile, Source};
 use iced::{
-    Color, Element, Fill, Function, Length, Subscription, Task, Theme,
+    Element, Fill, Function, Length, Subscription, Task, Theme,
     futures::SinkExt,
     keyboard::{self, Event as KeyboardEvent, Key, Modifiers},
     widget::{
@@ -44,9 +44,17 @@ use crate::{
     },
     styles,
     theme::spacing,
+    undo,
     views::{self, collapsible_section},
     widgets::{Splitter, splitter},
 };
+
+/// Transient status-bar message. Errors render in the danger color; action
+/// echoes (rating/label/tag/undo feedback) render in the normal text color.
+enum StatusMessage {
+    Error(String),
+    Echo(String),
+}
 
 /// Tracks which config panel sections are expanded (present = expanded).
 #[derive(Debug, Clone)]
@@ -71,6 +79,11 @@ impl SectionState {
 const PANEL_MIN_WIDTH: f32 = 150.0;
 const PANEL_MAX_WIDTH: f32 = 600.0;
 
+/// Pluralization suffix for a count: empty for exactly one, `"s"` otherwise.
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
 /// Max scan events drained into one [`Message::ScanBatch`]. The pipeline emits
 /// two events per file, so this caps a batch at ~128 files — large enough to
 /// collapse the per-event rebuild storm, small enough to keep progress
@@ -82,7 +95,7 @@ struct ThumbnailProgress {
     completed: usize,
 }
 
-struct DownloadProgress {
+struct IngestProgress {
     total_files: usize,
     files_completed: usize,
 }
@@ -222,11 +235,19 @@ struct Ferrocull {
     video_pattern: String,
     /// App-level rename patterns the user saved for reuse, most-recent first.
     saved_patterns: Vec<String>,
-    download_progress: Option<DownloadProgress>,
-    /// Failure count from last download (shown in status bar until next action).
-    last_download_failures: usize,
-    /// Transient status message shown in status bar (e.g. profile save errors, DB errors).
-    status_message: Option<String>,
+    ingest_progress: Option<IngestProgress>,
+    /// Per-file failures from the last ingest (shown in the status bar until
+    /// the next ingest; expandable into a details popup with retry).
+    last_ingest_failures: Vec<crate::messages::FailureInfo>,
+    /// The ingest-failure details popup is open.
+    ingest_failures_open: bool,
+    /// The keyboard-shortcut reference overlay is open (`?` / F1).
+    shortcuts_open: bool,
+    /// Transient status message shown in status bar: errors (profile save, DB)
+    /// and action echoes (rating/label/tag/undo feedback).
+    status_message: Option<StatusMessage>,
+    /// Bounded stack of undoable grid metadata mutations (Ctrl+Z).
+    undo_stack: undo::Stack,
     thumbnail_progress: Option<ThumbnailProgress>,
     scan_jobs_in_flight: usize,
     thumbnail_jobs_in_flight: usize,
@@ -238,8 +259,8 @@ struct Ferrocull {
     current_profile: Option<String>,
     profile_name_input: String,
     hooks: Vec<Hook>,
-    delete_after_download: bool,
-    /// The seam for culling metadata (rating, color label) and download history.
+    delete_after_ingest: bool,
+    /// The seam for culling metadata (rating, color label) and ingest history.
     /// Sync reads and writes are acceptable: `SQLite` WAL writes are sub-ms for
     /// local storage, well under iced's 16ms frame budget.
     metadata: metadata_store::Store,
@@ -379,9 +400,12 @@ impl Default for Ferrocull {
             photo_pattern: settings.ingest.photo_pattern,
             video_pattern: settings.ingest.video_pattern,
             saved_patterns: settings.saved_patterns,
-            download_progress: None,
-            last_download_failures: 0,
+            ingest_progress: None,
+            last_ingest_failures: Vec::new(),
+            ingest_failures_open: false,
+            shortcuts_open: false,
             status_message: None,
+            undo_stack: undo::Stack::default(),
             thumbnail_progress: None,
             scan_jobs_in_flight: 0,
             thumbnail_jobs_in_flight: 0,
@@ -392,8 +416,8 @@ impl Default for Ferrocull {
             profiles,
             current_profile: None,
             profile_name_input: String::new(),
-            hooks: settings.post_download_hooks,
-            delete_after_download: settings.delete_after_download,
+            hooks: settings.post_ingest_hooks,
+            delete_after_ingest: settings.delete_after_ingest,
             metadata,
             sections: SectionState::with_defaults(),
             expanded_years: BTreeSet::new(),
@@ -469,6 +493,27 @@ impl Ferrocull {
         )
     }
 
+    /// Show an action echo (rating/label/tag/undo feedback) in the status bar.
+    fn echo(&mut self, message: String) {
+        self.status_message = Some(StatusMessage::Echo(message));
+    }
+
+    /// Show an error in the status bar.
+    fn error(&mut self, message: String) {
+        self.status_message = Some(StatusMessage::Error(message));
+    }
+
+    /// Filename of item `idx` for status echoes.
+    fn display_name(&self, idx: usize) -> String {
+        self.media
+            .item(idx)
+            .path
+            .file_name()
+            .expect("scanned file has filename")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// Snapshots the persisted working settings and writes them to the store.
     /// Called at every mutation site of a persisted field.
     fn persist_settings(&mut self) {
@@ -480,8 +525,8 @@ impl Ferrocull {
                 video_pattern: self.video_pattern.clone(),
                 backup_destinations: self.backup_destinations.clone(),
             },
-            post_download_hooks: self.hooks.clone(),
-            delete_after_download: self.delete_after_download,
+            post_ingest_hooks: self.hooks.clone(),
+            delete_after_ingest: self.delete_after_ingest,
             preferences: Preferences {
                 theme: self.theme_preference,
                 thumbnail_size: self.thumbnail_size,
@@ -517,7 +562,12 @@ impl Ferrocull {
 }
 
 impl Ferrocull {
-    fn handle_key_press(&mut self, key: &Key, modifiers: Modifiers) -> Task<Message> {
+    fn handle_key_press(
+        &mut self,
+        key: &Key,
+        modified_key: &Key,
+        modifiers: Modifiers,
+    ) -> Task<Message> {
         use keyboard::key::Named;
 
         // The Settings popup is modal: Esc dismisses it, and every other global
@@ -529,9 +579,36 @@ impl Ferrocull {
             return Task::none();
         }
 
+        // The ingest-failure popup is modal for the same reason as Settings.
+        if self.ingest_failures_open {
+            if matches!(key, Key::Named(Named::Escape)) {
+                self.ingest_failures_open = false;
+            }
+            return Task::none();
+        }
+
+        // The shortcut overlay is modal too: Esc dismisses, everything else is
+        // swallowed so grid/rating keys can't fire behind the scrim. `?` and F1
+        // also close it — they toggle the overlay, matching its own help row.
+        if self.shortcuts_open {
+            let closes = matches!(key, Key::Named(Named::Escape | Named::F1))
+                || matches!(modified_key, Key::Character(c) if c == "?");
+            if closes {
+                self.shortcuts_open = false;
+            }
+            return Task::none();
+        }
+
+        // `?` is matched on the modified key: it lives on a different physical
+        // key per layout (Shift+/ on QWERTY, Shift+, on AZERTY, ...), and only
+        // the modified key resolves what the press actually typed.
+        if matches!(modified_key, Key::Character(c) if c == "?") {
+            return Task::done(Message::ToggleShortcuts);
+        }
+
         match key {
             Key::Character(c) => {
-                return self.handle_character_key(c, modifiers);
+                return self.handle_character_key(c, modified_key, modifiers);
             }
             Key::Named(
                 Named::ArrowRight | Named::ArrowLeft | Named::ArrowDown | Named::ArrowUp,
@@ -546,7 +623,27 @@ impl Ferrocull {
                     });
                 }
                 let in_preview = matches!(self.view_mode, ViewMode::Preview(_));
+                if !in_preview && modifiers.shift() {
+                    let direction = match key {
+                        Key::Named(Named::ArrowRight) => grid_msg::Direction::Right,
+                        Key::Named(Named::ArrowLeft) => grid_msg::Direction::Left,
+                        Key::Named(Named::ArrowDown) => grid_msg::Direction::Down,
+                        _ => grid_msg::Direction::Up,
+                    };
+                    return Task::done(Message::Grid(grid_msg::Message::ExtendFocus(direction)));
+                }
                 return handle_arrow_key(key, in_preview);
+            }
+            Key::Named(Named::PageDown | Named::PageUp | Named::Home | Named::End) => {
+                if matches!(self.view_mode, ViewMode::Grid) {
+                    let msg = match key {
+                        Key::Named(Named::PageDown) => grid_msg::Message::FocusPageDown,
+                        Key::Named(Named::PageUp) => grid_msg::Message::FocusPageUp,
+                        Key::Named(Named::Home) => grid_msg::Message::FocusHome,
+                        _ => grid_msg::Message::FocusEnd,
+                    };
+                    return Task::done(Message::Grid(msg));
+                }
             }
             Key::Named(Named::Space | Named::Enter) => {
                 if matches!(self.view_mode, ViewMode::Grid)
@@ -555,6 +652,8 @@ impl Ferrocull {
                     return Task::done(Message::Grid(grid_msg::Message::OpenPreview(idx)));
                 }
             }
+            // F1 mirrors `?` (Shift+/) for the shortcut overlay.
+            Key::Named(Named::F1) => return Task::done(Message::ToggleShortcuts),
             Key::Named(Named::Tab) => {
                 if let ViewMode::Compare(ref c) = self.view_mode {
                     let new_pane = match c.active_pane {
@@ -583,9 +682,24 @@ impl Ferrocull {
         Task::none()
     }
 
-    fn handle_character_key(&self, c: &str, modifiers: Modifiers) -> Task<Message> {
+    fn handle_character_key(
+        &self,
+        c: &str,
+        modified_key: &Key,
+        modifiers: Modifiers,
+    ) -> Task<Message> {
         let Some(ch) = c.chars().next() else {
             return Task::none();
+        };
+
+        // Digits are matched on the modified key: layouts like classic AZERTY
+        // put digits behind Shift, so only the typed character identifies
+        // them. On direct-digit layouts the modified key equals the base key,
+        // and on QWERTY Shift+1 types '!' — not a digit — so shifted symbol
+        // presses keep falling through unchanged.
+        let typed_digit = match modified_key {
+            Key::Character(m) => m.chars().next().filter(char::is_ascii_digit),
+            _ => None,
         };
 
         let target_idx = match self.view_mode {
@@ -597,44 +711,73 @@ impl Ferrocull {
             ViewMode::Grid => self.focused_index,
         };
 
-        // Selection keys: +/- work regardless of shift state
-        match ch {
-            '+' | '=' => {
-                return self.action_on_target(
-                    target_idx,
-                    |path| Message::Grid(grid_msg::Message::FileSelected(path)),
-                    false,
-                );
+        // Tag/untag keyed on the modified key, not the base: what the press
+        // actually typed decides. On classic AZERTY the '-'/'_' base keys carry
+        // digits 6/8 under Shift, so Ctrl+Shift there must fall through to the
+        // color-label branch below instead of silently untagging.
+        if let Key::Character(m) = modified_key {
+            match m.chars().next() {
+                Some('+' | '=') => {
+                    return self.action_on_target(
+                        target_idx,
+                        |path| Message::Grid(grid_msg::Message::FileTagged(path)),
+                        false,
+                    );
+                }
+                Some('-' | '_') => {
+                    return self.action_on_target(
+                        target_idx,
+                        |path| Message::Grid(grid_msg::Message::FileUntagged(path)),
+                        false,
+                    );
+                }
+                _ => {}
             }
-            '-' | '_' => {
-                return self.action_on_target(
-                    target_idx,
-                    |path| Message::Grid(grid_msg::Message::FileDeselected(path)),
-                    false,
-                );
-            }
-            _ => {}
         }
 
         // Cmd+0-7 (Mac) / Ctrl+0-7 (Win/Linux): color label
         if modifiers.command() {
+            if let Some(digit @ '0'..='7') = typed_digit {
+                let label = ColorLabel::try_from(digit as u8 - b'0').ok();
+                return self.action_on_target(
+                    target_idx,
+                    |path| Message::Grid(grid_msg::Message::FileColorLabelSet(path, label)),
+                    false,
+                );
+            }
             match ch {
-                '0'..='7' => {
-                    let digit = ch as u8 - b'0';
-                    let label = ColorLabel::try_from(digit).ok();
-                    return self.action_on_target(
-                        target_idx,
-                        |path| Message::Grid(grid_msg::Message::FileColorLabelSet(path, label)),
-                        false,
-                    );
+                'a' | 'A' => return Task::done(Message::Grid(grid_msg::Message::TagAll)),
+                'd' | 'D' => return Task::done(Message::Grid(grid_msg::Message::UntagAll)),
+                // Ctrl+Shift+Z redoes; plain Ctrl+Z undoes.
+                'z' | 'Z' if modifiers.shift() => {
+                    return Task::done(Message::Grid(grid_msg::Message::Redo));
                 }
-                'a' | 'A' => return Task::done(Message::Grid(grid_msg::Message::SelectAll)),
-                'd' | 'D' => return Task::done(Message::Grid(grid_msg::Message::SelectNone)),
+                'z' | 'Z' => return Task::done(Message::Grid(grid_msg::Message::Undo)),
+                'y' | 'Y' => return Task::done(Message::Grid(grid_msg::Message::Redo)),
                 ',' => return Task::done(Message::Settings(settings_msg::Message::Open)),
                 _ => {}
             }
-        } else if !modifiers.shift() && !modifiers.alt() {
-            return self.handle_unmodified_char(ch, target_idx);
+        } else if !modifiers.alt() {
+            // 0-5: star rating — deliberate divergence from Photo Mechanic,
+            // where unmodified digits set the color class. Shift is allowed
+            // only when the press actually typed the digit (AZERTY-family
+            // layouts); a shifted press that typed something else falls
+            // through to the shift-gated handling below.
+            if let Some(digit @ '0'..='5') = typed_digit {
+                #[expect(
+                    clippy::cast_possible_wrap,
+                    reason = "'0'..='5' yields 0..=5, well within i8 range"
+                )]
+                let rating = (digit as u8 - b'0') as i8;
+                return self.action_on_target(
+                    target_idx,
+                    |path| Message::Grid(grid_msg::Message::FileRated(path, rating)),
+                    rating > 0,
+                );
+            }
+            if !modifiers.shift() {
+                return self.handle_unmodified_char(ch, target_idx);
+            }
         }
 
         Task::none()
@@ -662,23 +805,15 @@ impl Ferrocull {
             'z' | 'Z' if in_preview => {
                 Task::done(Message::Preview(preview_msg::Message::ResetZoom))
             }
-            // 0-5: star rating (Photo Mechanic convention)
-            '0'..='5' => {
-                #[expect(
-                    clippy::cast_possible_wrap,
-                    reason = "'0'..='5' yields 0..=5, well within i8 range"
-                )]
-                let rating = (ch as u8 - b'0') as i8;
-                self.action_on_target(
-                    target_idx,
-                    |path| Message::Grid(grid_msg::Message::FileRated(path, rating)),
-                    rating > 0,
-                )
+            // B: toggle collapse/expand of the focused item's burst. Photo
+            // Mechanic has no equivalent binding; B is free and mnemonic.
+            'b' | 'B' if !in_preview && !in_compare => {
+                Task::done(Message::Grid(grid_msg::Message::ToggleFocusedBurst))
             }
             // T: tag toggle (selection toggle, Photo Mechanic convention)
             't' | 'T' => self.action_on_target(
                 target_idx,
-                |path| Message::Grid(grid_msg::Message::FileSelectionToggled(path)),
+                |path| Message::Grid(grid_msg::Message::FileTagToggled(path)),
                 false,
             ),
             'x' | 'X' => self.action_on_target(
@@ -841,9 +976,16 @@ pub fn run() -> iced::Result {
 
 fn subscription(_state: &Ferrocull) -> Subscription<Message> {
     let keys = keyboard::listen().filter_map(|event| match event {
-        KeyboardEvent::KeyPressed { key, modifiers, .. } => {
-            Some(Message::KeyPressed(key, modifiers))
-        }
+        KeyboardEvent::KeyPressed {
+            key,
+            modified_key,
+            modifiers,
+            ..
+        } => Some(Message::KeyPressed {
+            key,
+            modified_key,
+            modifiers,
+        }),
         KeyboardEvent::ModifiersChanged(modifiers) => Some(Message::ModifiersChanged(modifiers)),
         KeyboardEvent::KeyReleased { .. } => None,
     });
@@ -918,6 +1060,10 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
             state.sections.toggle(section);
             Task::none()
         }
+        Message::ToggleShortcuts => {
+            state.shortcuts_open = !state.shortcuts_open;
+            Task::none()
+        }
         Message::TogglePanel(panel) => {
             match panel {
                 Panel::Left => state.left_panel_visible = !state.left_panel_visible,
@@ -937,7 +1083,11 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
             state.persist_settings();
             Task::none()
         }
-        Message::KeyPressed(ref key, modifiers) => state.handle_key_press(key, modifiers),
+        Message::KeyPressed {
+            ref key,
+            ref modified_key,
+            modifiers,
+        } => state.handle_key_press(key, modified_key, modifiers),
         Message::ModifiersChanged(modifiers) => {
             state.modifiers = modifiers;
             Task::none()
@@ -966,15 +1116,22 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
                 state.thumbnail_progress = None;
             }
             state.rebuild_view();
+            // Seed focus onto the first card once a scan settles so the first
+            // arrow press moves rather than being swallowed to seed focus.
+            if state.focused_index.is_none()
+                && let Some(first) = state.first_index()
+            {
+                return Task::done(Message::Grid(grid_msg::Message::FocusOn(first)));
+            }
             Task::none()
         }
-        Message::DownloadProgressUpdate(n) => {
-            if let Some(ref mut dl) = state.download_progress {
+        Message::IngestProgressUpdate(n) => {
+            if let Some(ref mut dl) = state.ingest_progress {
                 dl.files_completed = n;
             }
             Task::none()
         }
-        Message::DownloadComplete(result) => state.handle_download_complete(&result),
+        Message::IngestComplete(result) => state.handle_ingest_complete(&result),
         Message::PreviewLoaded(generation, path, result) => {
             // Generation mismatch means we navigated away; discard stale result.
             if generation != state.preview_generation {
@@ -1098,7 +1255,232 @@ fn view(state: &Ferrocull) -> Element<'_, Message> {
     if let Some(ref settings) = state.settings {
         root = root.push(settings_overlay(state, settings));
     }
+    if state.ingest_failures_open {
+        root = root.push(ingest_failures_overlay(state));
+    }
+    if state.shortcuts_open {
+        root = root.push(shortcuts_overlay());
+    }
     root.into()
+}
+
+/// Details popup for the last ingest's failures: per-file error text plus a
+/// retry for exactly those files. Same scrim/card pattern as Settings.
+fn ingest_failures_overlay(state: &Ferrocull) -> Element<'_, Message> {
+    use crate::theme::colors;
+    let palette = crate::theme::palette();
+
+    let rows = state.last_ingest_failures.iter().map(|failure| {
+        let name = failure
+            .source
+            .file_name()
+            .expect("scanned file has filename")
+            .to_string_lossy()
+            .into_owned();
+        column![
+            text(name).size(12).color(palette.background.base.text),
+            text(failure.error.clone()).size(11).color(colors::DANGER),
+        ]
+        .spacing(2)
+        .into()
+    });
+
+    let list = scrollable(column(rows).spacing(spacing::SM)).height(Fill);
+
+    let retry_btn = button(text("Retry failed").size(12))
+        .padding([6, 16])
+        .style(styles::primary_button);
+    let retry_btn = if state.ingest_progress.is_none() {
+        retry_btn.on_press(Message::Destination(
+            destination_msg::Message::RetryFailedIngest,
+        ))
+    } else {
+        retry_btn
+    };
+    let close_btn = button(text("Close").size(12))
+        .padding([6, 16])
+        .style(styles::secondary_button)
+        .on_press(Message::Destination(
+            destination_msg::Message::ToggleIngestFailures,
+        ));
+
+    let n = state.last_ingest_failures.len();
+    let interior = column![
+        text(format!("{n} file{} failed to ingest", plural(n)))
+            .size(16)
+            .color(palette.background.base.text),
+        list,
+        row![retry_btn, close_btn].spacing(spacing::SM),
+    ]
+    .spacing(spacing::LG);
+
+    let card = container(interior)
+        .width(Length::Fixed(520.0))
+        .height(Length::Fixed(440.0))
+        .padding(spacing::LG)
+        .style(styles::settings_card);
+
+    opaque(
+        mouse_area(
+            container(center(opaque(card)))
+                .width(Fill)
+                .height(Fill)
+                .style(styles::scrim),
+        )
+        .on_press(Message::Destination(
+            destination_msg::Message::ToggleIngestFailures,
+        )),
+    )
+}
+
+/// A key-cap pill carrying mono key text for the shortcut overlay.
+fn keycap(label: &str) -> Element<'static, Message> {
+    container(text(label.to_owned()).size(11).font(iced::Font::MONOSPACE))
+        .padding([1, 5])
+        .style(styles::keycap)
+        .into()
+}
+
+/// One shortcut line: a fixed-width run of key caps followed by its description.
+fn shortcut_row(keys: &[&str], desc: &str) -> Element<'static, Message> {
+    let palette = crate::theme::palette();
+    let caps = row(keys.iter().map(|k| keycap(k))).spacing(spacing::XS);
+    row![
+        container(caps).width(Length::Fixed(120.0)),
+        text(desc.to_owned())
+            .size(12)
+            .color(palette.background.base.text),
+    ]
+    .spacing(spacing::SM)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+/// A titled group of shortcut lines for one column of the overlay.
+fn shortcut_group(title: &str, rows: Vec<Element<'static, Message>>) -> Element<'static, Message> {
+    let palette = crate::theme::palette();
+    let mut items: Vec<Element<'static, Message>> = Vec::with_capacity(rows.len() + 1);
+    items.push(
+        text(title.to_owned())
+            .size(11)
+            .color(palette.background.weak.text)
+            .into(),
+    );
+    items.extend(rows);
+    column(items).spacing(spacing::XS).into()
+}
+
+/// Keyboard-shortcut reference overlay (`?` / F1). Documents the real current
+/// bindings — every key here is verified against the handlers in
+/// `handle_key_press`/`handle_character_key`. Same scrim/card pattern as the
+/// Settings and ingest-failure modals; Esc, click-outside, and Close dismiss.
+fn shortcuts_overlay() -> Element<'static, Message> {
+    let palette = crate::theme::palette();
+
+    let navigate = shortcut_group(
+        "NAVIGATE",
+        vec![
+            shortcut_row(
+                &["\u{2190}", "\u{2192}", "\u{2191}", "\u{2193}"],
+                "Move focus",
+            ),
+            shortcut_row(&["PgUp", "PgDn"], "Move focus a page"),
+            shortcut_row(&["Home", "End"], "First / last item"),
+            shortcut_row(&["Wheel"], "Scroll the grid"),
+            shortcut_row(&["Space", "Enter"], "Open preview"),
+        ],
+    );
+
+    let rate = shortcut_group(
+        "RATE & LABEL",
+        vec![
+            shortcut_row(&["0", "\u{2013}", "5"], "Set star rating"),
+            shortcut_row(&["X"], "Reject / un-reject"),
+            shortcut_row(&["Ctrl", "0", "\u{2013}", "7"], "Set color label"),
+            text(
+                "digits rate — in Photo Mechanic they set color class; \
+                 Ctrl+0–7 set color labels here",
+            )
+            .size(10)
+            .color(palette.background.weak.text)
+            .into(),
+        ],
+    );
+
+    let tag = shortcut_group(
+        "TAG",
+        vec![
+            shortcut_row(&["T"], "Toggle tag"),
+            shortcut_row(&["+", "\u{2212}"], "Tag / untag"),
+            shortcut_row(&["Shift", "Click"], "Range-tag to here"),
+            shortcut_row(&["Shift", "\u{2190}\u{2192}\u{2191}\u{2193}"], "Extend tag"),
+            shortcut_row(&["Ctrl", "A", "/", "D"], "Tag all / untag all"),
+            shortcut_row(&["Ctrl", "Click"], "Toggle one tag"),
+        ],
+    );
+
+    let bursts = shortcut_group(
+        "BURSTS",
+        vec![shortcut_row(&["B"], "Collapse / expand burst")],
+    );
+
+    let compare = shortcut_group(
+        "COMPARE & PREVIEW",
+        vec![
+            shortcut_row(&["H", "V"], "Compare side-by-side / stacked"),
+            shortcut_row(&["G"], "Promote candidate"),
+            shortcut_row(&["O"], "Exit compare"),
+            shortcut_row(&["L"], "Lock synced zoom/pan"),
+            shortcut_row(&["Z"], "Reset zoom"),
+            shortcut_row(&["Tab"], "Switch active pane"),
+        ],
+    );
+
+    let general = shortcut_group(
+        "GENERAL",
+        vec![
+            shortcut_row(&["Ctrl", "Z"], "Undo"),
+            shortcut_row(&["Ctrl", "Shift", "Z"], "Redo"),
+            shortcut_row(&["Ctrl", ","], "Settings"),
+            shortcut_row(&["?", "F1"], "This help"),
+            shortcut_row(&["Esc"], "Close / clear focus"),
+        ],
+    );
+
+    let left = column![navigate, rate, tag].spacing(spacing::LG);
+    let right = column![bursts, compare, general].spacing(spacing::LG);
+    let columns =
+        row![container(left).width(Fill), container(right).width(Fill),].spacing(spacing::LG);
+
+    let close_btn = button(text("Close").size(12))
+        .padding([6, 16])
+        .style(styles::secondary_button)
+        .on_press(Message::ToggleShortcuts);
+
+    let interior = column![
+        text("Keyboard Shortcuts")
+            .size(16)
+            .color(palette.background.base.text),
+        scrollable(columns).height(Fill),
+        row![Space::new().width(Fill), close_btn],
+    ]
+    .spacing(spacing::LG);
+
+    let card = container(interior)
+        .width(Length::Fixed(720.0))
+        .height(Length::Fixed(560.0))
+        .padding(spacing::LG)
+        .style(styles::settings_card);
+
+    opaque(
+        mouse_area(
+            container(center(opaque(card)))
+                .width(Fill)
+                .height(Fill)
+                .style(styles::scrim),
+        )
+        .on_press(Message::ToggleShortcuts),
+    )
 }
 
 /// Map a rating/color/reject item event to the corresponding grid message.
@@ -1400,7 +1782,7 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
                 text("No photos match current filters")
                     .size(14)
                     .color(palette.background.strong.text),
-                button(text("Clear Filters").size(12).color(Color::WHITE))
+                button(text("Clear Filters").size(12))
                     .padding([6, 16])
                     .style(styles::secondary_button)
                     .on_press(Message::Filters(filters_msg::Message::ClearAll)),
@@ -1434,6 +1816,7 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
 /// Click always emits `CellClicked(path)` — modifier-dependent behavior is applied here.
 fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
     let command_held = state.modifiers.command();
+    let shift_held = state.modifiers.shift();
 
     views::thumbnail_grid(
         state.media.items(),
@@ -1455,8 +1838,10 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
     )
     .map(move |event| match event {
         views::thumbnails::Event::CellClicked(path) => {
-            if command_held {
-                Message::Grid(grid_msg::Message::FileSelectionToggled(path))
+            if shift_held {
+                Message::Grid(grid_msg::Message::RangeTagTo(path))
+            } else if command_held {
+                Message::Grid(grid_msg::Message::FileTagToggled(path))
             } else {
                 Message::Grid(grid_msg::Message::FileFocused(path))
             }
@@ -1520,7 +1905,7 @@ fn config_panel(state: &Ferrocull) -> Element<'_, Message> {
             .map(Message::Destination);
 
     let delete_content =
-        views::delete::delete_panel(state.delete_after_download).map(Message::Destination);
+        views::delete::delete_panel(state.delete_after_ingest).map(Message::Destination);
 
     let scrollable_content = column![
         profiles_content,
@@ -1607,20 +1992,44 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
     let visible_count = state.media.visible_len();
     let total_count = state.media.len();
 
+    // Always-on session tally: rated (★) and rejected (✗), derived from the
+    // counters MediaView maintains at every rating mutation.
+    let tally = format!(
+        "  \u{b7}  \u{2605}{}  \u{b7}  \u{2717}{}",
+        state.media.rated_count(),
+        state.media.rejected_count()
+    );
+
     let left_text = if total_count == 0 {
         text("No files scanned")
             .size(12)
             .color(palette.background.strong.text)
     } else if visible_count < total_count {
         text(format!(
-            "Showing {visible_count} of {total_count} — Selected: {selected_count}"
+            "Showing {visible_count} of {total_count} — Tagged: {selected_count}{tally}"
         ))
         .size(12)
         .color(palette.background.base.text)
     } else {
-        text(format!("Selected: {selected_count} files"))
+        text(format!("Tagged: {selected_count} of {total_count}{tally}"))
             .size(12)
             .color(palette.background.base.text)
+    };
+
+    // Quiet undo-depth hint: present only while there is something to undo.
+    let undo_depth = state.undo_stack.undo_len();
+    let left: Element<'_, Message> = if undo_depth > 0 {
+        row![
+            left_text,
+            text(format!("\u{21a9} {undo_depth}"))
+                .size(11)
+                .color(palette.background.base.text),
+        ]
+        .spacing(spacing::SM)
+        .align_y(iced::Alignment::Center)
+        .into()
+    } else {
+        left_text.into()
     };
 
     let mut progress_items: Vec<Element<'_, Message>> = Vec::new();
@@ -1638,30 +2047,35 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
         progress_items.push(progress_indicator(None, thumb.completed, thumb.total));
     }
 
-    if let Some(ref dl) = state.download_progress {
+    if let Some(ref ingest) = state.ingest_progress {
         progress_items.push(progress_indicator(
-            Some("Import"),
-            dl.files_completed,
-            dl.total_files,
+            Some("Ingest"),
+            ingest.files_completed,
+            ingest.total_files,
         ));
     }
 
-    if state.last_download_failures > 0 && state.download_progress.is_none() {
-        let n = state.last_download_failures;
+    if !state.last_ingest_failures.is_empty() && state.ingest_progress.is_none() {
+        let n = state.last_ingest_failures.len();
+        let label = format!("{n} file{} failed to ingest — details", plural(n));
         progress_items.push(
-            text(format!(
-                "{n} file{} failed to import",
-                if n == 1 { "" } else { "s" }
-            ))
-            .size(11)
-            .color(colors::DANGER)
-            .into(),
+            button(text(label).size(11).color(colors::DANGER))
+                .padding(0)
+                .style(styles::icon_button)
+                .on_press(Message::Destination(
+                    destination_msg::Message::ToggleIngestFailures,
+                ))
+                .into(),
         );
     }
 
-    // Transient status message (profile/DB errors)
+    // Transient status message: errors in danger, action echoes in normal ink.
     if let Some(ref msg) = state.status_message {
-        progress_items.push(text(msg.as_str()).size(11).color(colors::DANGER).into());
+        let (content, color) = match msg {
+            StatusMessage::Error(m) => (m, colors::DANGER),
+            StatusMessage::Echo(m) => (m, palette.background.base.text),
+        };
+        progress_items.push(text(content.as_str()).size(11).color(color).into());
     }
 
     let center: Element<'_, Message> = if progress_items.is_empty() {
@@ -1670,28 +2084,26 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
         column(progress_items).spacing(2).into()
     };
 
-    let import_btn = button(text("Start Import").size(12).color(Color::WHITE))
+    let ingest_btn = button(text("Ingest").size(12))
         .padding([6, 20])
         .style(styles::primary_button);
-    let import_btn = if selected_count > 0 && state.download_progress.is_none() {
-        import_btn.on_press(Message::Destination(
-            destination_msg::Message::StartDownload,
-        ))
+    let ingest_btn = if selected_count > 0 && state.ingest_progress.is_none() {
+        ingest_btn.on_press(Message::Destination(destination_msg::Message::StartIngest))
     } else {
-        import_btn
+        ingest_btn
     };
-    let import_tip = text(format!("Import {selected_count} selected photos")).size(11);
-    let import_with_tip = tooltip(import_btn, import_tip, tooltip::Position::Top)
+    let ingest_tip = text(format!("Ingest {selected_count} tagged photos")).size(11);
+    let ingest_with_tip = tooltip(ingest_btn, ingest_tip, tooltip::Position::Top)
         .gap(4)
         .snap_within_viewport(true);
 
     container(
         row![
-            left_text,
+            left,
             Space::new().width(Fill),
             center,
             Space::new().width(Fill),
-            import_with_tip,
+            ingest_with_tip,
         ]
         .align_y(iced::Alignment::Center),
     )

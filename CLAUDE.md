@@ -1,5 +1,9 @@
 # Ferrocull Project Rules
 
+## Design Context
+
+Strategic product context (users, positioning, design principles) lives in [`PRODUCT.md`](PRODUCT.md); the visual design system ("The Darkroom": tokens, color roles, component vocabulary) lives in [`DESIGN.md`](DESIGN.md). Read both before any UI/UX work.
+
 ## Alpha Version
 
 This is an alpha version. Do not add backwards compatibility code, cache versioning, or migration logic. Users can clear caches manually if needed.

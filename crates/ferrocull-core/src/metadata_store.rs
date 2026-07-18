@@ -61,16 +61,16 @@ impl Store {
     }
 
     #[must_use]
-    pub fn is_downloaded(&self, source_id: &str) -> bool {
+    pub fn is_ingested(&self, source_id: &str) -> bool {
         self.db
-            .is_downloaded(source_id)
-            .expect("is_downloaded query failed")
+            .is_ingested(source_id)
+            .expect("is_ingested query failed")
     }
 
-    pub fn record_download(&mut self, source_id: &str, checksum: &str, dest: &Path) {
+    pub fn record_ingest(&mut self, source_id: &str, checksum: &str, dest: &Path) {
         self.db
-            .record_download(source_id, checksum, dest)
-            .expect("record_download query failed");
+            .record_ingest(source_id, checksum, dest)
+            .expect("record_ingest query failed");
     }
 
     #[must_use]
@@ -303,32 +303,36 @@ mod tests {
     fn settings_default_when_absent_then_roundtrip() {
         let mut store = store();
         let defaults = store.settings();
-        assert!(!defaults.delete_after_download);
-        assert!(defaults.post_download_hooks.is_empty());
+        assert!(!defaults.delete_after_ingest);
+        assert!(defaults.post_ingest_hooks.is_empty());
 
         let settings = AppSettings {
             ingest: crate::profiles::IngestConfig {
                 photo_pattern: String::from("{filename}.{ext}"),
                 ..crate::profiles::IngestConfig::default()
             },
-            post_download_hooks: vec![crate::Hook {
+            post_ingest_hooks: vec![crate::Hook {
                 name: String::from("notify"),
                 command: String::from("echo done"),
                 enabled: true,
             }],
-            delete_after_download: true,
+            delete_after_ingest: true,
             ..AppSettings::default()
         };
         store.set_settings(&settings);
 
         let loaded = store.settings();
-        assert!(loaded.delete_after_download);
+        assert!(loaded.delete_after_ingest);
         assert_eq!(loaded.ingest.photo_pattern, "{filename}.{ext}");
-        assert_eq!(loaded.post_download_hooks.len(), 1);
-        assert_eq!(loaded.post_download_hooks[0].command, "echo done");
+        assert_eq!(loaded.post_ingest_hooks.len(), 1);
+        assert_eq!(loaded.post_ingest_hooks[0].command, "echo done");
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "panel widths round-trip through the store bit-for-bit; exact equality is the point"
+    )]
     fn preferences_and_view_prefs_roundtrip() {
         use crate::{
             media::{FilterMode, SortOrder},

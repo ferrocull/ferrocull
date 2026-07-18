@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use iced::{
-    Color, Element, Fill, Length,
+    Element, Fill, Length,
     widget::{Space, button, column, container, row, scrollable, text},
 };
 
@@ -48,7 +48,7 @@ pub(crate) fn backup_panel(destinations: &[PathBuf]) -> Element<'static, Message
     content
         .push(Space::new().height(spacing::XS))
         .push(
-            button(text("Add Backup...").size(11).color(Color::WHITE))
+            button(text("Add Backup...").size(11))
                 .on_press(Message::AddBackupClicked)
                 .padding([4, 8])
                 .style(styles::primary_button),
