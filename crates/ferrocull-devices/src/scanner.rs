@@ -11,6 +11,9 @@ use walkdir::WalkDir;
 pub struct ScannedFile {
     /// Primary file path (RAW takes precedence over JPEG in pairs).
     pub path: PathBuf,
+    /// Size of the primary file in bytes, stat'd during the walk (no content
+    /// read). Feeds the location-independent ingest fingerprint.
+    pub size: u64,
     /// Media type determined at scan time (RAW > Video > Photo priority).
     pub media_type: FileCategory,
     /// Paired files (e.g., JPEG paired with RAW).
@@ -35,34 +38,44 @@ fn base_name(path: &Path) -> Option<String> {
 /// RAW files take precedence as the primary file when paired with JPEG.
 #[must_use]
 pub fn scan_directory(root: &Path) -> Vec<ScannedFile> {
-    let files: Vec<PathBuf> = WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|entry| match entry {
-            Ok(e) => Some(e),
+    let mut sizes: HashMap<PathBuf, u64> = HashMap::new();
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = match entry {
+            Ok(e) => e,
             Err(e) => {
                 tracing::warn!(error = %e, "skipping directory entry during scan");
-                None
+                continue;
             }
-        })
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| is_media_file(e.path()))
-        .map(walkdir::DirEntry::into_path)
-        .collect();
+        };
+        if !entry.file_type().is_file() || !is_media_file(entry.path()) {
+            continue;
+        }
+        match entry.metadata() {
+            Ok(meta) => {
+                sizes.insert(entry.into_path(), meta.len());
+            }
+            Err(e) => {
+                tracing::warn!(path = %entry.path().display(), error = %e, "skipping file with unreadable metadata");
+            }
+        }
+    }
 
     let mut groups: HashMap<(PathBuf, String), Vec<PathBuf>> = HashMap::new();
-    for path in files {
+    for path in sizes.keys() {
         let parent = path
             .parent()
             .expect("WalkDir file has parent")
             .to_path_buf();
-        let Some(base) = base_name(&path) else {
+        let Some(base) = base_name(path) else {
             continue;
         };
-        groups.entry((parent, base)).or_default().push(path);
+        groups.entry((parent, base)).or_default().push(path.clone());
     }
 
-    groups.into_values().filter_map(scanned_file).collect()
+    groups
+        .into_values()
+        .filter_map(|paths| scanned_file(paths, &sizes))
+        .collect()
 }
 
 /// Scan only standard camera folders (DCIM, PRIVATE, `MP_ROOT`) if they exist.
@@ -85,7 +98,7 @@ pub fn scan_camera_folders(root: &Path) -> Vec<ScannedFile> {
         .collect()
 }
 
-fn scanned_file(paths: Vec<PathBuf>) -> Option<ScannedFile> {
+fn scanned_file(paths: Vec<PathBuf>, sizes: &HashMap<PathBuf, u64>) -> Option<ScannedFile> {
     let (mut raws, mut photos, mut videos, mut sidecars) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
 
@@ -135,8 +148,13 @@ fn scanned_file(paths: Vec<PathBuf>) -> Option<ScannedFile> {
     });
     let xmp_sidecar = xmp_pos.map(|i| sidecars.remove(i));
 
+    let size = *sizes
+        .get(&primary)
+        .expect("primary file was stat'd during the walk");
+
     Some(ScannedFile {
         path: primary,
+        size,
         media_type,
         paired,
         sidecars,

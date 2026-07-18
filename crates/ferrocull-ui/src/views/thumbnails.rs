@@ -1364,6 +1364,7 @@ mod tests {
         let item_on_day = |day: u32| Item {
             path: format!("/x/{day}").into(),
             source_id: String::new(),
+            size: 0,
             media_type: FileCategory::Raw,
             capture_time: CaptureTime::new(
                 Utc.with_ymd_and_hms(2024, 1, day, 12, 0, 0).unwrap(),

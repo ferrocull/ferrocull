@@ -195,7 +195,7 @@ impl MediaDatabase {
     fn init_tables(conn: &Connection) -> Result<(), Error> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS ingests (
-                source_id TEXT PRIMARY KEY,
+                fingerprint TEXT PRIMARY KEY,
                 checksum TEXT NOT NULL,
                 dest_path TEXT NOT NULL,
                 ingested_at TEXT NOT NULL
@@ -245,10 +245,10 @@ impl MediaDatabase {
         .map_err(db_err("create settings table"))
     }
 
-    /// Records a successful ingest.
+    /// Records a successful ingest, keyed by the frame's ingest fingerprint.
     pub fn record_ingest(
         &mut self,
-        source_id: &str,
+        fingerprint: &str,
         checksum: &str,
         dest: &Path,
     ) -> Result<(), Error> {
@@ -257,20 +257,20 @@ impl MediaDatabase {
 
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO ingests (source_id, checksum, dest_path, ingested_at)
+                "INSERT OR REPLACE INTO ingests (fingerprint, checksum, dest_path, ingested_at)
              VALUES (?1, ?2, ?3, ?4)",
-                params![source_id, checksum, dest_str, now],
+                params![fingerprint, checksum, dest_str, now],
             )
             .map(drop)
             .map_err(db_err("record ingest"))
     }
 
-    /// Returns whether a file has been ingested.
-    pub fn is_ingested(&self, source_id: &str) -> Result<bool, Error> {
+    /// Returns whether a frame with this ingest fingerprint has been ingested.
+    pub fn is_ingested(&self, fingerprint: &str) -> Result<bool, Error> {
         self.conn
             .query_row(
-                "SELECT 1 FROM ingests WHERE source_id = ?1",
-                params![source_id],
+                "SELECT 1 FROM ingests WHERE fingerprint = ?1",
+                params![fingerprint],
                 |_| Ok(()),
             )
             .optional()

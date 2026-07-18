@@ -851,6 +851,7 @@ mod tests {
         Item {
             path: PathBuf::from(format!("/src/{name}")),
             source_id: name.to_owned(),
+            size: 0,
             media_type: FileCategory::Raw,
             capture_time: CaptureTime::new(second, subsec_nanos),
             is_ingested: false,

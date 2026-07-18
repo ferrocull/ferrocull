@@ -375,10 +375,10 @@ impl Ferrocull {
             self.selected.remove(&idx);
             self.media
                 .mutate_item(idx, &self.config.params(), |item| item.is_ingested = true);
-            let source_id = self.media.item(idx).source_id.clone();
+            let fingerprint = self.media.item(idx).fingerprint();
 
             self.metadata
-                .record_ingest(&source_id, &success.checksum, &success.destination);
+                .record_ingest(&fingerprint, &success.checksum, &success.destination);
         }
         if !result.successes.is_empty() {
             self.status_message = None;
