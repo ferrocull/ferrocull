@@ -132,7 +132,7 @@ pub fn ingest_payload(media_file: &MediaFile) -> Option<Metadata> {
             media_file
                 .path
                 .file_name()
-                .expect("scanned file has filename")
+                .expect("path has no filename")
                 .to_string_lossy()
                 .into_owned(),
         ),

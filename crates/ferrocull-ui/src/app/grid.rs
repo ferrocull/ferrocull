@@ -108,7 +108,6 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
         }
         grid::Message::RejectFile(path) => state.handle_reject_file(&path),
         grid::Message::BurstToggled(key) => {
-            // Badge click acts on the burst's visible representative.
             let target = state.media.burst_map()[&key][0];
             return state.toggle_burst(key, target);
         }
@@ -287,7 +286,7 @@ impl Ferrocull {
             return Task::none();
         }
         let target = views::thumbnails::row_for_ordinal(&rows, self.grid_anchor)
-            .expect("ordinal 0 always maps to the first row");
+            .expect("grid anchor maps to no row");
         let y = rows[target].offset.min(self.max_grid_offset());
         self.grid_scroll_y = y;
         iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y })

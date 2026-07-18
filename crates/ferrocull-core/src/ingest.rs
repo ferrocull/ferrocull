@@ -66,9 +66,8 @@ pub struct Failure {
 /// Write an XMP sidecar next to the destination if the file has metadata worth preserving.
 ///
 /// Returns `Ok(())` when there's nothing to write or the write succeeded; `Err` carries
-/// the underlying I/O failure so the caller can fail the file's ingest. XMP carries
-/// user-authored data (ratings, labels); a failed write must block source deletion, or
-/// the rating/label would exist nowhere on disk.
+/// the underlying I/O failure so the caller can fail the file's ingest — a failed write
+/// must block source deletion.
 fn write_xmp_sidecar(media_file: &MediaFile, dest: &Path) -> io::Result<()> {
     let Some(payload) = metadata_store::ingest_payload(media_file) else {
         return Ok(());
@@ -149,7 +148,7 @@ fn copy_extras(
             continue;
         }
 
-        let name = extra.file_name().expect("scanned file has filename");
+        let name = extra.file_name().expect("path has no filename");
 
         let extra_dest = extras_dir.join(name);
         match copy_with_checksum(extra, &extra_dest, |_| {}) {
@@ -198,7 +197,7 @@ fn resolve_destination_path(
     rendered: Option<&str>,
     source: &Path,
 ) -> Result<PathBuf, Error> {
-    let filename = source.file_name().expect("scanned file has filename");
+    let filename = source.file_name().expect("path has no filename");
     let Some(rendered) = rendered else {
         return Ok(base.join(filename));
     };
@@ -278,9 +277,8 @@ pub fn execute_ingest(job: &Job, mut progress_fn: impl FnMut(Progress<'_>)) -> V
 
             match result {
                 Ok(checksum) => {
-                    // Write the XMP sidecar before any source deletion. A failed write
-                    // fails the file so delete_source_files never runs — otherwise the
-                    // rating/label would exist nowhere on disk.
+                    // Must run before any source deletion: a failed write returns
+                    // early, so delete_source_files never runs.
                     if let Err(xmp_error) = write_xmp_sidecar(media_file, &dest) {
                         return Err(Failure {
                             source,

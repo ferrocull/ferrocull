@@ -13,7 +13,7 @@ use ferrocull_core::{
 use iced::Task;
 use sipper::sipper;
 
-use super::{Ferrocull, pick_folder};
+use super::{Ferrocull, Modal, pick_folder};
 use crate::messages::{FailureInfo, IngestResult, Message, SuccessInfo, destination};
 
 pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<Message> {
@@ -95,10 +95,14 @@ pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<M
         }
         destination::Message::StartIngest => return state.handle_start_ingest(),
         destination::Message::ToggleIngestFailures => {
-            state.ingest_failures_open = !state.ingest_failures_open;
+            state.modal = if matches!(state.modal, Some(Modal::IngestFailures)) {
+                None
+            } else {
+                Some(Modal::IngestFailures)
+            };
         }
         destination::Message::RetryFailedIngest => {
-            state.ingest_failures_open = false;
+            state.modal = None;
             return state.handle_retry_failed_ingest();
         }
     }
@@ -321,7 +325,7 @@ impl Ferrocull {
         };
 
         self.last_ingest_failures.clear();
-        self.ingest_failures_open = false;
+        self.modal = None;
         self.ingest_progress = Some(super::IngestProgress {
             total_files,
             files_completed: 0,
