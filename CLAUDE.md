@@ -58,7 +58,7 @@ GitHub Issues on `remigastaldi/ferrocull` via the `gh` CLI. See `docs/agents/iss
 
 ### Triage labels
 
-Human-only triage vocabulary: `needs-triage`, `needs-info`, `wontfix`. No `ready-for-agent` — Ferrocull keeps a human in the loop on every issue. See `docs/agents/triage-labels.md`.
+Canonical five-role triage vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
