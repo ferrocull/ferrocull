@@ -97,6 +97,7 @@ pub struct ViewPrefs {
     pub hide_rejected: bool,
     pub group_raw_jpeg: bool,
     pub group_bursts: bool,
+    pub date_tree_ascending: bool,
 }
 
 impl Default for ViewPrefs {
@@ -108,6 +109,7 @@ impl Default for ViewPrefs {
             hide_rejected: false,
             group_raw_jpeg: true,
             group_bursts: true,
+            date_tree_ascending: true,
         }
     }
 }

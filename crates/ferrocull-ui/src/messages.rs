@@ -184,6 +184,7 @@ pub(crate) mod filters {
         RatingFilterToggled(i8),
         ColorLabelFilterToggled(Option<ColorLabel>),
         DateToggled(DateSelection),
+        DateSortToggled,
         YearExpanded(i32),
         MonthExpanded(i32, u32),
         ClearAll,
