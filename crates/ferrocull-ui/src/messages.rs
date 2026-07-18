@@ -178,6 +178,7 @@ pub(crate) mod filters {
         SortChanged(SortOrder),
         AscendingToggled,
         FilterChanged(FilterMode),
+        NewOnlyToggled,
         GroupRawJpegToggled,
         GroupBurstsToggled,
         HideRejectedToggled,

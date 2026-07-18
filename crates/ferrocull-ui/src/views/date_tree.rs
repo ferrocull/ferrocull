@@ -124,7 +124,14 @@ pub(crate) fn date_tree<'a>(
             );
 
             if is_expanded {
-                push_month_rows(&mut rows, months, year, selected_date, &exp_months, ascending);
+                push_month_rows(
+                    &mut rows,
+                    months,
+                    year,
+                    selected_date,
+                    &exp_months,
+                    ascending,
+                );
             }
         }
 

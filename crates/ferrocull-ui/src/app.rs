@@ -197,6 +197,7 @@ impl ViewConfig {
         ViewParams {
             sort_order: self.view.sort_order,
             filter_mode: self.view.filter_mode,
+            new_only: self.view.new_only,
             hide_rejected: self.view.hide_rejected,
             group_raw_jpeg: self.view.group_raw_jpeg,
             group_bursts: self.view.group_bursts,
@@ -205,6 +206,27 @@ impl ViewConfig {
             selected_ratings: &self.selected_ratings,
             selected_color_labels: &self.selected_color_labels,
         }
+    }
+
+    /// The stackable filter axes. The empty-view indicator and Clear Filters
+    /// must agree on what counts as a filter, so both lists live here —
+    /// `clear_filters` resets exactly the axes this checks.
+    fn has_active_filters(&self) -> bool {
+        self.view.filter_mode != FilterMode::default()
+            || self.view.new_only
+            || self.view.hide_rejected
+            || self.selected_dates.is_some()
+            || !self.selected_ratings.is_empty()
+            || !self.selected_color_labels.is_empty()
+    }
+
+    fn clear_filters(&mut self) {
+        self.view.filter_mode = FilterMode::default();
+        self.view.new_only = false;
+        self.view.hide_rejected = false;
+        self.selected_dates = None;
+        self.selected_ratings.clear();
+        self.selected_color_labels.clear();
     }
 }
 
@@ -1373,9 +1395,7 @@ fn shortcut_row(keys: &[&'static str], desc: &'static str) -> Element<'static, M
     let caps = row(keys.iter().map(|k| keycap(k))).spacing(spacing::XS);
     row![
         container(caps).width(Length::Fixed(120.0)),
-        text(desc)
-            .size(12)
-            .color(palette.background.base.text),
+        text(desc).size(12).color(palette.background.base.text),
     ]
     .spacing(spacing::SM)
     .align_y(iced::Alignment::Center)
@@ -1751,6 +1771,7 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
     let filters_view = views::filters::filter_bar(
         views::filters::sort_controls(state.config.view.sort_order, state.config.view.ascending),
         views::filters::filter_mode_controls(state.config.view.filter_mode),
+        views::filters::new_toggle(state.config.view.new_only),
         views::filters::grouping_controls(
             state.config.view.group_raw_jpeg,
             state.config.view.group_bursts,
@@ -1783,40 +1804,36 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
 
     let grid = thumbnail_grid(state);
 
-    let has_filters_active = !state.config.selected_ratings.is_empty()
-        || !state.config.selected_color_labels.is_empty()
-        || state.config.selected_dates.is_some()
-        || state.config.view.filter_mode != FilterMode::default()
-        || state.config.view.hide_rejected;
+    let content: Element<'_, Message> = if state.media.is_view_empty()
+        && !state.media.is_empty()
+        && state.config.has_active_filters()
+    {
+        let empty_state = column![
+            text("No photos match current filters")
+                .size(14)
+                .color(palette.background.strong.text),
+            button(text("Clear Filters").size(12))
+                .padding([6, 16])
+                .style(styles::secondary_button)
+                .on_press(Message::Filters(filters_msg::Message::ClearAll)),
+        ]
+        .spacing(spacing::MD)
+        .align_x(iced::Alignment::Center);
 
-    let content: Element<'_, Message> =
-        if state.media.is_view_empty() && !state.media.is_empty() && has_filters_active {
-            let empty_state = column![
-                text("No photos match current filters")
-                    .size(14)
-                    .color(palette.background.strong.text),
-                button(text("Clear Filters").size(12))
-                    .padding([6, 16])
-                    .style(styles::secondary_button)
-                    .on_press(Message::Filters(filters_msg::Message::ClearAll)),
-            ]
-            .spacing(spacing::MD)
-            .align_x(iced::Alignment::Center);
-
-            container(empty_state)
-                .width(Fill)
-                .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)
-                .style(styles::grid_background)
-                .into()
-        } else {
-            container(grid)
-                .width(Fill)
-                .height(Fill)
-                .style(styles::grid_background)
-                .into()
-        };
+        container(empty_state)
+            .width(Fill)
+            .height(Fill)
+            .center_x(Fill)
+            .center_y(Fill)
+            .style(styles::grid_background)
+            .into()
+    } else {
+        container(grid)
+            .width(Fill)
+            .height(Fill)
+            .style(styles::grid_background)
+            .into()
+    };
 
     container(column![header, content])
         .width(Fill)

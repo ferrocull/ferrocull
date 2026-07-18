@@ -1,4 +1,4 @@
-use ferrocull_core::media::{FilterMode, SortOrder};
+use ferrocull_core::media::SortOrder;
 use iced::Task;
 
 use super::{Ferrocull, toggle_set};
@@ -46,6 +46,10 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
             state.config.view.filter_mode = mode;
             state.persist_settings();
         }
+        filters::Message::NewOnlyToggled => {
+            state.config.view.new_only = !state.config.view.new_only;
+            state.persist_settings();
+        }
         filters::Message::GroupRawJpegToggled => {
             state.config.view.group_raw_jpeg = !state.config.view.group_raw_jpeg;
             state.persist_settings();
@@ -86,11 +90,7 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
             return Task::none();
         }
         filters::Message::ClearAll => {
-            state.config.view.filter_mode = FilterMode::default();
-            state.config.view.hide_rejected = false;
-            state.config.selected_dates = None;
-            state.config.selected_ratings.clear();
-            state.config.selected_color_labels.clear();
+            state.config.clear_filters();
             state.persist_settings();
         }
     }
