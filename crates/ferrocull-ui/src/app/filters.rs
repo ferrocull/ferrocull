@@ -72,6 +72,11 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
                 Some(selection)
             };
         }
+        filters::Message::DateSortToggled => {
+            state.config.view.date_tree_ascending = !state.config.view.date_tree_ascending;
+            state.persist_settings();
+            return Task::none();
+        }
         filters::Message::YearExpanded(year) => {
             toggle_set(&mut state.expanded_years, year);
             return Task::none();

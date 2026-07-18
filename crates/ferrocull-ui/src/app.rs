@@ -1725,6 +1725,7 @@ fn sources_panel(state: &Ferrocull) -> Element<'_, Message> {
         state.config.selected_dates,
         &state.expanded_years,
         &state.expanded_months,
+        state.config.view.date_tree_ascending,
     )
     .map(Message::Filters);
 

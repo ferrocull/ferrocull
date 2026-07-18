@@ -50,6 +50,14 @@ const fn expand_icon(expanded: bool) -> &'static str {
     if expanded { "▼" } else { "▶" }
 }
 
+fn ordered_keys<K: Copy, V>(map: &BTreeMap<K, V>, ascending: bool) -> Vec<K> {
+    if ascending {
+        map.keys().copied().collect()
+    } else {
+        map.keys().rev().copied().collect()
+    }
+}
+
 /// Cache key for `lazy` — stores actual values for exact equality (no hash collisions).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CacheKey {
@@ -58,6 +66,7 @@ struct CacheKey {
     selected_date: Option<DateSelection>,
     expanded_years: BTreeSet<i32>,
     expanded_months: BTreeSet<(i32, u32)>,
+    ascending: bool,
 }
 
 pub(crate) fn date_tree<'a>(
@@ -66,12 +75,14 @@ pub(crate) fn date_tree<'a>(
     selected_date: Option<DateSelection>,
     expanded_years: &'a BTreeSet<i32>,
     expanded_months: &'a BTreeSet<(i32, u32)>,
+    ascending: bool,
 ) -> Element<'a, Message> {
     let key = CacheKey {
         item_version,
         selected_date,
         expanded_years: expanded_years.clone(),
         expanded_months: expanded_months.clone(),
+        ascending,
     };
 
     let exp_years = expanded_years.clone();
@@ -88,7 +99,7 @@ pub(crate) fn date_tree<'a>(
 
         let mut rows: Vec<Element<'static, Message>> = Vec::new();
 
-        for &year in counts.keys().rev() {
+        for year in ordered_keys(&counts, ascending) {
             let months = &counts[&year];
             let year_total: usize = months.values().flat_map(BTreeMap::values).sum();
             let is_expanded = exp_years.contains(&year);
@@ -113,13 +124,24 @@ pub(crate) fn date_tree<'a>(
             );
 
             if is_expanded {
-                push_month_rows(&mut rows, months, year, selected_date, &exp_months);
+                push_month_rows(&mut rows, months, year, selected_date, &exp_months, ascending);
             }
         }
 
-        let header = container(text("Filter by Date").size(13))
-            .padding([spacing::SM, 0.0])
-            .width(Fill);
+        let sort_toggle = button(text(if ascending { "↑" } else { "↓" }).size(11))
+            .padding([2, 6])
+            .style(styles::secondary_button)
+            .on_press(Message::DateSortToggled);
+        let header = container(
+            row![
+                text("Filter by Date").size(13),
+                Space::new().width(Fill),
+                sort_toggle,
+            ]
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([spacing::SM, 0.0])
+        .width(Fill);
 
         Element::from(column![header, column(rows)].spacing(spacing::XS))
     })
@@ -132,8 +154,9 @@ fn push_month_rows(
     year: i32,
     selected_date: Option<DateSelection>,
     exp_months: &BTreeSet<(i32, u32)>,
+    ascending: bool,
 ) {
-    for &month in months.keys().rev() {
+    for month in ordered_keys(months, ascending) {
         let days = &months[&month];
         let month_count: usize = days.values().sum();
         let is_expanded = exp_months.contains(&(year, month));
@@ -159,7 +182,7 @@ fn push_month_rows(
         );
 
         if is_expanded {
-            for &day in days.keys().rev() {
+            for day in ordered_keys(days, ascending) {
                 let count = days[&day];
                 let is_day_selected =
                     selected_date == Some(DateSelection::year_month_day(year, month, day));
