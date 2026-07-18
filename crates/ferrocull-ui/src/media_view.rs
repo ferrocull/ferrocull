@@ -31,9 +31,15 @@ use ferrocull_core::{
 /// sort-key order and direction is applied at read time, so it never affects
 /// the derived indices. Burst expansion is likewise absent — `MediaView` owns
 /// it, since only the burst re-keying logic can keep it consistent.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent view-filter axes, mirroring the durable ViewPrefs"
+)]
 pub(crate) struct ViewParams<'a> {
     pub(crate) sort_order: SortOrder,
     pub(crate) filter_mode: FilterMode,
+    /// Independent "not-yet-ingested only" axis. ANDs with `filter_mode`.
+    pub(crate) new_only: bool,
     pub(crate) hide_rejected: bool,
     pub(crate) group_raw_jpeg: bool,
     pub(crate) group_bursts: bool,
@@ -799,6 +805,7 @@ fn passes(item: &Item, params: &ViewParams, hidden_jpeg_paths: &HashMap<PathBuf,
         .iter()
         .any(|s| item.path.starts_with(s));
     let passes_mode = params.filter_mode.matches(item);
+    let passes_new = !params.new_only || !item.is_ingested;
     let not_rejected = !(params.hide_rejected && item.rating == -1);
     let not_hidden = !params.group_raw_jpeg || !hidden_jpeg_paths.contains_key(&item.path);
     let passes_date = matches_date_filter(item, params.selected_dates);
@@ -809,6 +816,7 @@ fn passes(item: &Item, params: &ViewParams, hidden_jpeg_paths: &HashMap<PathBuf,
 
     from_source
         && passes_mode
+        && passes_new
         && not_rejected
         && not_hidden
         && passes_date
@@ -827,7 +835,7 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use ferrocull_core::{
         FileCategory,
-        media::{CaptureTime, Item, SortOrder},
+        media::{CaptureTime, FilterMode, Item, SortOrder},
     };
 
     use super::{MediaView, ViewParams};
@@ -855,6 +863,16 @@ mod tests {
         }
     }
 
+    /// An `item_at`-style item with an explicit media type and ingest state,
+    /// for exercising the type-mode and New (not-yet-ingested) filter axes.
+    fn typed_item(name: &str, secs: i64, media_type: FileCategory, is_ingested: bool) -> Item {
+        Item {
+            media_type,
+            is_ingested,
+            ..item_at(name, secs, 0)
+        }
+    }
+
     /// Owns the `BTreeSet`s so a `ViewParams` can borrow them.
     struct Params {
         sources: std::collections::BTreeSet<PathBuf>,
@@ -863,6 +881,8 @@ mod tests {
         sort_order: SortOrder,
         group_bursts: bool,
         group_raw_jpeg: bool,
+        filter_mode: FilterMode,
+        new_only: bool,
     }
 
     impl Params {
@@ -876,13 +896,16 @@ mod tests {
                 sort_order: SortOrder::Time,
                 group_bursts: true,
                 group_raw_jpeg: true,
+                filter_mode: FilterMode::All,
+                new_only: false,
             }
         }
 
         fn view(&self) -> ViewParams<'_> {
             ViewParams {
                 sort_order: self.sort_order,
-                filter_mode: ferrocull_core::media::FilterMode::All,
+                filter_mode: self.filter_mode,
+                new_only: self.new_only,
                 hide_rejected: false,
                 group_raw_jpeg: self.group_raw_jpeg,
                 group_bursts: self.group_bursts,
@@ -1538,5 +1561,45 @@ mod tests {
 
         view.toggle_burst_expansion(key, &params.view());
         assert_eq!(visible_names(&view), ["a.raw"], "collapsed again");
+    }
+
+    /// The four New × type-mode combinations the ticket calls out: New ANDs with
+    /// the active type mode, and turning New off restores the hidden ingested
+    /// items. Ingest state is set directly on the constructed items.
+    #[test]
+    fn new_toggle_ands_with_the_type_mode() {
+        let items = [
+            typed_item("fresh.raw", 10, FileCategory::Raw, false),
+            typed_item("done.raw", 20, FileCategory::Raw, true),
+            typed_item("fresh.jpg", 30, FileCategory::Photo, false),
+            typed_item("done.jpg", 40, FileCategory::Photo, true),
+        ];
+
+        // New + RAW: only the not-yet-ingested RAW survives.
+        let mut params = Params::new();
+        params.filter_mode = FilterMode::RawOnly;
+        params.new_only = true;
+        assert_eq!(
+            visible_names(&build_incremental(&items, &params)),
+            ["fresh.raw"],
+            "New+RAW hides the ingested RAW and every Photo"
+        );
+
+        // New + All: every not-yet-ingested item, regardless of type.
+        params.filter_mode = FilterMode::All;
+        assert_eq!(
+            visible_names(&build_incremental(&items, &params)),
+            ["fresh.raw", "fresh.jpg"],
+            "New+All hides only the ingested items"
+        );
+
+        // New off + RAW: the ingested RAW returns; the type filter still holds.
+        params.filter_mode = FilterMode::RawOnly;
+        params.new_only = false;
+        assert_eq!(
+            visible_names(&build_incremental(&items, &params)),
+            ["fresh.raw", "done.raw"],
+            "turning New off restores the previously-hidden ingested RAW"
+        );
     }
 }

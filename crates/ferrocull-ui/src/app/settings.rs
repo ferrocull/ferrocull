@@ -8,7 +8,9 @@ use ferrocull_core::cache::{self, PreviewCache, ThumbnailCache};
 use ferrocull_devices::ScannedFile;
 use iced::Task;
 
-use super::{Ferrocull, Modal, SettingsState, ThumbnailProgress, pick_folder, spawn_thumbnail_sipper};
+use super::{
+    Ferrocull, Modal, SettingsState, ThumbnailProgress, pick_folder, spawn_thumbnail_sipper,
+};
 use crate::messages::{Message, settings};
 
 pub(super) fn update(state: &mut Ferrocull, msg: settings::Message) -> Task<Message> {

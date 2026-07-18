@@ -94,6 +94,10 @@ pub struct ViewPrefs {
     pub sort_order: SortOrder,
     pub ascending: bool,
     pub filter_mode: FilterMode,
+    /// Independent, stackable "show only not-yet-ingested items" toggle. ANDs
+    /// with `filter_mode` rather than being a member of it. `#[serde(default)]`
+    /// on the struct covers absence in older persisted prefs.
+    pub new_only: bool,
     pub hide_rejected: bool,
     pub group_raw_jpeg: bool,
     pub group_bursts: bool,
@@ -106,6 +110,7 @@ impl Default for ViewPrefs {
             sort_order: SortOrder::default(),
             ascending: true,
             filter_mode: FilterMode::default(),
+            new_only: false,
             hide_rejected: false,
             group_raw_jpeg: true,
             group_bursts: true,

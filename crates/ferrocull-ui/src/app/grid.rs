@@ -608,7 +608,10 @@ impl Ferrocull {
         let expanded_after = self.media.is_burst_expanded(key);
         // A collapse can hide the focused member (only this burst's members
         // change visibility); keep the cursor on the burst's representative.
-        if self.focused_index.is_some_and(|idx| !self.media.is_visible(idx)) {
+        if self
+            .focused_index
+            .is_some_and(|idx| !self.media.is_visible(idx))
+        {
             self.focused_index = Some(self.media.burst_map()[&key][0]);
         }
         self.reconcile_selection();
@@ -661,8 +664,10 @@ impl Ferrocull {
                 changes,
                 selection_removed,
             } => {
-                let assignments: Vec<(usize, i8)> =
-                    changes.iter().map(|&(m, b, a)| (m, dir.pick(b, a))).collect();
+                let assignments: Vec<(usize, i8)> = changes
+                    .iter()
+                    .map(|&(m, b, a)| (m, dir.pick(b, a)))
+                    .collect();
                 self.set_rating_values(&assignments);
                 // The forward action untagged these; undo re-tags, redo untags.
                 match dir {
@@ -684,8 +689,10 @@ impl Ferrocull {
                 ));
             }
             undo::Action::ColorLabel { changes } => {
-                let assignments: Vec<(usize, Option<ColorLabel>)> =
-                    changes.iter().map(|&(m, b, a)| (m, dir.pick(b, a))).collect();
+                let assignments: Vec<(usize, Option<ColorLabel>)> = changes
+                    .iter()
+                    .map(|&(m, b, a)| (m, dir.pick(b, a)))
+                    .collect();
                 self.set_color_label_values(&assignments);
                 let (from, to) = target_transition(changes, entry.target, dir);
                 self.echo(format!(

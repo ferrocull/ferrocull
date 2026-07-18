@@ -361,6 +361,7 @@ mod tests {
                 sort_order: SortOrder::Rating,
                 ascending: false,
                 filter_mode: FilterMode::RawOnly,
+                new_only: true,
                 hide_rejected: true,
                 group_raw_jpeg: false,
                 group_bursts: false,

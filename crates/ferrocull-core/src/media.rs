@@ -251,26 +251,18 @@ impl SortKey {
 pub enum FilterMode {
     #[default]
     All,
-    NewOnly,
     PhotosOnly,
     VideosOnly,
     RawOnly,
 }
 
 impl FilterMode {
-    pub const ALL: [Self; 5] = [
-        Self::All,
-        Self::NewOnly,
-        Self::PhotosOnly,
-        Self::VideosOnly,
-        Self::RawOnly,
-    ];
+    pub const ALL: [Self; 4] = [Self::All, Self::PhotosOnly, Self::VideosOnly, Self::RawOnly];
 
     #[must_use]
     pub fn matches(self, item: &Item) -> bool {
         match self {
             Self::All => true,
-            Self::NewOnly => !item.is_ingested,
             Self::PhotosOnly => item.media_type == FileCategory::Photo,
             Self::VideosOnly => item.media_type == FileCategory::Video,
             Self::RawOnly => item.media_type == FileCategory::Raw,
@@ -282,7 +274,6 @@ impl std::fmt::Display for FilterMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::All => write!(f, "All"),
-            Self::NewOnly => write!(f, "New"),
             Self::PhotosOnly => write!(f, "Photos"),
             Self::VideosOnly => write!(f, "Videos"),
             Self::RawOnly => write!(f, "RAW"),
@@ -339,4 +330,63 @@ pub fn matches_date_filter(item: &Item, selected_date: Option<DateSelection>) ->
     local.year() == sel.year
         && sel.month.is_none_or(|m| local.month() == m)
         && sel.day.is_none_or(|d| local.day() == d)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use chrono::{TimeZone, Utc};
+
+    use super::{CaptureTime, FileCategory, FilterMode, Item};
+
+    fn item_of(media_type: FileCategory) -> Item {
+        let second = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
+        Item {
+            path: PathBuf::from("/src/frame"),
+            source_id: "frame".to_owned(),
+            media_type,
+            capture_time: CaptureTime::new(second, 0),
+            is_ingested: false,
+            jpeg_pair: None,
+            paired: Vec::new(),
+            sidecars: Vec::new(),
+            xmp_sidecar: None,
+            rating: 0,
+            color_label: None,
+        }
+    }
+
+    #[test]
+    fn type_mode_matches_only_its_category() {
+        let raw = item_of(FileCategory::Raw);
+        let photo = item_of(FileCategory::Photo);
+        let video = item_of(FileCategory::Video);
+
+        assert!(FilterMode::All.matches(&raw));
+        assert!(FilterMode::All.matches(&photo));
+
+        assert!(FilterMode::RawOnly.matches(&raw));
+        assert!(!FilterMode::RawOnly.matches(&photo));
+
+        assert!(FilterMode::PhotosOnly.matches(&photo));
+        assert!(!FilterMode::PhotosOnly.matches(&video));
+
+        assert!(FilterMode::VideosOnly.matches(&video));
+        assert!(!FilterMode::VideosOnly.matches(&raw));
+    }
+
+    #[test]
+    fn type_mode_group_is_the_four_type_axes_only() {
+        // New is no longer a type-mode member; it is an independent axis.
+        assert_eq!(
+            FilterMode::ALL,
+            [
+                FilterMode::All,
+                FilterMode::PhotosOnly,
+                FilterMode::VideosOnly,
+                FilterMode::RawOnly,
+            ]
+        );
+    }
 }

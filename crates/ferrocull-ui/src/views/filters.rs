@@ -60,29 +60,34 @@ pub(crate) fn filter_mode_controls(mode: FilterMode) -> Element<'static, Message
     .into()
 }
 
+/// Labeled checkbox shared by every boolean axis in the bar.
+fn bool_toggle(value: bool, label: &'static str, msg: Message) -> Element<'static, Message> {
+    checkbox(value)
+        .label(label)
+        .text_size(11)
+        .on_toggle(move |_| msg)
+        .into()
+}
+
+/// Independent, stackable "not-yet-ingested only" toggle. Rendered as a boolean
+/// toggle (like the grouping toggles), distinct from the single-select type
+/// pills, since it composes with the type axis rather than replacing it.
+pub(crate) fn new_toggle(new_only: bool) -> Element<'static, Message> {
+    bool_toggle(new_only, "New", Message::NewOnlyToggled)
+}
+
 pub(crate) fn grouping_controls(
     group_raw_jpeg: bool,
     group_bursts: bool,
     hide_rejected: bool,
 ) -> Element<'static, Message> {
-    let group_toggle = checkbox(group_raw_jpeg)
-        .label("R+J")
-        .text_size(11)
-        .on_toggle(|_| Message::GroupRawJpegToggled);
-
-    let group_bursts_toggle = checkbox(group_bursts)
-        .label("Bursts")
-        .text_size(11)
-        .on_toggle(|_| Message::GroupBurstsToggled);
-
-    let hide_rejected_toggle = checkbox(hide_rejected)
-        .label("Hide ✗")
-        .text_size(11)
-        .on_toggle(|_| Message::HideRejectedToggled);
-
-    row![group_toggle, group_bursts_toggle, hide_rejected_toggle]
-        .spacing(spacing::MD)
-        .into()
+    row![
+        bool_toggle(group_raw_jpeg, "R+J", Message::GroupRawJpegToggled),
+        bool_toggle(group_bursts, "Bursts", Message::GroupBurstsToggled),
+        bool_toggle(hide_rejected, "Hide ✗", Message::HideRejectedToggled),
+    ]
+    .spacing(spacing::MD)
+    .into()
 }
 
 pub(crate) fn rating_filter(selected: &BTreeSet<i8>) -> Element<'_, Message> {
@@ -134,6 +139,7 @@ pub(crate) fn color_label_filter(selected: &BTreeSet<Option<ColorLabel>>) -> Ele
 pub(crate) fn filter_bar<'a>(
     sort: Element<'a, Message>,
     filter_mode: Element<'a, Message>,
+    new_toggle: Element<'a, Message>,
     grouping: Element<'a, Message>,
     rating: Element<'a, Message>,
     color_label: Element<'a, Message>,
@@ -142,6 +148,8 @@ pub(crate) fn filter_bar<'a>(
         sort,
         divider(),
         filter_mode,
+        divider(),
+        new_toggle,
         divider(),
         grouping,
         Space::new().width(iced::Fill),
