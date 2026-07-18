@@ -266,8 +266,7 @@ mod tests {
     }
 
     /// Guards against the color-label palette drifting out of correspondence
-    /// with the XMP names (the teal/burnt-orange mixup that had labels 6 and 7
-    /// render the wrong hue). Each chromatic label must land in a hue window; the
+    /// with the XMP names. Each chromatic label must land in a hue window; the
     /// achromatic Gray label is asserted by low saturation instead.
     #[test]
     fn dark_labels_match_their_xmp_names() {

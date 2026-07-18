@@ -153,6 +153,15 @@ impl SettingsState {
     }
 }
 
+/// The single active modal overlay, if any. Exactly one modal shows at a time,
+/// so holding them in one `Option` makes that exclusivity structural rather
+/// than a property of guard order in `handle_key_press`.
+enum Modal {
+    Settings(SettingsState),
+    IngestFailures,
+    Shortcuts,
+}
+
 /// The user's filter/sort/grouping choices — the source of truth for what the
 /// grid shows. A distinct struct so `config.params()` borrows only these
 /// fields, leaving `&mut self.media` free at rebuild/insert sites.
@@ -214,9 +223,10 @@ struct Ferrocull {
     /// The user's filter/sort/grouping choices, passed to `MediaView` as
     /// [`ViewParams`].
     config: ViewConfig,
-    /// The Settings popup, present only while open (rendered as a top overlay
-    /// layer over the dimmed grid).
-    settings: Option<SettingsState>,
+    /// The active modal overlay (Settings, ingest failures, or shortcuts),
+    /// present only while one is open (rendered as a top overlay layer over the
+    /// dimmed grid). At most one is ever open.
+    modal: Option<Modal>,
     /// Committed theme preference (source of truth for persistence; mirrored
     /// into the render-time cache via `theme::set_preference`).
     theme_preference: ferrocull_core::ThemePreference,
@@ -239,10 +249,6 @@ struct Ferrocull {
     /// Per-file failures from the last ingest (shown in the status bar until
     /// the next ingest; expandable into a details popup with retry).
     last_ingest_failures: Vec<crate::messages::FailureInfo>,
-    /// The ingest-failure details popup is open.
-    ingest_failures_open: bool,
-    /// The keyboard-shortcut reference overlay is open (`?` / F1).
-    shortcuts_open: bool,
     /// Transient status message shown in status bar: errors (profile save, DB)
     /// and action echoes (rating/label/tag/undo feedback).
     status_message: Option<StatusMessage>,
@@ -389,7 +395,7 @@ impl Default for Ferrocull {
         Self {
             media: MediaView::new(),
             config: ViewConfig::from_prefs(settings.view),
-            settings: None,
+            modal: None,
             theme_preference,
             thumbnail_size,
             cache_dir,
@@ -402,8 +408,6 @@ impl Default for Ferrocull {
             saved_patterns: settings.saved_patterns,
             ingest_progress: None,
             last_ingest_failures: Vec::new(),
-            ingest_failures_open: false,
-            shortcuts_open: false,
             status_message: None,
             undo_stack: undo::Stack::default(),
             thumbnail_progress: None,
@@ -509,7 +513,7 @@ impl Ferrocull {
             .item(idx)
             .path
             .file_name()
-            .expect("scanned file has filename")
+            .expect("item path has no filename")
             .to_string_lossy()
             .into_owned()
     }
@@ -537,6 +541,24 @@ impl Ferrocull {
             panel_widths: self.panel_widths,
         };
         self.metadata.set_settings(&settings);
+    }
+
+    /// The open Settings popup's transient state, when Settings is the active
+    /// modal.
+    fn settings(&self) -> Option<&SettingsState> {
+        match &self.modal {
+            Some(Modal::Settings(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the open Settings popup's transient state, when
+    /// Settings is the active modal.
+    fn settings_mut(&mut self) -> Option<&mut SettingsState> {
+        match &mut self.modal {
+            Some(Modal::Settings(s)) => Some(s),
+            _ => None,
+        }
     }
 
     /// The resolved cache root: the configured override, else the platform
@@ -570,31 +592,21 @@ impl Ferrocull {
     ) -> Task<Message> {
         use keyboard::key::Named;
 
-        // The Settings popup is modal: Esc dismisses it, and every other global
-        // shortcut is swallowed so grid/rating keys can't fire behind the scrim.
-        if self.settings.is_some() {
-            if matches!(key, Key::Named(Named::Escape)) {
-                self.settings = None;
-            }
-            return Task::none();
-        }
-
-        // The ingest-failure popup is modal for the same reason as Settings.
-        if self.ingest_failures_open {
-            if matches!(key, Key::Named(Named::Escape)) {
-                self.ingest_failures_open = false;
-            }
-            return Task::none();
-        }
-
-        // The shortcut overlay is modal too: Esc dismisses, everything else is
-        // swallowed so grid/rating keys can't fire behind the scrim. `?` and F1
-        // also close it — they toggle the overlay, matching its own help row.
-        if self.shortcuts_open {
-            let closes = matches!(key, Key::Named(Named::Escape | Named::F1))
-                || matches!(modified_key, Key::Character(c) if c == "?");
+        // A modal swallows every global shortcut so grid/rating keys can't fire
+        // behind the scrim. Esc dismisses any modal; the shortcut overlay also
+        // closes on `?`/F1, since those keys toggle it.
+        if let Some(ref modal) = self.modal {
+            let closes = match modal {
+                Modal::Shortcuts => {
+                    matches!(key, Key::Named(Named::Escape | Named::F1))
+                        || matches!(modified_key, Key::Character(c) if c == "?")
+                }
+                Modal::Settings(_) | Modal::IngestFailures => {
+                    matches!(key, Key::Named(Named::Escape))
+                }
+            };
             if closes {
-                self.shortcuts_open = false;
+                self.modal = None;
             }
             return Task::none();
         }
@@ -759,10 +771,12 @@ impl Ferrocull {
             }
         } else if !modifiers.alt() {
             // 0-5: star rating — deliberate divergence from Photo Mechanic,
-            // where unmodified digits set the color class. Shift is allowed
-            // only when the press actually typed the digit (AZERTY-family
-            // layouts); a shifted press that typed something else falls
-            // through to the shift-gated handling below.
+            // where unmodified digits set the color class (ADR-0001 mandates
+            // PM shortcuts; this one is an intentional exception).
+            // Shift is allowed only when the press
+            // actually typed the digit (AZERTY-family layouts); a shifted
+            // press that typed something else falls through to the
+            // shift-gated handling below.
             if let Some(digit @ '0'..='5') = typed_digit {
                 #[expect(
                     clippy::cast_possible_wrap,
@@ -805,8 +819,7 @@ impl Ferrocull {
             'z' | 'Z' if in_preview => {
                 Task::done(Message::Preview(preview_msg::Message::ResetZoom))
             }
-            // B: toggle collapse/expand of the focused item's burst. Photo
-            // Mechanic has no equivalent binding; B is free and mnemonic.
+            // B: toggle collapse/expand of the focused item's burst.
             'b' | 'B' if !in_preview && !in_compare => {
                 Task::done(Message::Grid(grid_msg::Message::ToggleFocusedBurst))
             }
@@ -1061,7 +1074,11 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ToggleShortcuts => {
-            state.shortcuts_open = !state.shortcuts_open;
+            state.modal = if matches!(state.modal, Some(Modal::Shortcuts)) {
+                None
+            } else {
+                Some(Modal::Shortcuts)
+            };
             Task::none()
         }
         Message::TogglePanel(panel) => {
@@ -1252,20 +1269,37 @@ fn view(state: &Ferrocull) -> Element<'_, Message> {
         ViewMode::Preview(ref p) => root = root.push(preview_overlay(state, p)),
         ViewMode::Grid => {}
     }
-    if let Some(ref settings) = state.settings {
-        root = root.push(settings_overlay(state, settings));
-    }
-    if state.ingest_failures_open {
-        root = root.push(ingest_failures_overlay(state));
-    }
-    if state.shortcuts_open {
-        root = root.push(shortcuts_overlay());
+    if let Some(ref modal) = state.modal {
+        let overlay = match modal {
+            Modal::Settings(s) => settings_overlay(state, s),
+            Modal::IngestFailures => ingest_failures_overlay(state),
+            Modal::Shortcuts => shortcuts_overlay(),
+        };
+        root = root.push(overlay);
     }
     root.into()
 }
 
+/// Wrap a modal's centered content in the dimmed, click-to-dismiss scrim shared
+/// by every overlay. The outer `opaque` blocks pointer events from reaching the
+/// grid; `on_dismiss` fires when the scrim (but not the card) is clicked.
+fn modal_scrim<'a>(
+    content: impl Into<Element<'a, Message>>,
+    on_dismiss: Message,
+) -> Element<'a, Message> {
+    opaque(
+        mouse_area(
+            container(content.into())
+                .width(Fill)
+                .height(Fill)
+                .style(styles::scrim),
+        )
+        .on_press(on_dismiss),
+    )
+}
+
 /// Details popup for the last ingest's failures: per-file error text plus a
-/// retry for exactly those files. Same scrim/card pattern as Settings.
+/// retry for exactly those files.
 fn ingest_failures_overlay(state: &Ferrocull) -> Element<'_, Message> {
     use crate::theme::colors;
     let palette = crate::theme::palette();
@@ -1274,12 +1308,11 @@ fn ingest_failures_overlay(state: &Ferrocull) -> Element<'_, Message> {
         let name = failure
             .source
             .file_name()
-            .expect("scanned file has filename")
-            .to_string_lossy()
-            .into_owned();
+            .expect("item path has no filename")
+            .to_string_lossy();
         column![
             text(name).size(12).color(palette.background.base.text),
-            text(failure.error.clone()).size(11).color(colors::DANGER),
+            text(&failure.error).size(11).color(colors::DANGER),
         ]
         .spacing(2)
         .into()
@@ -1320,34 +1353,27 @@ fn ingest_failures_overlay(state: &Ferrocull) -> Element<'_, Message> {
         .padding(spacing::LG)
         .style(styles::settings_card);
 
-    opaque(
-        mouse_area(
-            container(center(opaque(card)))
-                .width(Fill)
-                .height(Fill)
-                .style(styles::scrim),
-        )
-        .on_press(Message::Destination(
-            destination_msg::Message::ToggleIngestFailures,
-        )),
+    modal_scrim(
+        center(opaque(card)),
+        Message::Destination(destination_msg::Message::ToggleIngestFailures),
     )
 }
 
 /// A key-cap pill carrying mono key text for the shortcut overlay.
-fn keycap(label: &str) -> Element<'static, Message> {
-    container(text(label.to_owned()).size(11).font(iced::Font::MONOSPACE))
+fn keycap(label: &'static str) -> Element<'static, Message> {
+    container(text(label).size(11).font(iced::Font::MONOSPACE))
         .padding([1, 5])
         .style(styles::keycap)
         .into()
 }
 
 /// One shortcut line: a fixed-width run of key caps followed by its description.
-fn shortcut_row(keys: &[&str], desc: &str) -> Element<'static, Message> {
+fn shortcut_row(keys: &[&'static str], desc: &'static str) -> Element<'static, Message> {
     let palette = crate::theme::palette();
     let caps = row(keys.iter().map(|k| keycap(k))).spacing(spacing::XS);
     row![
         container(caps).width(Length::Fixed(120.0)),
-        text(desc.to_owned())
+        text(desc)
             .size(12)
             .color(palette.background.base.text),
     ]
@@ -1357,11 +1383,14 @@ fn shortcut_row(keys: &[&str], desc: &str) -> Element<'static, Message> {
 }
 
 /// A titled group of shortcut lines for one column of the overlay.
-fn shortcut_group(title: &str, rows: Vec<Element<'static, Message>>) -> Element<'static, Message> {
+fn shortcut_group(
+    title: &'static str,
+    rows: Vec<Element<'static, Message>>,
+) -> Element<'static, Message> {
     let palette = crate::theme::palette();
     let mut items: Vec<Element<'static, Message>> = Vec::with_capacity(rows.len() + 1);
     items.push(
-        text(title.to_owned())
+        text(title)
             .size(11)
             .color(palette.background.weak.text)
             .into(),
@@ -1372,8 +1401,7 @@ fn shortcut_group(title: &str, rows: Vec<Element<'static, Message>>) -> Element<
 
 /// Keyboard-shortcut reference overlay (`?` / F1). Documents the real current
 /// bindings — every key here is verified against the handlers in
-/// `handle_key_press`/`handle_character_key`. Same scrim/card pattern as the
-/// Settings and ingest-failure modals; Esc, click-outside, and Close dismiss.
+/// `handle_key_press`/`handle_character_key`.
 fn shortcuts_overlay() -> Element<'static, Message> {
     let palette = crate::theme::palette();
 
@@ -1472,15 +1500,7 @@ fn shortcuts_overlay() -> Element<'static, Message> {
         .padding(spacing::LG)
         .style(styles::settings_card);
 
-    opaque(
-        mouse_area(
-            container(center(opaque(card)))
-                .width(Fill)
-                .height(Fill)
-                .style(styles::scrim),
-        )
-        .on_press(Message::ToggleShortcuts),
-    )
+    modal_scrim(center(opaque(card)), Message::ToggleShortcuts)
 }
 
 /// Map a rating/color/reject item event to the corresponding grid message.
@@ -1632,15 +1652,7 @@ fn settings_overlay<'a>(state: &'a Ferrocull, s: &'a SettingsState) -> Element<'
         center(opaque(Element::from(card).map(Message::Settings))).into()
     });
 
-    opaque(
-        mouse_area(
-            container(card)
-                .width(Fill)
-                .height(Fill)
-                .style(styles::scrim),
-        )
-        .on_press(Message::Settings(settings_msg::Message::Close)),
-    )
+    modal_scrim(card, Message::Settings(settings_msg::Message::Close))
 }
 
 /// Clickable edge handle for collapsing/expanding panels.

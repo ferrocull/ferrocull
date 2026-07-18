@@ -401,7 +401,7 @@ pub(crate) fn capture_date(item: &Item) -> NaiveDate {
 fn format_date_header(date: NaiveDate, today: NaiveDate) -> Cow<'static, str> {
     if date == today {
         "Today".into()
-    } else if date == today.pred_opt().expect("today is never NaiveDate::MIN") {
+    } else if date == today.pred_opt().expect("today is NaiveDate::MIN") {
         "Yesterday".into()
     } else {
         let days_ago = (today - date).num_days();
@@ -806,7 +806,7 @@ fn cell_overlays(
         let filename = item
             .path
             .file_name()
-            .expect("scanned file has filename")
+            .expect("item path has no filename")
             .to_string_lossy()
             .into_owned();
 

@@ -22,7 +22,7 @@ mod tests {
     #[test]
     fn root_filesystem_reports_capacity() {
         let (total, used) =
-            super::disk_space(Path::new("/")).expect("root filesystem is always mounted");
+            super::disk_space(Path::new("/")).expect("root filesystem disk space unavailable");
         assert!(total > 0, "root filesystem should report a nonzero size");
         assert!(used <= total, "used bytes cannot exceed total bytes");
     }

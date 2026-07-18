@@ -8,19 +8,19 @@ use ferrocull_core::cache::{self, PreviewCache, ThumbnailCache};
 use ferrocull_devices::ScannedFile;
 use iced::Task;
 
-use super::{Ferrocull, SettingsState, ThumbnailProgress, pick_folder, spawn_thumbnail_sipper};
+use super::{Ferrocull, Modal, SettingsState, ThumbnailProgress, pick_folder, spawn_thumbnail_sipper};
 use crate::messages::{Message, settings};
 
 pub(super) fn update(state: &mut Ferrocull, msg: settings::Message) -> Task<Message> {
     match msg {
         settings::Message::Open => {
-            state.settings = Some(SettingsState::new());
+            state.modal = Some(Modal::Settings(SettingsState::new()));
         }
         settings::Message::Close => {
-            state.settings = None;
+            state.modal = None;
         }
         settings::Message::SelectCategory(category) => {
-            if let Some(s) = &mut state.settings {
+            if let Some(s) = state.settings_mut() {
                 s.category = category;
             }
         }
@@ -33,7 +33,7 @@ pub(super) fn update(state: &mut Ferrocull, msg: settings::Message) -> Task<Mess
         }
         settings::Message::ThumbnailSizeSelected(size) => {
             let current = state.thumbnail_size;
-            if let Some(s) = &mut state.settings {
+            if let Some(s) = state.settings_mut() {
                 // Re-selecting the committed size clears the staged change.
                 s.pending_thumbnail_size = (size != current).then_some(size);
             }
@@ -42,7 +42,7 @@ pub(super) fn update(state: &mut Ferrocull, msg: settings::Message) -> Task<Mess
             return confirm_thumbnail_size(state);
         }
         settings::Message::CancelThumbnailSize => {
-            if let Some(s) = &mut state.settings {
+            if let Some(s) = state.settings_mut() {
                 s.pending_thumbnail_size = None;
             }
         }
@@ -52,7 +52,7 @@ pub(super) fn update(state: &mut Ferrocull, msg: settings::Message) -> Task<Mess
         settings::Message::CacheDirChosen(None) => {}
         settings::Message::CacheDirChosen(Some(path)) => {
             let current = state.cache_root();
-            if let Some(s) = &mut state.settings {
+            if let Some(s) = state.settings_mut() {
                 // Picking the current location is a no-op.
                 s.pending_cache_dir = (Some(&path) != current.as_ref()).then_some(path);
             }
@@ -61,7 +61,7 @@ pub(super) fn update(state: &mut Ferrocull, msg: settings::Message) -> Task<Mess
             return confirm_cache_dir(state);
         }
         settings::Message::CancelCacheDir => {
-            if let Some(s) = &mut state.settings {
+            if let Some(s) = state.settings_mut() {
                 s.pending_cache_dir = None;
             }
         }
@@ -76,11 +76,7 @@ pub(super) fn update(state: &mut Ferrocull, msg: settings::Message) -> Task<Mess
 /// carries no resolution, so stale entries would shadow the new size), then
 /// regenerate over the loaded media at the new size.
 fn confirm_thumbnail_size(state: &mut Ferrocull) -> Task<Message> {
-    let Some(size) = state
-        .settings
-        .as_ref()
-        .and_then(|s| s.pending_thumbnail_size)
-    else {
+    let Some(size) = state.settings().and_then(|s| s.pending_thumbnail_size) else {
         return Task::none();
     };
     // A scan in flight holds cache handles; the confirm control is disabled
@@ -96,7 +92,7 @@ fn confirm_thumbnail_size(state: &mut Ferrocull) -> Task<Message> {
 
     state.thumbnail_size = size;
     state.persist_settings();
-    if let Some(s) = &mut state.settings {
+    if let Some(s) = state.settings_mut() {
         s.pending_thumbnail_size = None;
     }
     // Drop decoded thumbnails so the grid reloads them at the new size once
@@ -109,11 +105,7 @@ fn confirm_thumbnail_size(state: &mut Ferrocull) -> Task<Message> {
 /// Commit a staged cache location: move the cache files off the update loop,
 /// reporting back via [`settings::Message::CacheMoved`].
 fn confirm_cache_dir(state: &mut Ferrocull) -> Task<Message> {
-    let Some(new_dir) = state
-        .settings
-        .as_ref()
-        .and_then(|s| s.pending_cache_dir.clone())
-    else {
+    let Some(new_dir) = state.settings().and_then(|s| s.pending_cache_dir.clone()) else {
         return Task::none();
     };
     if state.scan_in_flight() {
@@ -121,7 +113,7 @@ fn confirm_cache_dir(state: &mut Ferrocull) -> Task<Message> {
     }
     let old_root = state.cache_root().expect("cache root unresolved");
 
-    if let Some(s) = &mut state.settings {
+    if let Some(s) = state.settings_mut() {
         s.cache_move_in_flight = true;
     }
 
@@ -145,7 +137,7 @@ fn handle_cache_moved(
     state: &mut Ferrocull,
     result: Result<std::path::PathBuf, Arc<cache::Error>>,
 ) {
-    if let Some(s) = &mut state.settings {
+    if let Some(s) = state.settings_mut() {
         s.cache_move_in_flight = false;
     }
 
@@ -168,7 +160,7 @@ fn handle_cache_moved(
     state.preview_disk_cache = Arc::new(preview);
     state.cache_dir = Some(new_root);
     state.persist_settings();
-    if let Some(s) = &mut state.settings {
+    if let Some(s) = state.settings_mut() {
         s.pending_cache_dir = None;
     }
 }

@@ -39,14 +39,14 @@ pub(crate) fn top_bar(
     let select_name = select_item
         .path
         .file_name()
-        .expect("scanned file has filename")
+        .expect("item path has no filename")
         .to_string_lossy()
         .into_owned();
 
     let candidate_name = candidate_item
         .path
         .file_name()
-        .expect("scanned file has filename")
+        .expect("item path has no filename")
         .to_string_lossy()
         .into_owned();
 
