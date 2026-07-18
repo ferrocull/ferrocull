@@ -148,8 +148,13 @@ impl PartialOrd for CaptureTime {
 #[derive(Debug, Clone)]
 pub struct Item {
     pub path: PathBuf,
-    /// Stable identifier for persistence (canonical path string).
+    /// Location identity keying per-file metadata (ratings, color labels, XMP):
+    /// the canonical path string. Ingest identity is separate — see
+    /// [`Item::fingerprint`].
     pub source_id: String,
+    /// Primary file size in bytes, captured at scan. A component of the ingest
+    /// fingerprint; see [`Item::fingerprint`].
+    pub size: u64,
     /// Media type determined at scan time (RAW, Photo, or Video).
     pub media_type: FileCategory,
     pub capture_time: CaptureTime,
@@ -166,6 +171,22 @@ pub struct Item {
     pub rating: i8,
     /// XMP color label, or `None` if unclassified.
     pub color_label: Option<ColorLabel>,
+}
+
+impl Item {
+    /// Location-independent ingest fingerprint for this frame. Delegates to the
+    /// shared [`crate::ingest_fingerprint`] over the frame's basename, size, and
+    /// capture time, so scan-time lookup and post-ingest recording compute
+    /// identity the same way.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        let basename = self
+            .path
+            .file_name()
+            .expect("item path has a filename")
+            .to_string_lossy();
+        crate::fingerprint::ingest_fingerprint(&basename, self.size, self.capture_time)
+    }
 }
 
 #[derive(
@@ -345,6 +366,7 @@ mod tests {
         Item {
             path: PathBuf::from("/src/frame"),
             source_id: "frame".to_owned(),
+            size: 0,
             media_type,
             capture_time: CaptureTime::new(second, 0),
             is_ingested: false,

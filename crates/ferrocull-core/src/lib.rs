@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod cache;
 pub(crate) mod copy;
+pub mod fingerprint;
 pub(crate) mod history;
 pub mod hooks;
 pub mod ingest;
@@ -17,6 +18,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 pub use ferrocull_media::{FileCategory, categorize_extension, is_media_file};
+pub use fingerprint::ingest_fingerprint;
 pub use history::JobCodeHistory;
 pub use hooks::Hook;
 pub use media::ColorLabel;

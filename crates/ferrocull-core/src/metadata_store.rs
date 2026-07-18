@@ -61,15 +61,15 @@ impl Store {
     }
 
     #[must_use]
-    pub fn is_ingested(&self, source_id: &str) -> bool {
+    pub fn is_ingested(&self, fingerprint: &str) -> bool {
         self.db
-            .is_ingested(source_id)
+            .is_ingested(fingerprint)
             .expect("is_ingested query failed")
     }
 
-    pub fn record_ingest(&mut self, source_id: &str, checksum: &str, dest: &Path) {
+    pub fn record_ingest(&mut self, fingerprint: &str, checksum: &str, dest: &Path) {
         self.db
-            .record_ingest(source_id, checksum, dest)
+            .record_ingest(fingerprint, checksum, dest)
             .expect("record_ingest query failed");
     }
 
@@ -211,6 +211,42 @@ mod tests {
     #[test]
     fn defaults_when_neither_source_has_metadata() {
         assert_eq!(store().load("id", None), (0, None));
+    }
+
+    #[test]
+    fn ingest_history_is_keyed_by_fingerprint_not_path() {
+        use chrono::DateTime;
+
+        use crate::{fingerprint::ingest_fingerprint, media::CaptureTime};
+
+        let mut store = store();
+        let capture = CaptureTime::new(
+            DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+            0,
+        );
+
+        // The same frame re-inserted on a different card path shares a
+        // fingerprint (basename + size + capture time); a genuinely different
+        // frame reusing the camera name (differing size) does not.
+        let re_inserted = ingest_fingerprint("IMG_0001.CR2", 24_000_000, capture);
+        let different_frame = ingest_fingerprint("IMG_0001.CR2", 31_500_000, capture);
+
+        assert!(!store.is_ingested(&re_inserted), "nothing ingested yet");
+
+        store.record_ingest(
+            &ingest_fingerprint("IMG_0001.CR2", 24_000_000, capture),
+            "checksum",
+            Path::new("/dest/2024/IMG_0001.CR2"),
+        );
+
+        assert!(
+            store.is_ingested(&re_inserted),
+            "same frame from another path reads as ingested"
+        );
+        assert!(
+            !store.is_ingested(&different_frame),
+            "a different frame reusing the camera name reads as new"
+        );
     }
 
     #[test]

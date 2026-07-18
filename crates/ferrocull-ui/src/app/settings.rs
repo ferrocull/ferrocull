@@ -178,6 +178,7 @@ impl Ferrocull {
             .iter()
             .map(|item| ScannedFile {
                 path: item.path.clone(),
+                size: item.size,
                 media_type: item.media_type,
                 paired: item.paired.clone(),
                 sidecars: item.sidecars.clone(),
