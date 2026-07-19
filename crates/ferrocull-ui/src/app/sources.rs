@@ -258,8 +258,7 @@ impl Ferrocull {
             .file_name()
             .expect("scanned file has a filename")
             .to_string_lossy();
-        let fingerprint =
-            ferrocull_core::ingest_fingerprint(&basename, scanned.size, capture_time);
+        let fingerprint = ferrocull_core::ingest_fingerprint(&basename, scanned.size, capture_time);
         let is_ingested = self.metadata.is_ingested(&fingerprint);
 
         let (rating, color_label) = self.metadata.load(&source_id, xmp_metadata);

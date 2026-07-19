@@ -101,6 +101,9 @@ mod tests {
     fn the_key_is_32_lowercase_hex_chars() {
         let key = ingest_fingerprint("IMG_0001.CR2", 24_000_000, capture(1, 0));
         assert_eq!(key.len(), 32);
-        assert!(key.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            key.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 }
