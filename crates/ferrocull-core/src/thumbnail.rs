@@ -334,8 +334,11 @@ fn is_displayable_jpeg(data: &[u8]) -> bool {
 
 /// Walk the JPEG marker stream and return the frame's `(width, height)` in
 /// pixels if it is a displayable Huffman baseline/extended/progressive frame
-/// (SOF0/1/2), else `None`. See [`is_displayable_jpeg`] for which frames count
-/// as displayable and why. Expects `data` to start with SOI.
+/// (SOF0/1/2), else `None`. The SOF segment is validated the way a conformant
+/// decoder does (length against component count, precision, component count),
+/// so garbage spans are rejected here rather than at decode time. See
+/// [`is_displayable_jpeg`] for which frames count as displayable and why.
+/// Expects `data` to start with SOI.
 fn displayable_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     let mut pos = 2; // past SOI
     loop {
@@ -348,11 +351,29 @@ fn displayable_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         };
         match marker {
             // SOF layout after the marker: length(2), precision(1),
-            // height(2), width(2) — height at pos+5, width at pos+7. A
-            // truncated header yields None, rejecting the span.
+            // height(2), width(2), component_count(1), then 3 bytes per
+            // component. A truncated header yields None, rejecting the span.
+            //
+            // Validate the segment as a conformant decoder would before
+            // trusting the dimensions: length must be the fixed 8-byte header
+            // plus 3 bytes per component, samples must be 8-bit, and the
+            // component count must be displayable (1 gray, 3 YCbCr/RGB, 4
+            // CMYK/YCCK). Kept strict on purpose — a stray FFD8..FFD9 span
+            // formed inside a RAW's binary data can pass a bare marker walk yet
+            // declare garbage dimensions that outscore the real preview, then
+            // fail in the renderer. Do not relax.
             0xC0..=0xC2 => {
+                let length = u16::from_be_bytes([*data.get(pos + 2)?, *data.get(pos + 3)?]);
+                let precision = *data.get(pos + 4)?;
                 let height = u16::from_be_bytes([*data.get(pos + 5)?, *data.get(pos + 6)?]);
                 let width = u16::from_be_bytes([*data.get(pos + 7)?, *data.get(pos + 8)?]);
+                let components = *data.get(pos + 9)?;
+                if precision != 8
+                    || !matches!(components, 1 | 3 | 4)
+                    || usize::from(length) != 8 + 3 * usize::from(components)
+                {
+                    return None;
+                }
                 return Some((u32::from(width), u32::from(height)));
             }
             // Lossless (C3, C7, CF), hierarchical (C5, C6, CD, CE),
@@ -608,6 +629,21 @@ mod tests {
         seg
     }
 
+    /// A SOF0 marker + header with caller-chosen field values, for driving the
+    /// displayability gate against malformed frames. A conformant frame has
+    /// `length == 8 + 3 * components`, `precision == 8`, and `components` in
+    /// {1, 3, 4}. The gate inspects only these header bytes, so no per-component
+    /// descriptors are appended.
+    fn sof_header(length: u16, precision: u8, width: u16, height: u16, components: u8) -> Vec<u8> {
+        let mut seg = vec![0xFF, 0xC0];
+        seg.extend_from_slice(&length.to_be_bytes());
+        seg.push(precision);
+        seg.extend_from_slice(&height.to_be_bytes());
+        seg.extend_from_slice(&width.to_be_bytes());
+        seg.push(components);
+        seg
+    }
+
     /// Byte sequence that passes the scanner's filters: SOI, an APP0 padding
     /// segment of `pad` zero bytes (no stray 0xFF), an SOF0 frame header
     /// carrying `width` x `height`, then EOI.
@@ -705,6 +741,72 @@ mod tests {
         assert_eq!(
             scanner.largest_by_pixels(&data),
             Some((high_start, high_res.len()))
+        );
+    }
+
+    #[test]
+    fn displayable_dimensions_rejects_sof_length_inconsistent_with_components() {
+        // The reported NEF failure class: a stray SOF whose length field (here
+        // 12) doesn't equal 8 + 3 * component_count (8 + 3*1 = 11). A real
+        // decoder rejects it, so the gate must too — otherwise the bogus span
+        // outscores the genuine preview on its garbage dimensions.
+        let data = [vec![0xFF, 0xD8], sof_header(12, 8, 100, 100, 1)].concat();
+        assert_eq!(displayable_dimensions(&data), None);
+    }
+
+    #[test]
+    fn displayable_dimensions_rejects_bad_precision_and_component_count() {
+        // 12-bit precision: length 8 + 3*1 = 11 is self-consistent, but the
+        // decode pipeline only handles 8-bit samples.
+        let bad_precision = [vec![0xFF, 0xD8], sof_header(11, 12, 100, 100, 1)].concat();
+        assert_eq!(displayable_dimensions(&bad_precision), None);
+
+        // 189 components (0xBD) — the garbage count from the reported error;
+        // outside the displayable set {1, 3, 4}. Length is consistent
+        // (8 + 3*189 = 575) so only the component count is at fault.
+        let bad_components = [vec![0xFF, 0xD8], sof_header(575, 8, 100, 100, 189)].concat();
+        assert_eq!(displayable_dimensions(&bad_components), None);
+    }
+
+    #[test]
+    fn displayable_dimensions_accepts_three_component_sof() {
+        // A well-formed YCbCr frame (3 components, length 8 + 3*3 = 17, 8-bit):
+        // the gate must still accept it, guarding against over-tightening.
+        let data = [vec![0xFF, 0xD8], sof_header(17, 8, 1920, 1280, 3)].concat();
+        assert_eq!(displayable_dimensions(&data), Some((1920, 1280)));
+    }
+
+    #[test]
+    fn scan_excludes_bogus_span_so_selector_returns_genuine_preview() {
+        // End-to-end reproduction of the reported bug: a genuine embedded
+        // preview plus a bogus span whose fake SOF declares enormous
+        // dimensions. Before the gate validated the SOF segment, the bogus
+        // span was admitted and outscored the real preview on pixel count;
+        // now it never enters the candidate set.
+        let genuine = jpeg_with_dimensions(1024, 768, 0x60);
+
+        // Bogus span: SOI, a malformed SOF claiming 9000x9000 with the reported
+        // garbage length/component count, zero padding to clear the 100-byte
+        // floor, then EOI.
+        let mut bogus = vec![0xFF, 0xD8];
+        bogus.extend(sof_header(0xBDC8, 8, 9000, 9000, 0xBD));
+        bogus.extend(std::iter::repeat_n(0x00, 100));
+        bogus.extend_from_slice(&[0xFF, 0xD9]);
+
+        let mut data = bogus;
+        let genuine_start = data.len();
+        data.extend_from_slice(&genuine);
+
+        let mut scanner = JpegScanner::new();
+        scanner.scan(&data);
+        assert_eq!(
+            scanner.spans,
+            vec![(genuine_start, genuine.len())],
+            "only the genuine preview should be admitted as a candidate"
+        );
+        assert_eq!(
+            scanner.largest_by_pixels(&data),
+            Some((genuine_start, genuine.len()))
         );
     }
 
