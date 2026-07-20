@@ -1,233 +1,81 @@
 # Data-Oriented Design Principles for Ferrocull
 
-Based on [Data-Oriented Design](https://www.dataorienteddesign.com/dodbook/) by Richard Fabian.
+Based on [Data-Oriented Design](https://www.dataorienteddesign.com/dodbook/) by Richard Fabian. ADR-0003 commits the core data model to these principles.
+
+**Scope.** These principles pay off in hot paths iterating thousands of media items; in cold paths and small collections, prefer the clearest structure — "design for the measured case" cuts both ways. The UI follows The Elm Architecture (ADR-0002, [elm-iced-architecture-report.md](elm-iced-architecture-report.md)); TEA's `update` mutating app state is not a DOD violation.
 
 ## Core Philosophy
 
-### Data is Not the Problem Domain
+**Data is not the problem domain.** OOP models the problem domain in code structure; DOD treats data as raw facts to be transformed. A capture time is just an `i64` — sorting, grouping, and filtering give it meaning, not the struct it lives in. Bundling every field into one `MediaItem` class locks in a single interpretation and hides the real statistics (most items share a capture date, thumbnails are sparse during loading, paths are rarely needed for display).
 
-OOP models the *problem domain* in code structure. DOD treats data as raw facts to be transformed.
+**Design around measured data patterns**, not hypothetical extensibility: access frequency, read/write ratio, item count at runtime, and how sparsely optional fields are populated.
 
-**OOP trap**: Creating a `MediaItem` class with all fields locks you into one interpretation. You can't easily see that most items share the same capture date, that thumbnails are sparse during loading, or that paths are rarely needed for display.
+## Principles
 
-**DOD approach**: Data exists independently of its interpretation. A capture time is just an `i64`—it could be for sorting, grouping, or filtering. The transformation code gives meaning, not the data structure.
+### 1. Separate hot and cold data
 
-### Data Statistics Matter
-
-Design around *actual data patterns*: frequency, quantity, access patterns.
-
-- How often is this field accessed?
-- What's the read/write ratio?
-- How many items exist at runtime—100? 10,000?
-- What percentage of items have this optional field populated?
-
-## Key Principles for Ferrocull
-
-### 1. Separate Hot and Cold Data
-
-**Hot data**: Accessed every frame during display
-- Thumbnail handles
-- Capture times (for sorting/grouping)
-- Ratings (for display)
-
-**Cold data**: Accessed only on updates or specific operations
-- File paths (only for ThumbnailLoaded updates)
-- Flags (only when filtering)
-- JPEG pair info (only during download)
+Hot data is touched every frame (thumbnail handles, capture times, ratings); cold data only on updates or specific operations (file paths, pairing info). Keep them in separate parallel arrays so display iteration never drags cold bytes through the cache:
 
 ```rust
-// DOD: Separate by access pattern
 struct HotData {
     thumbnails: Vec<Option<ThumbnailHandle>>,
     capture_times: Vec<DateTime<Utc>>,
-    ratings: Vec<u8>,
+    ratings: Vec<i8>,
 }
 
 struct ColdData {
     paths: Vec<PathBuf>,
-    jpeg_pairs: Vec<Option<PathBuf>>,
 }
 ```
 
-### 2. Use Indices, Not Pointers
+### 2. Indices, not pointers
+
+`struct MediaId(u32)` — 4 bytes, trivially copyable, no lifetime complexity, works across all parallel arrays, keeps storage contiguous.
+
+### 3. State as table membership
+
+Encode state through presence in a collection, not boolean flags:
 
 ```rust
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
-struct MediaId(u32);  // 4 bytes, trivially copyable
+// Bad: is_tagged / is_rejected flags on every item
+// Good: membership IS state
+tagged: HashSet<MediaId>,
+rejected: HashSet<MediaId>,
 ```
 
-Benefits:
-- 4 bytes vs 8 bytes for pointers
-- No lifetime complexity
-- Arrays stay contiguous
-- Indices work across all parallel arrays
+Iterating "all tagged items" is O(tagged) instead of O(all), with no per-item branch and no None checks.
 
-### 3. State as Table Membership
+### 4. Process in homogeneous batches
 
-Instead of boolean flags, encode state through presence in a collection:
+Batch by operation (`update_thumbnails(...)`, `update_ratings(...)`) instead of dispatching per item — no vtable lookups, predictable branches, sequential memory access.
 
-```rust
-// BAD: Boolean flags
-struct MediaItem {
-    is_selected: bool,
-    is_downloaded: bool,
-    is_rejected: bool,
-}
+### 5. Transforms over mutations
 
-// GOOD: Membership IS state
-selected_items: HashSet<MediaId>,
-downloaded_items: HashSet<MediaId>,
-rejected_items: HashSet<MediaId>,
-```
+View operations as `data in → transform → data out`. Pure functions over slices beat methods that mutate an item and touch caches as a side effect.
 
-Benefits:
-- Iteration over "all selected items" is O(selected), not O(all)
-- No branch misprediction from `if item.is_selected`
-- No null/None checks—presence implies state
+### 6. Existence-based processing
 
-### 4. Process by Type, Not by Instance
-
-```rust
-// BAD: Virtual dispatch per item
-for item in items {
-    item.process();  // vtable lookup, cache miss
-}
-
-// GOOD: Batch by operation
-update_thumbnails(&mut thumbnails, &loaded_data);
-update_ratings(&mut ratings, &user_input);
-```
-
-### 5. Transforms Over Mutations
-
-View operations as data transforms: `data in -> transform -> data out`
-
-```rust
-// BAD: Mutate in place with side effects
-fn process_item(&mut self, item: &mut MediaItem) {
-    if item.needs_thumbnail {
-        item.thumbnail = self.load_thumbnail(&item.path);
-        self.cache.insert(&item.path, &item.thumbnail);
-    }
-}
-
-// GOOD: Pure transform
-fn load_thumbnails(paths: &[PathBuf]) -> Vec<ThumbnailResult> {
-    paths.iter().map(|p| load_thumbnail(p)).collect()
-}
-```
-
-### 6. Existence-Based Processing
-
-Instead of checking conditions, structure data so iteration IS the condition:
-
-```rust
-// BAD: Check every item
-for item in &items {
-    if item.needs_thumbnail.is_some() {
-        process(item);
-    }
-}
-
-// GOOD: Only iterate items that need processing
-for id in &items_needing_thumbnails {
-    process(&items[id]);
-}
-```
+Structure data so iteration *is* the condition: keep a collection of items needing work and iterate it, instead of scanning everything and testing a flag per item.
 
 ## Cache Efficiency
 
-A cache miss costs ~100 CPU cycles. Design for:
+A cache miss costs ~100 cycles. Favor contiguous memory, minimal wasted bytes per cache line, and predictable linear iteration.
 
-1. **Contiguous memory**: Sequential access enables prefetching
-2. **Minimal wasted bytes**: Don't load unused fields into cache lines
-3. **Predictable patterns**: Linear iteration beats random access
+**SoA vs AoS**: use array-of-structs when fields are always accessed together (`positions: Vec<(f32, f32, f32)>`); use struct-of-arrays when access patterns differ per field — sorting touches only the times array, display only ratings, file ops only paths.
 
-### Struct of Arrays (SoA) vs Array of Structs (AoS)
+## Anti-Patterns
 
-**Use AoS when fields are always accessed together:**
-```rust
-// Good AoS: x,y,z always used as unit
-positions: Vec<(f32, f32, f32)>
-```
-
-**Use SoA when access patterns vary:**
-```rust
-// Good SoA: Different operations need different fields
-struct MediaTable {
-    ids: Vec<MediaId>,        // Lookup operations
-    times: Vec<DateTime>,     // Sorting/filtering
-    ratings: Vec<u8>,         // Display
-    paths: Vec<PathBuf>,      // File operations (rare)
-}
-
-// Sorting: touches only times array
-// Display: touches only ratings array
-// File ops: touches only paths array
-```
-
-## Applying to Ferrocull Architecture
-
-### Recommended Structure
-
-```rust
-pub struct MediaLibrary {
-    // === HOT DATA (display iteration) ===
-    thumbnails: Vec<Option<ThumbnailHandle>>,
-    capture_times: Vec<DateTime<Utc>>,
-    ratings: Vec<u8>,
-
-    // === COLD DATA (updates, detail views) ===
-    paths: Vec<PathBuf>,
-    jpeg_pairs: Vec<Option<PathBuf>>,
-
-    // === INDICES ===
-    path_to_id: HashMap<PathBuf, MediaId>,
-
-    // === STATE AS MEMBERSHIP ===
-    selected: HashSet<MediaId>,
-    downloaded: HashSet<MediaId>,
-    rejected: HashSet<MediaId>,
-
-    // === SORTED VIEWS ===
-    sorted_view: BTreeMap<SortKey, MediaId>,
-}
-```
-
-### Display Loop (Hot Path)
-
-```rust
-for (_, &id) in &self.sorted_view {
-    let thumb = &self.thumbnails[id.0 as usize];
-    let rating = self.ratings[id.0 as usize];
-    let is_selected = self.selected.contains(&id);
-    render_thumbnail(thumb, rating, is_selected);
-}
-```
-
-### Update Path (Cold Path)
-
-```rust
-fn handle_thumbnail_loaded(&mut self, path: &PathBuf, thumb: ThumbnailHandle) {
-    if let Some(&id) = self.path_to_id.get(path) {
-        self.thumbnails[id.0 as usize] = Some(thumb);
-    }
-}
-```
-
-## Anti-Patterns to Avoid
-
-| Anti-Pattern | Why It's Bad | DOD Alternative |
+| Anti-pattern | Why it's bad | DOD alternative |
 |--------------|--------------|-----------------|
 | `Arc<MediaItem>` | Pointer chasing, scattered memory | Indices into contiguous arrays |
-| `HashMap<Path, MediaItem>` | ~100 cycles per lookup in hot path | Vec + separate HashMap index |
+| `HashMap<Path, MediaItem>` in hot path | ~100 cycles per lookup | Vec + separate HashMap index |
 | `Option<T>` for sparse data | Branches + wasted cache space | Separate sparse table |
 | Boolean flags | Branches in tight loops | Set membership |
 | Virtual dispatch | Unpredictable branches, cache misses | Process by type in batches |
 
-## Summary Table
+## Summary
 
-| OOP Assumption | DOD Reality |
+| OOP assumption | DOD reality |
 |----------------|-------------|
 | Model the domain | Transform the data |
 | Objects have identity | Data has shape and statistics |
