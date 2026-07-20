@@ -13,6 +13,7 @@ pub(crate) mod rename;
 mod section;
 pub(crate) mod settings;
 pub(crate) mod sources;
+pub(crate) mod status;
 pub(crate) mod thumbnails;
 
 pub(crate) use section::collapsible_section;

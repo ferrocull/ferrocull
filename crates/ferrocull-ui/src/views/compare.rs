@@ -16,6 +16,7 @@ use crate::{
     },
     styles,
     theme::{colors, spacing},
+    views::status,
     widgets::{self, ViewState, Viewer},
 };
 
@@ -111,11 +112,16 @@ pub(crate) fn top_bar(
 /// Renders a single image pane with border indicating active state.
 /// Doesn't know its pane identity for event routing — parent maps `PaneEvent`.
 /// `label` is display text ("SELECT" or "CANDIDATE").
+///
+/// Each pane carries its own status marks, so both panes answer "which of
+/// these two is already in my selection?" regardless of which is active.
 pub(crate) fn image_pane(
     preview: Option<&iced::widget::image::Handle>,
     is_active: bool,
     view_state: ViewState,
     label: &'static str,
+    item: &Item,
+    is_tagged: bool,
 ) -> Element<'static, PaneEvent> {
     let palette = crate::theme::palette();
     let content: Element<'static, PaneEvent> = preview.map_or_else(
@@ -135,6 +141,10 @@ pub(crate) fn image_pane(
                 .into()
         },
     );
+
+    // The pane label sits in the column above the marked content, so the
+    // badges never cover it.
+    let content = status::marked(content, item, is_tagged, spacing::MD);
 
     let border_color = if is_active {
         colors::ACCENT

@@ -1570,6 +1570,8 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
         active_pane == compare_msg::Pane::Select,
         cmp.select_view_state,
         "SELECT",
+        select_item,
+        state.selected.contains(&cmp.select_index),
     );
     let candidate_pane = views::compare::image_pane(
         state
@@ -1579,6 +1581,8 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
         active_pane == compare_msg::Pane::Candidate,
         cmp.candidate_view_state,
         "CANDIDATE",
+        candidate_item,
+        state.selected.contains(&cmp.candidate_index),
     );
     let bottom = views::compare::bottom_bar(cmp.layout, item_ctrl);
 
@@ -1603,6 +1607,8 @@ fn preview_overlay(state: &Ferrocull, p: &PreviewState) -> Element<'static, Mess
             .get(&item.path)
             .map(iced::widget::image::Allocation::handle),
         p.view_state,
+        item,
+        state.selected.contains(&p.index),
     );
     let bottom = views::preview::bottom_bar(item_ctrl);
 
