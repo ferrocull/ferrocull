@@ -20,4 +20,4 @@ Ferrocull is a personal project first, but pull requests and suggestions are wel
 
 ## License
 
-See [LICENSE](./LICENSE).
+[Apache-2.0](./LICENSE)
