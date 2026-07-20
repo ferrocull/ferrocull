@@ -42,10 +42,11 @@ _Avoid_: Sequence, Series.
 
 **Source**:
 A thing Ferrocull can scan and ingest from. One of three subtypes:
+
 - **Storage source** — a block device (SD card, USB stick, internal disk) with a mount point.
 - **Camera source** — a gphoto2-controlled camera, accessed over PTP, no mount point.
 - **Directory source** — a folder the user explicitly added, not auto-detected.
-_Avoid_: Device, Origin, Input.
+  _Avoid_: Device, Origin, Input.
 
 **Destination**:
 A folder on local storage where ingested files are written. An [[ingest]] has one primary destination plus zero or more backup destinations, all written in the same operation.
@@ -53,12 +54,13 @@ _Avoid_: Target, Output folder.
 
 **Rating**:
 A signed integer in `[-1, 5]` attached to a media file, matching the XMP `xmp:Rating` wire format:
+
 - `-1` — **Rejected** (the file is thrown out; `X` key)
 - `0` — **Unrated** (the default; no `xmp:Rating` written)
 - `1`..`5` — star rating (`1` through `5`)
-Rejection and star rating are not orthogonal — a file is in exactly one of these states at a time.
-Binding unmodified digits to star ratings is a deliberate divergence from Photo Mechanic, where digits set the color class.
-_Avoid_: Rank, Score. Don't speak of "rejected" as a separate field — it's the `-1` rating.
+  Rejection and star rating are not orthogonal — a file is in exactly one of these states at a time.
+  Binding unmodified digits to star ratings is a deliberate divergence from Photo Mechanic, where digits set the color class.
+  _Avoid_: Rank, Score. Don't speak of "rejected" as a separate field — it's the `-1` rating.
 
 ### Compare mode
 
@@ -76,7 +78,7 @@ _Avoid_: Choose, Pick.
 
 ## Flagged ambiguities
 
-**"Select"**: in compare mode, a singular noun (the chosen photo). In grid context, "selection" is the *set* of tagged files. Same root, two different cardinalities — be explicit when speaking outside the immediate context.
+**"Select"**: in compare mode, a singular noun (the chosen photo). In grid context, "selection" is the _set_ of tagged files. Same root, two different cardinalities — be explicit when speaking outside the immediate context.
 
 ## Example dialogue
 
