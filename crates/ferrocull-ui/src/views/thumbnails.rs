@@ -21,6 +21,7 @@ use super::rating::{StarEvent, star_rating_row};
 use crate::{
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
+    views::status,
 };
 
 /// What happened inside a thumbnail card (no idx, no path — parent enriches).
@@ -780,10 +781,11 @@ fn cell_overlays(
         stack = stack.push(color_overlay(colors::OVERLAY_INGESTED));
     }
 
-    // Top-left status badges: rejected X and tagged check share one row so
-    // both stay visible when a rejected frame is also in the working set.
-    if item.rating == -1 || state.is_tagged {
-        stack = stack.push(status_badges(item.rating == -1, state.is_tagged));
+    // Top-left status badges: rejected, tagged, and ingested share one row so
+    // every applicable state stays visible. The ingested dim above is the
+    // fast-scan cue; this pill is the guaranteed mark over any photo.
+    if let Some(badges) = status::badge_row(item, state.is_tagged, 10.0, spacing::XS) {
+        stack = stack.push(badges);
     }
 
     if show_pair {
@@ -879,38 +881,6 @@ fn color_overlay<Message: 'static>(color: Color) -> Element<'static, Message> {
         .width(Fill)
         .height(Fill)
         .style(styles::solid_fill(color))
-        .into()
-}
-
-/// Top-left status row: red X pill when rejected, amber check pill when
-/// tagged. The check is the guaranteed tag mark — visible over any photo and
-/// in both themes, unlike the card wash.
-fn status_badges<Message: 'static>(rejected: bool, tagged: bool) -> Element<'static, Message> {
-    let mut badges = iced::widget::Row::new().spacing(spacing::XS);
-
-    if rejected {
-        // U+2717 ballot X — the same reject mark the "Hide ✗" filter uses.
-        badges = badges.push(
-            container(text("\u{2717}").size(10))
-                .padding([2, 6])
-                .style(styles::rounded_badge(colors::BADGE_REJECTED)),
-        );
-    }
-
-    if tagged {
-        badges = badges.push(
-            container(text("\u{2713}").size(10).color(colors::ACCENT))
-                .padding([2, 5])
-                .style(styles::overlay_badge),
-        );
-    }
-
-    container(badges)
-        .width(Fill)
-        .height(Fill)
-        .align_x(iced::alignment::Horizontal::Left)
-        .align_y(iced::alignment::Vertical::Top)
-        .padding(spacing::XS)
         .into()
 }
 

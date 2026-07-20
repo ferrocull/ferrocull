@@ -11,6 +11,7 @@ use crate::{
     messages::{Message, preview},
     styles,
     theme::spacing,
+    views::status,
     widgets::{ViewState, Viewer},
 };
 
@@ -58,27 +59,37 @@ pub(crate) fn top_bar(
     .into()
 }
 
-/// Renders the image viewer area.
+/// Renders the image viewer area with the frame's status marks overlaid.
 pub(crate) fn image_area(
     preview_image: Option<&iced::widget::image::Handle>,
     view_state: ViewState,
+    item: &Item,
+    is_tagged: bool,
 ) -> Element<'static, Message> {
-    let Some(handle) = preview_image else {
-        return center(Spinner::new().width(40.0).height(40.0).circle_radius(3.0))
+    let content: Element<'static, Message> = preview_image.map_or_else(
+        || {
+            center(Spinner::new().width(40.0).height(40.0).circle_radius(3.0))
+                .width(Fill)
+                .height(Fill)
+                .into()
+        },
+        |handle| {
+            Viewer::new(handle.clone(), view_state, |e| {
+                Message::Preview(preview::Message::ViewStateChanged(e))
+            })
+            .min_scale(0.25)
+            .max_scale(8.0)
+            .scale_step(0.25)
             .width(Fill)
             .height(Fill)
-            .into();
-    };
+            .into()
+        },
+    );
 
-    Viewer::new(handle.clone(), view_state, |e| {
-        Message::Preview(preview::Message::ViewStateChanged(e))
-    })
-    .min_scale(0.25)
-    .max_scale(8.0)
-    .scale_step(0.25)
-    .width(Fill)
-    .height(Fill)
-    .into()
+    // The horizontal inset matches the top bar's padding so the row's left
+    // edge lines up with the position text directly above it; the vertical one
+    // is larger so the row clears the bar rather than hugging it.
+    status::marked(content, item, is_tagged, [spacing::LG, spacing::LG])
 }
 
 /// Renders the bottom bar with navigation and pre-mapped item controls.

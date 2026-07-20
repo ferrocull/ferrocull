@@ -126,6 +126,12 @@ pub(crate) mod colors {
     // keep their own ink in both themes instead of inheriting theme text.
     pub(crate) const BADGE_TEXT: Color = rgb(0xF0, 0xEB, 0xE5);
 
+    // "Already ingested" ink on OVERLAY_BADGE. Deliberately not amber: the
+    // Safelight Rule reserves amber for active state, and a copied frame is
+    // completed history. The muted-taupe text colour reads only 4.13:1 here;
+    // this lighter taupe clears the floor at 5.94:1.
+    pub(crate) const BADGE_INGESTED: Color = rgb(0xA8, 0x96, 0x82);
+
     pub(crate) const RATING_STAR: Color = rgb(0xE5, 0xA8, 0x53); // Rating stars/badge — WARNING's hue, its own role
 
     pub(crate) const TEXT_MUTED: Color = rgb(0x8C, 0x7B, 0x6A); // Warm taupe, for secondary text
@@ -234,7 +240,25 @@ mod tests {
     use ferrocull_core::ColorLabel;
     use iced::Color;
 
-    use super::COLOR_LABELS;
+    use super::{COLOR_LABELS, colors};
+
+    /// WCAG relative luminance.
+    fn luminance(c: Color) -> f32 {
+        fn channel(v: f32) -> f32 {
+            if v <= 0.039_28 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+    }
+
+    /// WCAG contrast ratio between two colors.
+    fn contrast(a: Color, b: Color) -> f32 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
 
     /// HSV hue (degrees) and saturation of a color, for asserting a label's hue
     /// still matches its XMP name.
@@ -299,6 +323,19 @@ mod tests {
         assert!(
             gray_sat < 0.2,
             "Gray saturation {gray_sat:.3} too high to read as a neutral"
+        );
+    }
+
+    /// The ingested mark is non-bold ink on the badge fill, below the
+    /// large-text threshold at every size it draws, so it owes 4.5:1.
+    /// Computed from the constants so a palette edit re-runs the check
+    /// rather than invalidating a hard-coded figure.
+    #[test]
+    fn ingested_badge_ink_clears_wcag_aa_on_the_badge_fill() {
+        let ratio = contrast(colors::BADGE_INGESTED, colors::OVERLAY_BADGE);
+        assert!(
+            ratio >= 4.5,
+            "BADGE_INGESTED on OVERLAY_BADGE is {ratio:.2}:1, under the 4.5:1 floor"
         );
     }
 }
