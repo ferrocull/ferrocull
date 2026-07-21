@@ -49,6 +49,33 @@ pub(crate) struct ViewParams<'a> {
     pub(crate) selected_color_labels: &'a BTreeSet<Option<ColorLabel>>,
 }
 
+/// How much of what a grid cell stands for is tagged.
+///
+/// A cell that hides other frames — a collapsed burst representative, a RAW
+/// standing in for its JPEG sibling — reports its whole group, so collapsing a
+/// group can never make the working set look smaller than it is. A frame
+/// judged on its own is only ever [`Self::Untagged`] or [`Self::Tagged`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TagState {
+    Untagged,
+    /// Some but not all of the hidden group is tagged.
+    Partial,
+    Tagged,
+}
+
+impl TagState {
+    /// The state of a single frame on its own, for views (preview, compare)
+    /// that show one frame and have no hidden group to under-report.
+    #[must_use]
+    pub(crate) const fn of_frame(is_tagged: bool) -> Self {
+        if is_tagged {
+            Self::Tagged
+        } else {
+            Self::Untagged
+        }
+    }
+}
+
 /// Result of pruning selection/focus against the current visible set.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RebuildOutcome {
@@ -230,6 +257,28 @@ impl MediaView {
             }
         }
         group
+    }
+
+    /// Tag state of the logical unit `idx` stands for, over the same
+    /// deduplicated fan-out [`Self::group_of`] tags — so what a cell reports
+    /// and what the tag keystroke acts on can never disagree.
+    #[must_use]
+    pub(crate) fn tag_state(
+        &self,
+        idx: usize,
+        selected: &BTreeSet<usize>,
+        group_bursts: bool,
+        group_raw_jpeg: bool,
+    ) -> TagState {
+        let group = self.group_of(idx, group_bursts, group_raw_jpeg);
+        let tagged = group.iter().filter(|m| selected.contains(m)).count();
+        if tagged == 0 {
+            TagState::Untagged
+        } else if tagged == group.len() {
+            TagState::Tagged
+        } else {
+            TagState::Partial
+        }
     }
 
     /// First item index in display order.
@@ -838,7 +887,7 @@ mod tests {
         media::{CaptureTime, FilterMode, Item, SortOrder},
     };
 
-    use super::{MediaView, ViewParams};
+    use super::{MediaView, TagState, ViewParams};
 
     fn base_time() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap()
@@ -1658,5 +1707,204 @@ mod tests {
             ["fresh.raw", "done.raw"],
             "turning New off restores the previously-hidden ingested RAW"
         );
+    }
+
+    /// A burst of three RAWs, the first two carrying JPEG siblings.
+    fn burst_with_pairs() -> Vec<Item> {
+        let mut a = item_at("a.raw", 0, 0);
+        a.jpeg_pair = Some(PathBuf::from("/src/a.jpg"));
+        let mut b = item_at("b.raw", 0, 300_000_000);
+        b.jpeg_pair = Some(PathBuf::from("/src/b.jpg"));
+        vec![
+            a,
+            b,
+            item_at("c.raw", 0, 600_000_000),
+            item_at("a.jpg", 0, 0),
+            item_at("b.jpg", 0, 300_000_000),
+        ]
+    }
+
+    fn tag_state_of(view: &MediaView, name: &str, tagged: &[&str]) -> TagState {
+        let idx = |n: &str| view.index_of(Path::new(n)).unwrap();
+        let selected: std::collections::BTreeSet<usize> = tagged.iter().map(|&n| idx(n)).collect();
+        view.tag_state(idx(name), &selected, true, true)
+    }
+
+    #[test]
+    fn ungrouped_item_reports_its_own_tag_state() {
+        let params = Params::new();
+        let items = [item_at("a.raw", 0, 0), item_at("b.raw", 100, 0)];
+        let view = build_incremental(&items, &params);
+        assert_eq!(
+            tag_state_of(&view, "/src/a.raw", &[]),
+            TagState::Untagged,
+            "untagged lone item"
+        );
+        assert_eq!(
+            tag_state_of(&view, "/src/a.raw", &["/src/a.raw"]),
+            TagState::Tagged,
+            "tagged lone item"
+        );
+    }
+
+    #[test]
+    fn collapsed_burst_with_no_tagged_member_is_untagged() {
+        let params = Params::new();
+        let view = build_incremental(&burst_with_pairs(), &params);
+        assert_eq!(tag_state_of(&view, "/src/a.raw", &[]), TagState::Untagged);
+    }
+
+    #[test]
+    fn collapsed_burst_with_every_member_tagged_is_tagged() {
+        let params = Params::new();
+        let view = build_incremental(&burst_with_pairs(), &params);
+        assert_eq!(
+            tag_state_of(
+                &view,
+                "/src/a.raw",
+                &[
+                    "/src/a.raw",
+                    "/src/b.raw",
+                    "/src/c.raw",
+                    "/src/a.jpg",
+                    "/src/b.jpg",
+                ],
+            ),
+            TagState::Tagged,
+            "the whole fan-out unit, hidden JPEG pairs included"
+        );
+    }
+
+    #[test]
+    fn collapsed_burst_with_some_members_tagged_is_partial() {
+        let params = Params::new();
+        let view = build_incremental(&burst_with_pairs(), &params);
+        assert_eq!(
+            tag_state_of(&view, "/src/a.raw", &["/src/c.raw"]),
+            TagState::Partial,
+            "a tag on a hidden member must still show on the representative"
+        );
+    }
+
+    /// A member's tag can live only on its hidden JPEG — the representative
+    /// still has to report it.
+    #[test]
+    fn collapsed_burst_is_partial_when_only_a_hidden_jpeg_is_tagged() {
+        let params = Params::new();
+        let view = build_incremental(&burst_with_pairs(), &params);
+        assert_eq!(
+            tag_state_of(&view, "/src/a.raw", &["/src/b.jpg"]),
+            TagState::Partial
+        );
+    }
+
+    #[test]
+    fn expanded_burst_member_reports_only_itself_and_its_pair() {
+        let params = Params::new();
+        let mut view = build_incremental(&burst_with_pairs(), &params);
+        let key = *view.burst_map.keys().next().unwrap();
+        view.toggle_burst_expansion(key, &params.view());
+
+        assert_eq!(
+            tag_state_of(&view, "/src/c.raw", &["/src/a.raw"]),
+            TagState::Untagged,
+            "an expanded member does not stand in for its siblings"
+        );
+        assert_eq!(
+            tag_state_of(&view, "/src/a.raw", &["/src/a.raw"]),
+            TagState::Partial,
+            "a member's own hidden JPEG still counts"
+        );
+        assert_eq!(
+            tag_state_of(&view, "/src/a.raw", &["/src/a.raw", "/src/a.jpg"]),
+            TagState::Tagged
+        );
+    }
+
+    #[test]
+    fn raw_with_a_tagged_hidden_jpeg_is_partial() {
+        let params = Params::new();
+        let mut raw = item_at("photo.raw", 0, 0);
+        raw.jpeg_pair = Some(PathBuf::from("/src/photo.jpg"));
+        let items = [raw, item_at("photo.jpg", 0, 0)];
+        let view = build_incremental(&items, &params);
+        assert_eq!(
+            tag_state_of(&view, "/src/photo.raw", &["/src/photo.jpg"]),
+            TagState::Partial
+        );
+        assert_eq!(
+            tag_state_of(&view, "/src/photo.raw", &["/src/photo.raw"]),
+            TagState::Partial,
+            "the RAW alone leaves its hidden JPEG untagged"
+        );
+    }
+
+    /// Re-collapsing must surface the tag a member picked up while expanded.
+    #[test]
+    fn re_collapsing_reports_a_tag_made_while_expanded() {
+        let params = Params::new();
+        let items = [
+            item_at("a.raw", 0, 0),
+            item_at("b.raw", 0, 300_000_000),
+            item_at("c.raw", 0, 600_000_000),
+        ];
+        let mut view = build_incremental(&items, &params);
+        let key = *view.burst_map.keys().next().unwrap();
+
+        view.toggle_burst_expansion(key, &params.view());
+        assert_eq!(
+            tag_state_of(&view, "/src/a.raw", &["/src/b.raw"]),
+            TagState::Untagged,
+            "expanded: b carries its own tag"
+        );
+
+        view.toggle_burst_expansion(key, &params.view());
+        assert_eq!(
+            tag_state_of(&view, "/src/a.raw", &["/src/b.raw"]),
+            TagState::Partial,
+            "collapsed: the representative reports b's tag"
+        );
+    }
+
+    /// A filter that drops a burst member must drop it from the reported state
+    /// too — the badge may only speak for frames still in the working set.
+    #[test]
+    fn filtered_out_member_no_longer_counts_toward_the_state() {
+        let params = Params::new();
+        let mut items = [
+            item_at("a.raw", 0, 0),
+            item_at("b.raw", 0, 300_000_000),
+            item_at("c.raw", 0, 600_000_000),
+            item_at("d.raw", 0, 900_000_000),
+        ];
+        items[3].rating = -1;
+        let mut view = build_incremental(&items, &params);
+        assert_eq!(
+            tag_state_of(&view, "/src/a.raw", &["/src/d.raw"]),
+            TagState::Partial,
+            "d is a burst member while it is still shown"
+        );
+
+        let mut hidden = params.view();
+        hidden.hide_rejected = true;
+        view.rebuild(&hidden);
+        assert_eq!(
+            view.tag_state(
+                view.index_of(Path::new("/src/a.raw")).unwrap(),
+                &[view.index_of(Path::new("/src/d.raw")).unwrap()]
+                    .into_iter()
+                    .collect(),
+                true,
+                true,
+            ),
+            TagState::Untagged,
+            "the rejected member left the burst, so it no longer counts"
+        );
+    }
+
+    #[test]
+    fn tag_state_of_frame_is_never_partial() {
+        assert_eq!(TagState::of_frame(true), TagState::Tagged);
+        assert_eq!(TagState::of_frame(false), TagState::Untagged);
     }
 }

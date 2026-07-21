@@ -471,6 +471,23 @@ pub(crate) fn overlay_badge(_theme: &Theme) -> container::Style {
     }
 }
 
+/// Overlay badge ringed in `outline` — the hollow counterpart of
+/// [`overlay_badge`], for a mark that qualifies rather than asserts (partial
+/// tagging). Keeps the same warm-black fill so the glyph stays legible over
+/// any photograph; only the ring distinguishes it.
+pub(crate) fn outlined_badge(outline: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_theme| container::Style {
+        background: Some(colors::OVERLAY_BADGE.into()),
+        text_color: Some(colors::BADGE_TEXT),
+        border: Border {
+            radius: radius::SM.into(),
+            width: 1.5,
+            color: outline,
+        },
+        ..Default::default()
+    }
+}
+
 /// Rounded badge with custom dark background (rejected, preview icon). Text
 /// is the explicit badge ink — the fills stay dark in both themes.
 pub(crate) fn rounded_badge(bg: Color) -> impl Fn(&Theme) -> container::Style {

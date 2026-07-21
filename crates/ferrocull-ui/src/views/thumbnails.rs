@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
 };
 
@@ -19,6 +19,7 @@ use iced::{
 
 use super::rating::{StarEvent, star_rating_row};
 use crate::{
+    media_view::TagState,
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
     views::status,
@@ -424,7 +425,7 @@ struct BurstBadgeInfo {
 /// Visual interaction state for a thumbnail cell.
 #[derive(Clone, Copy)]
 struct CellState {
-    is_tagged: bool,
+    tag: TagState,
     is_hovered: bool,
     is_focused: bool,
 }
@@ -435,8 +436,11 @@ struct CellState {
 /// stay exactly what the un-virtualized grid produced (see [`row_starts`]).
 ///
 /// `sorted_view` holds pre-filtered, pre-sorted indices; cells borrow straight
-/// from `items` so no per-render clone of the item store is needed. The badge
-/// count is resolved from `burst_map`'s member-list length. Click always emits
+/// from `items` so no per-render clone of the item store is needed. `tag_state`
+/// answers what a cell's tag mark should say — the caller owns burst grouping
+/// and pair hiding, so this view never re-derives them, and the query runs for
+/// visible cells only. The badge count is resolved from `burst_map`'s
+/// member-list length. Click always emits
 /// `Event::CellClicked(path)`; the caller decides focus vs. selection based on
 /// modifier state. `window_scale` pins cell widths to whole physical pixels
 /// (see [`grid_metrics`]). `scroll_y`/`viewport_height` are the tracked scroll
@@ -449,7 +453,7 @@ struct CellState {
 pub(crate) fn thumbnail_grid<'a>(
     items: &'a [Item],
     sorted_view: &'a BTreeMap<SortKey, usize>,
-    selected: &'a BTreeSet<usize>,
+    tag_state: impl Fn(usize) -> TagState + 'a,
     loaded_thumbs: &'a HashMap<PathBuf, image::Handle>,
     burst_of: &'a HashMap<usize, DateTime<Utc>>,
     burst_map: &'a HashMap<DateTime<Utc>, Vec<usize>>,
@@ -503,7 +507,7 @@ pub(crate) fn thumbnail_grid<'a>(
             let is_hovered = hovered_thumbnail == Some(idx);
             let cell_hovered_star = if is_hovered { hovered_star } else { None };
             let state = CellState {
-                is_tagged: selected.contains(&idx),
+                tag: tag_state(idx),
                 is_hovered,
                 is_focused: focused_index == Some(idx),
             };
@@ -722,9 +726,11 @@ fn thumbnail_card(
     hovered_star: Option<i8>,
 ) -> Element<'static, CellEvent> {
     let palette = crate::theme::palette();
+    // The wash claims the whole card is tagged, so a partially tagged group
+    // does not get one — its outline badge carries the state alone.
     let card_bg = if item.rating == -1 {
         colors::REJECTED_BG
-    } else if state.is_tagged {
+    } else if state.tag == TagState::Tagged {
         crate::theme::tagged_wash()
     } else {
         palette.background.weak.color
@@ -784,7 +790,7 @@ fn cell_overlays(
     // Top-left status badges: rejected, tagged, and ingested share one row so
     // every applicable state stays visible. The ingested dim above is the
     // fast-scan cue; this pill is the guaranteed mark over any photo.
-    if let Some(badges) = status::badge_row(item, state.is_tagged, 10.0, spacing::XS) {
+    if let Some(badges) = status::badge_row(item, state.tag, 10.0, spacing::XS) {
         stack = stack.push(badges);
     }
 
