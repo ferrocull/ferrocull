@@ -97,12 +97,13 @@ pub struct CaptureTime {
     pub subsec_nanos: u32,
 }
 
-/// Capture settings read from EXIF at scan time: what the camera was set to.
+/// Capture settings read from EXIF at scan time: what the camera was set to,
+/// and which camera it was.
 ///
 /// Every field is optional — a stripped JPEG, a PNG, or a scan that fell back
 /// to mtime carries none of them, and a missing value is displayed as absent
 /// rather than guessed.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CaptureSettings {
     /// Shutter speed in seconds (`ExposureTime`).
     pub exposure_time: Option<f64>,
@@ -112,6 +113,10 @@ pub struct CaptureSettings {
     pub iso: Option<u32>,
     /// Focal length in millimetres (`FocalLength`).
     pub focal_length: Option<f64>,
+    /// Camera manufacturer (`Make`), as the camera reports it.
+    pub make: Option<String>,
+    /// Camera model (`Model`), as the camera reports it.
+    pub model: Option<String>,
 }
 
 /// Maximum gap in milliseconds between consecutive shots to be considered a burst.

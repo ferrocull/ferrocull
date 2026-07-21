@@ -178,9 +178,9 @@ fn parse_capture_time_from_exif(exif: &exif::Exif) -> Option<CaptureTime> {
     Some(CaptureTime::new(second, nanos))
 }
 
-/// Read the exposure and lens settings the compare-mode info strip displays.
-/// Each tag is independent: a file carrying only some of them yields the rest
-/// as `None`.
+/// Read the exposure and lens settings the compare-mode info strip displays,
+/// plus the camera identity the rename tokens use. Each tag is independent: a
+/// file carrying only some of them yields the rest as `None`.
 fn parse_capture_settings_from_exif(exif: &exif::Exif) -> CaptureSettings {
     // Both rational flavours are accepted: the spec says unsigned, but some
     // camera writers emit these tags as SRational.
@@ -202,7 +202,27 @@ fn parse_capture_settings_from_exif(exif: &exif::Exif) -> CaptureSettings {
             .get_field(exif::Tag::PhotographicSensitivity, exif::In::PRIMARY)
             .and_then(|field| field.value.get_uint(0)),
         focal_length: rational(exif::Tag::FocalLength),
+        make: ascii_field(exif, exif::Tag::Make),
+        model: ascii_field(exif, exif::Tag::Model),
     }
+}
+
+/// Read an ASCII EXIF tag as a clean string, or `None` when it carries nothing
+/// usable.
+fn ascii_field(exif: &exif::Exif, tag: exif::Tag) -> Option<String> {
+    let field = exif.get_field(tag, exif::In::PRIMARY)?;
+    let exif::Value::Ascii(ref values) = field.value else {
+        return None;
+    };
+    clean_ascii(&String::from_utf8_lossy(values.first()?))
+}
+
+/// Strip the padding firmware writes around ASCII tags (trailing spaces and
+/// NULs), rejecting what is left if it is empty or spans lines — a multi-line
+/// value would corrupt the line-per-field cache sidecar it is persisted in.
+fn clean_ascii(text: &str) -> Option<String> {
+    let trimmed = text.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+    (!trimmed.is_empty() && !trimmed.contains(['\n', '\r'])).then(|| trimmed.to_owned())
 }
 
 /// Encode an RGB image as JPEG bytes.
@@ -651,6 +671,37 @@ pub fn generate_raw_with_preread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_identity_keeps_its_spaces_and_case() {
+        assert_eq!(
+            clean_ascii("Canon EOS R5").as_deref(),
+            Some("Canon EOS R5"),
+            "the value renders as the camera reports it"
+        );
+    }
+
+    #[test]
+    fn camera_identity_is_stripped_of_firmware_padding() {
+        assert_eq!(
+            clean_ascii("NIKON CORPORATION  \0\0").as_deref(),
+            Some("NIKON CORPORATION")
+        );
+    }
+
+    #[test]
+    fn padding_only_camera_identity_is_absent() {
+        assert_eq!(clean_ascii("   \0").as_deref(), None);
+    }
+
+    #[test]
+    fn multiline_camera_identity_is_absent() {
+        assert_eq!(
+            clean_ascii("Canon\nEOS R5").as_deref(),
+            None,
+            "a newline would corrupt the line-per-field sidecar"
+        );
+    }
 
     /// A minimal SOF0 frame header (baseline, 8-bit, one component) carrying
     /// `width` x `height`. `displayable_dimensions` reads the dimensions from

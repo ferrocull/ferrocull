@@ -25,7 +25,7 @@ const ABSENT: &str = "\u{2014}";
     reason = "nanos to hundredths of a second, truncation is correct"
 )]
 pub(crate) fn readout(
-    settings: CaptureSettings,
+    settings: &CaptureSettings,
     capture_time: CaptureTime,
 ) -> [String; FIELD_COUNT] {
     let local = capture_time.second.with_timezone(&Local);
@@ -132,12 +132,13 @@ mod tests {
             aperture: Some(2.8),
             iso: Some(400),
             focal_length: Some(50.0),
+            ..CaptureSettings::default()
         }
     }
 
     #[test]
     fn renders_settings_in_photographic_notation() {
-        let values = readout(settings(), time());
+        let values = readout(&settings(), time());
         assert_eq!(values[0], "1/500", "shutter is a fraction");
         assert_eq!(values[1], "f/2.8", "aperture is an f-number");
         assert_eq!(values[2], "ISO 400");
@@ -147,7 +148,7 @@ mod tests {
     #[test]
     fn renders_whole_stops_without_a_trailing_zero() {
         let values = readout(
-            CaptureSettings {
+            &CaptureSettings {
                 aperture: Some(8.0),
                 focal_length: Some(135.0),
                 ..settings()
@@ -161,7 +162,7 @@ mod tests {
     #[test]
     fn renders_long_exposures_in_seconds() {
         let values = readout(
-            CaptureSettings {
+            &CaptureSettings {
                 exposure_time: Some(2.5),
                 ..settings()
             },
@@ -172,7 +173,7 @@ mod tests {
 
     #[test]
     fn renders_capture_time_with_subseconds() {
-        let values = readout(settings(), time());
+        let values = readout(&settings(), time());
         assert!(
             values[4].ends_with(":22.45"),
             "seconds and hundredths are shown: {}",
@@ -183,7 +184,7 @@ mod tests {
     #[test]
     fn malformed_exposure_time_renders_as_absent() {
         let values = readout(
-            CaptureSettings {
+            &CaptureSettings {
                 exposure_time: Some(0.0),
                 ..settings()
             },
@@ -194,7 +195,7 @@ mod tests {
 
     #[test]
     fn missing_values_render_as_dashes() {
-        let values = readout(CaptureSettings::default(), time());
+        let values = readout(&CaptureSettings::default(), time());
         assert_eq!(
             &values[..4],
             ["\u{2014}", "\u{2014}", "\u{2014}", "\u{2014}"],
@@ -204,15 +205,15 @@ mod tests {
 
     #[test]
     fn identical_frames_have_no_differing_fields() {
-        let values = readout(settings(), time());
+        let values = readout(&settings(), time());
         assert_eq!(differing(&values, &values), [false; 5]);
     }
 
     #[test]
     fn only_the_changed_field_differs() {
-        let select = readout(settings(), time());
+        let select = readout(&settings(), time());
         let candidate = readout(
-            CaptureSettings {
+            &CaptureSettings {
                 iso: Some(1600),
                 ..settings()
             },
@@ -227,9 +228,9 @@ mod tests {
 
     #[test]
     fn a_value_present_on_one_side_only_differs() {
-        let select = readout(settings(), time());
+        let select = readout(&settings(), time());
         let candidate = readout(
-            CaptureSettings {
+            &CaptureSettings {
                 focal_length: None,
                 ..settings()
             },
@@ -244,9 +245,9 @@ mod tests {
 
     #[test]
     fn apertures_that_render_alike_are_not_differences() {
-        let select = readout(settings(), time());
+        let select = readout(&settings(), time());
         let candidate = readout(
-            CaptureSettings {
+            &CaptureSettings {
                 aperture: Some(2.79),
                 ..settings()
             },
