@@ -544,31 +544,20 @@ impl MediaView {
     /// Prune `selected` and `focused` against the current visible set, reporting
     /// what was removed.
     ///
-    /// A selected item that is *invisible* is nonetheless kept when it is a
-    /// group member whose visible representative is still selected — a collapsed
-    /// burst's first member, or a hidden JPEG's RAW sibling — so a deliberate
-    /// selection of a whole pair or burst ingests together. Focus has no group
-    /// semantics, so it is pruned on plain visibility.
+    /// A selected item that is *invisible* is nonetheless kept when a visible
+    /// representative stands in for it on screen — a collapsed burst's first
+    /// member, or a hidden JPEG's owning RAW. Such an item is still in the
+    /// working set (expanding the burst brings it back), so collapsing a group
+    /// must not discard a tag made while it was expanded. Only items with no
+    /// visible representative — genuinely filtered out — are pruned. Focus has
+    /// no group semantics, so it is pruned on plain visibility.
     pub(crate) fn prune_hidden(
         &self,
         selected: &mut BTreeSet<usize>,
         focused: &mut Option<usize>,
     ) -> RebuildOutcome {
         let before = selected.len();
-        // The potential representatives are exactly the selected *visible* items
-        // (a representative is visible+selected by definition). A hidden member
-        // survives iff its representative is one of them.
-        let anchors: BTreeSet<usize> = selected
-            .iter()
-            .copied()
-            .filter(|&idx| self.is_visible(idx))
-            .collect();
-        selected.retain(|&idx| {
-            self.is_visible(idx)
-                || self
-                    .group_representative(idx)
-                    .is_some_and(|rep| anchors.contains(&rep))
-        });
+        selected.retain(|&idx| self.is_visible(idx) || self.has_visible_representative(idx));
         let selection_pruned = before - selected.len();
 
         let focused_lost = focused.is_some_and(|idx| !self.is_visible(idx));
@@ -580,14 +569,25 @@ impl MediaView {
         }
     }
 
-    /// The visible representative of a possibly-hidden group member: a collapsed
-    /// burst's first member, or a hidden JPEG's owning RAW. `None` if `idx` is
-    /// not a hidden group member.
+    /// The representative that stands in for `idx` on screen: its burst's first
+    /// member, or a hidden JPEG's owning RAW. `None` when `idx` represents
+    /// itself (not grouped, or the burst's own first member).
     fn group_representative(&self, idx: usize) -> Option<usize> {
         if let Some(key) = self.burst_of.get(&idx) {
-            return self.burst_map[key].first().copied();
+            return self.burst_map[key]
+                .first()
+                .copied()
+                .filter(|&rep| rep != idx);
         }
         self.hidden_jpeg_paths.get(&self.items[idx].path).copied()
+    }
+
+    /// Whether a visible item stands in for `idx` on screen, following the
+    /// representative chain: a hidden JPEG's owning RAW may itself be a hidden
+    /// member of a collapsed burst, represented by the burst's first member.
+    fn has_visible_representative(&self, idx: usize) -> bool {
+        self.group_representative(idx)
+            .is_some_and(|rep| self.is_visible(rep) || self.has_visible_representative(rep))
     }
 
     /// Admit a passing item into the view, maintaining bursts.
@@ -1244,10 +1244,11 @@ mod tests {
     }
 
     #[test]
-    fn prune_keeps_selected_hidden_group_members_of_visible_representative() {
-        // A deliberate selection of a whole collapsed burst / a RAW+JPEG pair
-        // must survive a prune — the hidden members ride along with their
-        // selected+visible representative.
+    fn prune_keeps_selected_hidden_group_members_with_visible_representative() {
+        // A selected hidden group member survives a prune whenever a visible
+        // item stands in for it on screen — whether or not that representative
+        // is itself selected. It is still in the working set (expanding the
+        // burst brings it back), so its tag must not be discarded.
         let params = Params::new();
         let mut raw = item_at("photo.raw", 5, 0);
         raw.jpeg_pair = Some(PathBuf::from("/src/photo.jpg"));
@@ -1279,14 +1280,65 @@ mod tests {
         );
         assert_eq!(selected, [raw_i, jpeg_i, b, c, d].into_iter().collect());
 
-        // Without the visible representative selected, the hidden members prune.
-        let mut orphaned: std::collections::BTreeSet<usize> = [jpeg_i, c, d].into_iter().collect();
-        let o2 = view.prune_hidden(&mut orphaned, &mut focused);
+        // Hidden members survive even when their representative is not
+        // selected — the representative merely has to be visible.
+        let mut lone: std::collections::BTreeSet<usize> = [jpeg_i, c, d].into_iter().collect();
+        let o2 = view.prune_hidden(&mut lone, &mut focused);
         assert_eq!(
-            o2.selection_pruned, 3,
-            "orphaned hidden members are dropped"
+            o2.selection_pruned, 0,
+            "hidden members with a visible representative are kept"
         );
-        assert!(orphaned.is_empty());
+        assert_eq!(lone, [jpeg_i, c, d].into_iter().collect());
+    }
+
+    #[test]
+    fn tag_on_expanded_burst_member_survives_collapse() {
+        // Regression: expand a burst, tag one member, collapse the burst —
+        // the tag must survive (only focus falls back to plain visibility).
+        let params = Params::new();
+        let items = [
+            item_at("b.raw", 100, 0),
+            item_at("c.raw", 100, 300_000_000),
+            item_at("d.raw", 100, 600_000_000),
+        ];
+        let mut view = build_incremental(&items, &params);
+        let c = view.index_of(Path::new("/src/c.raw")).unwrap();
+        let key = *view.burst_of.get(&c).unwrap();
+
+        view.set_burst_expansion(key, true, &params.view());
+        let mut selected: std::collections::BTreeSet<usize> = [c].into_iter().collect();
+        let mut focused = Some(c);
+        view.set_burst_expansion(key, false, &params.view());
+
+        let outcome = view.prune_hidden(&mut selected, &mut focused);
+        assert_eq!(outcome.selection_pruned, 0, "tag survives the collapse");
+        assert_eq!(selected, [c].into_iter().collect());
+        assert!(outcome.focused_lost, "focus falls back on plain visibility");
+        assert_eq!(focused, None);
+    }
+
+    #[test]
+    fn tag_on_hidden_jpeg_of_collapsed_burst_member_survives() {
+        // Representative chain: the hidden JPEG's owning RAW is itself a
+        // hidden member of a collapsed burst — the burst's visible first
+        // member stands in for both.
+        let params = Params::new();
+        let mut c = item_at("c.raw", 100, 300_000_000);
+        c.jpeg_pair = Some(PathBuf::from("/src/c.jpg"));
+        let items = [
+            item_at("b.raw", 100, 0),
+            c,
+            item_at("c.jpg", 100, 300_000_000),
+            item_at("d.raw", 100, 600_000_000),
+        ];
+        let view = build_incremental(&items, &params);
+        let jpeg = view.index_of(Path::new("/src/c.jpg")).unwrap();
+
+        let mut selected: std::collections::BTreeSet<usize> = [jpeg].into_iter().collect();
+        let mut focused = None;
+        let outcome = view.prune_hidden(&mut selected, &mut focused);
+        assert_eq!(outcome.selection_pruned, 0);
+        assert_eq!(selected, [jpeg].into_iter().collect());
     }
 
     #[test]
@@ -1369,23 +1421,27 @@ mod tests {
     }
 
     #[test]
-    fn prune_hidden_drops_invisible_selection_and_focus() {
-        let params = Params::new();
-        let items = [
+    fn prune_hidden_drops_filtered_out_selection_and_focus() {
+        // Items hidden by a filter (not by grouping) have no visible
+        // representative and are genuinely gone from the working set.
+        let mut params = Params::new();
+        let mut items = [
             item_at("a.raw", 0, 0),
             item_at("b.raw", 100, 0),
-            item_at("c.raw", 100, 300_000_000),
-            item_at("d.raw", 100, 600_000_000),
+            item_at("c.raw", 200, 0),
         ];
-        let view = build_incremental(&items, &params);
+        items[0].rating = 5;
+        let mut view = build_incremental(&items, &params);
+        params.ratings.insert(5);
+        view.rebuild(&params.view());
 
-        // a=0, b=1, c=2, d=3. b,c,d are a collapsed burst → only b shows.
-        let mut selected: std::collections::BTreeSet<usize> = [0, 2, 3].into_iter().collect();
-        let mut focused = Some(3usize);
+        // a=0 passes the rating filter; b=1 and c=2 are filtered out.
+        let mut selected: std::collections::BTreeSet<usize> = [0, 1, 2].into_iter().collect();
+        let mut focused = Some(2usize);
         let outcome = view.prune_hidden(&mut selected, &mut focused);
 
-        assert_eq!(outcome.selection_pruned, 2, "c and d were hidden");
-        assert!(outcome.focused_lost, "focused d was hidden");
+        assert_eq!(outcome.selection_pruned, 2, "b and c were filtered out");
+        assert!(outcome.focused_lost, "focused c was filtered out");
         assert_eq!(selected, [0].into_iter().collect());
         assert_eq!(focused, None);
     }
