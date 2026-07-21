@@ -9,6 +9,7 @@ use iced::{
 };
 
 use crate::{
+    media_view::TagState,
     styles,
     theme::{colors, spacing},
 };
@@ -18,6 +19,9 @@ use crate::{
 pub(crate) enum Mark {
     Rejected,
     Tagged,
+    /// Only part of what the thumbnail stands for is tagged — a collapsed
+    /// burst or a RAW whose hidden JPEG differs. Occupies the tagged slot.
+    PartiallyTagged,
     Ingested,
 }
 
@@ -27,13 +31,15 @@ pub(crate) enum Mark {
 /// the item. The three states are independent: ingest normally untags, but
 /// this must not assume it.
 #[must_use]
-pub(crate) fn marks(item: &Item, is_tagged: bool) -> Vec<Mark> {
+pub(crate) fn marks(item: &Item, tag: TagState) -> Vec<Mark> {
     let mut marks = Vec::with_capacity(3);
     if item.rating == -1 {
         marks.push(Mark::Rejected);
     }
-    if is_tagged {
-        marks.push(Mark::Tagged);
+    match tag {
+        TagState::Untagged => {}
+        TagState::Partial => marks.push(Mark::PartiallyTagged),
+        TagState::Tagged => marks.push(Mark::Tagged),
     }
     if item.is_ingested {
         marks.push(Mark::Ingested);
@@ -52,11 +58,11 @@ pub(crate) fn marks(item: &Item, is_tagged: bool) -> Vec<Mark> {
 #[must_use]
 pub(crate) fn badge_row<Message: 'static>(
     item: &Item,
-    is_tagged: bool,
+    tag: TagState,
     size: f32,
     inset: impl Into<iced::Padding>,
 ) -> Option<Element<'static, Message>> {
-    let marks = marks(item, is_tagged);
+    let marks = marks(item, tag);
     if marks.is_empty() {
         return None;
     }
@@ -87,6 +93,9 @@ const FULLSCREEN_SIZE: f32 = 18.0;
 /// anchors the marks to the viewport, so they stay put under zoom and pan;
 /// stacking over whatever `content` is means they draw over the loading
 /// spinner too, and state is legible before the pixels arrive.
+///
+/// The tag state is the frame's own — a full-screen view judges the photo in
+/// front of you, never a hidden group — so no partial mark can appear here.
 #[must_use]
 pub(crate) fn marked<Message: 'static>(
     content: Element<'static, Message>,
@@ -94,7 +103,7 @@ pub(crate) fn marked<Message: 'static>(
     is_tagged: bool,
     inset: impl Into<iced::Padding>,
 ) -> Element<'static, Message> {
-    match badge_row(item, is_tagged, FULLSCREEN_SIZE, inset) {
+    match badge_row(item, TagState::of_frame(is_tagged), FULLSCREEN_SIZE, inset) {
         Some(badges) => Stack::new()
             .width(Fill)
             .height(Fill)
@@ -119,6 +128,14 @@ fn pill<Message: 'static>(mark: Mark, size: f32) -> Element<'static, Message> {
             .padding([pad_y, size * 0.5])
             .style(styles::overlay_badge)
             .into(),
+        // Same check, outlined instead of solid: the amber ring says "some of
+        // this is tagged" without the solid badge's claim over the whole group.
+        // The card also withholds the tagged wash, which is the cue that reads
+        // first at thumbnail size.
+        Mark::PartiallyTagged => container(text("\u{2713}").size(size).color(colors::ACCENT))
+            .padding([pad_y, size * 0.5])
+            .style(styles::outlined_badge(colors::ACCENT))
+            .into(),
         Mark::Ingested => container(text("\u{2913}").size(size).color(colors::BADGE_INGESTED))
             .padding([pad_y, size * 0.5])
             .style(styles::overlay_badge)
@@ -136,7 +153,7 @@ mod tests {
         media::{CaptureTime, Item},
     };
 
-    use super::{Mark, marks};
+    use super::{Mark, TagState, marks};
 
     fn item(rating: i8, is_ingested: bool) -> Item {
         let second = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
@@ -158,28 +175,34 @@ mod tests {
 
     #[test]
     fn clean_frame_has_no_marks() {
-        assert!(marks(&item(0, false), false).is_empty());
+        assert!(marks(&item(0, false), TagState::Untagged).is_empty());
     }
 
     #[test]
     fn tagged_frame_has_the_tagged_mark_alone() {
-        assert_eq!(marks(&item(0, false), true), vec![Mark::Tagged]);
+        assert_eq!(marks(&item(0, false), TagState::Tagged), vec![Mark::Tagged]);
     }
 
     #[test]
     fn rejected_frame_has_the_rejected_mark_alone() {
-        assert_eq!(marks(&item(-1, false), false), vec![Mark::Rejected]);
+        assert_eq!(
+            marks(&item(-1, false), TagState::Untagged),
+            vec![Mark::Rejected]
+        );
     }
 
     #[test]
     fn ingested_frame_has_the_ingested_mark_alone() {
-        assert_eq!(marks(&item(0, true), false), vec![Mark::Ingested]);
+        assert_eq!(
+            marks(&item(0, true), TagState::Untagged),
+            vec![Mark::Ingested]
+        );
     }
 
     #[test]
     fn tagged_and_rejected_shows_both_rejected_first() {
         assert_eq!(
-            marks(&item(-1, false), true),
+            marks(&item(-1, false), TagState::Tagged),
             vec![Mark::Rejected, Mark::Tagged]
         );
     }
@@ -189,15 +212,28 @@ mod tests {
     #[test]
     fn tagged_and_ingested_shows_both() {
         assert_eq!(
-            marks(&item(0, true), true),
+            marks(&item(0, true), TagState::Tagged),
             vec![Mark::Tagged, Mark::Ingested]
+        );
+    }
+
+    #[test]
+    fn partially_tagged_frame_takes_the_tagged_slot() {
+        assert_eq!(
+            marks(&item(0, false), TagState::Partial),
+            vec![Mark::PartiallyTagged]
+        );
+        assert_eq!(
+            marks(&item(-1, true), TagState::Partial),
+            vec![Mark::Rejected, Mark::PartiallyTagged, Mark::Ingested],
+            "the partial mark sits where the tagged mark would"
         );
     }
 
     #[test]
     fn all_three_states_show_in_documented_order() {
         assert_eq!(
-            marks(&item(-1, true), true),
+            marks(&item(-1, true), TagState::Tagged),
             vec![Mark::Rejected, Mark::Tagged, Mark::Ingested]
         );
     }

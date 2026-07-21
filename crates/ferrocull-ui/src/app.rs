@@ -36,7 +36,7 @@ use iced::{
 use sipper::sipper;
 
 use crate::{
-    media_view::{MediaView, ViewParams},
+    media_view::{MediaView, TagState, ViewParams},
     messages::{
         Message, Panel, ScanEvent, Section, compare as compare_msg, destination as destination_msg,
         filters as filters_msg, grid as grid_msg, preview as preview_msg, settings as settings_msg,
@@ -514,6 +514,17 @@ impl Ferrocull {
     fn group_of(&self, idx: usize) -> Vec<usize> {
         self.media.group_of(
             idx,
+            self.config.view.group_bursts,
+            self.config.view.group_raw_jpeg,
+        )
+    }
+
+    /// Tag state of what a grid cell stands for, over the same group the tag
+    /// keystroke fans out to.
+    fn tag_state(&self, idx: usize) -> TagState {
+        self.media.tag_state(
+            idx,
+            &self.selected,
             self.config.view.group_bursts,
             self.config.view.group_raw_jpeg,
         )
@@ -1857,7 +1868,7 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
     views::thumbnail_grid(
         state.media.items(),
         state.media.sorted_view(),
-        &state.selected,
+        |idx| state.tag_state(idx),
         &state.loaded_thumbs,
         state.media.burst_of(),
         state.media.burst_map(),
