@@ -45,8 +45,6 @@ pub(crate) mod compare {
         ViewStateChanged(Pane, widgets::Event),
         /// Reset zoom to fit (Z key)
         ResetZoom,
-        /// Show or hide the info strip under both panes (I key)
-        ToggleInfoStrip,
     }
 }
 
@@ -355,6 +353,9 @@ pub(crate) enum Message {
     ToggleSection(Section),
     /// Toggle the keyboard-shortcut reference overlay (`?` / F1).
     ToggleShortcuts,
+    /// Show or hide the info strip (`I`). One flag backs compare and preview,
+    /// so the readout is on or off everywhere at once.
+    ToggleInfoStrip,
     TogglePanel(Panel),
     PanelResized(Panel, f32),
     PanelResizeEnd,

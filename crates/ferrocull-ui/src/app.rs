@@ -318,8 +318,9 @@ struct Ferrocull {
     left_panel_visible: bool,
     right_panel_visible: bool,
     panel_widths: PanelWidths,
-    /// Whether compare mode shows the info strip under each pane. Persisted, so
-    /// a photographer who culls with settings visible never re-opens it.
+    /// Whether compare mode and the preview show the info strip beneath the
+    /// photo. One flag for both views, persisted, so a photographer who culls
+    /// with settings visible never re-opens it.
     info_strip_open: bool,
     preview_cache: HashMap<PathBuf, iced::widget::image::Allocation>,
     /// In-flight preview requests, keyed by path and tagged with generation.
@@ -854,10 +855,8 @@ impl Ferrocull {
             'z' | 'Z' if in_compare => {
                 Task::done(Message::Compare(compare_msg::Message::ResetZoom))
             }
-            // I: Photo Mechanic's Info binding, here the compare info strip.
-            'i' | 'I' if in_compare => {
-                Task::done(Message::Compare(compare_msg::Message::ToggleInfoStrip))
-            }
+            // I: Photo Mechanic's Info binding, here the info strip.
+            'i' | 'I' if in_compare || in_preview => Task::done(Message::ToggleInfoStrip),
             'z' | 'Z' if in_preview => {
                 Task::done(Message::Preview(preview_msg::Message::ResetZoom))
             }
@@ -1128,6 +1127,11 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
             } else {
                 Some(Modal::Shortcuts)
             };
+            Task::none()
+        }
+        Message::ToggleInfoStrip => {
+            state.info_strip_open = !state.info_strip_open;
+            state.persist_settings();
             Task::none()
         }
         Message::TogglePanel(panel) => {
@@ -1669,9 +1673,15 @@ fn preview_overlay(state: &Ferrocull, p: &PreviewState) -> Element<'static, Mess
         item,
         state.selected.contains(&p.index),
     );
+    // Emphasis means "differs from the other frame", so with only one frame on
+    // screen every field stays in the muted tone.
+    let info = state.info_strip_open.then(|| {
+        let values = views::info::readout(&item.capture_settings, item.capture_time);
+        views::info::strip(&values, [false; views::info::FIELD_COUNT])
+    });
     let bottom = views::preview::bottom_bar(item_ctrl);
 
-    views::preview::compose(top, image, bottom)
+    views::preview::compose(top, image, info, bottom)
 }
 
 /// The Settings popup: a centered card (category rail + pane) over a dimmed
