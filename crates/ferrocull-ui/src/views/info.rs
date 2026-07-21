@@ -71,7 +71,7 @@ pub(crate) fn strip<Message: 'static>(
     let palette = crate::theme::palette();
     let fields = values.iter().zip(differing).map(|(value, differs)| {
         text(value.clone())
-            .size(10)
+            .size(12)
             .color(if differs {
                 palette.background.base.text
             } else {
