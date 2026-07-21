@@ -225,9 +225,10 @@ fn item_to_media_file(
             sequence.update(|s| s + 1);
             sequence.get()
         },
-        iso: None,
-        aperture: None,
-        shutter: None,
+        iso: item.capture_settings.iso,
+        aperture: item.capture_settings.aperture,
+        shutter: item.capture_settings.exposure_time,
+        focal_length: item.capture_settings.focal_length,
         job_code: (!job_code.is_empty()).then(|| job_code.to_owned()),
     };
     let rendered_dest = Some(pattern.render(&ctx));
