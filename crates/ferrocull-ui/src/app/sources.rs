@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use ferrocull_core::{
-    media::{CaptureTime, Item},
+    media::{CaptureSettings, CaptureTime, Item},
     xmp::Metadata,
 };
 use ferrocull_devices::{
@@ -231,6 +231,7 @@ impl Ferrocull {
         scanned: ScannedFile,
         canonical_path: &Path,
         capture_time: CaptureTime,
+        capture_settings: CaptureSettings,
         xmp_metadata: Option<&Metadata>,
     ) {
         let jpeg_pair = scanned
@@ -269,6 +270,7 @@ impl Ferrocull {
             size: scanned.size,
             media_type: scanned.media_type,
             capture_time,
+            capture_settings,
             is_ingested,
             jpeg_pair,
             paired: scanned.paired,

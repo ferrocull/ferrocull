@@ -115,6 +115,10 @@ pub(crate) fn top_bar(
 ///
 /// Each pane carries its own status marks, so both panes answer "which of
 /// these two is already in my selection?" regardless of which is active.
+///
+/// `info` is the pane's info-strip readout when the strip is open. It sits
+/// beneath the photo, inside the pane, so the mapping from value to frame holds
+/// in either layout and no chrome ever covers image pixels.
 pub(crate) fn image_pane(
     preview: Option<&iced::widget::image::Handle>,
     is_active: bool,
@@ -122,6 +126,7 @@ pub(crate) fn image_pane(
     label: &'static str,
     item: &Item,
     is_tagged: bool,
+    info: Option<Element<'static, PaneEvent>>,
 ) -> Element<'static, PaneEvent> {
     let palette = crate::theme::palette();
     let content: Element<'static, PaneEvent> = preview.map_or_else(
@@ -163,7 +168,10 @@ pub(crate) fn image_pane(
 
     let border_width = if is_active { 2.0 } else { 1.0 };
 
-    let pane_content = column![label, content].width(Fill).height(Fill);
+    let mut pane_content = column![label, content].width(Fill).height(Fill);
+    if let Some(info) = info {
+        pane_content = pane_content.push(info);
+    }
 
     container(pane_content)
         .width(Fill)

@@ -76,6 +76,10 @@ _Avoid_: Challenger, Other.
 The compare-mode action (`G` key) where the [[candidate]] beats the [[select]]: the candidate becomes the new select, and the next file in the list becomes the new candidate.
 _Avoid_: Choose, Pick.
 
+**Info strip**:
+A retractable readout in compare mode showing each frame's capture settings — shutter, aperture, ISO, focal length, and capture time — beneath its photo, with values that differ between the frames emphasized. Toggled with `I` (matching Photo Mechanic's Info binding); whether it is open is a remembered preference. Named "info" rather than "exposure" because capture time and focal length are not exposure data.
+_Avoid_: Exposure strip, EXIF panel, Metadata bar.
+
 ## Flagged ambiguities
 
 **"Select"**: in compare mode, a singular noun (the chosen photo). In grid context, "selection" is the _set_ of tagged files. Same root, two different cardinalities — be explicit when speaking outside the immediate context.

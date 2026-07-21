@@ -97,6 +97,23 @@ pub struct CaptureTime {
     pub subsec_nanos: u32,
 }
 
+/// Capture settings read from EXIF at scan time: what the camera was set to.
+///
+/// Every field is optional — a stripped JPEG, a PNG, or a scan that fell back
+/// to mtime carries none of them, and a missing value is displayed as absent
+/// rather than guessed.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CaptureSettings {
+    /// Shutter speed in seconds (`ExposureTime`).
+    pub exposure_time: Option<f64>,
+    /// Aperture as an f-number (`FNumber`).
+    pub aperture: Option<f64>,
+    /// Sensitivity (`PhotographicSensitivity`).
+    pub iso: Option<u32>,
+    /// Focal length in millimetres (`FocalLength`).
+    pub focal_length: Option<f64>,
+}
+
 /// Maximum gap in milliseconds between consecutive shots to be considered a burst.
 pub const BURST_THRESHOLD_MS: i64 = 1000;
 
@@ -158,6 +175,8 @@ pub struct Item {
     /// Media type determined at scan time (RAW, Photo, or Video).
     pub media_type: FileCategory,
     pub capture_time: CaptureTime,
+    /// Exposure and lens settings from EXIF, for the compare-mode info strip.
+    pub capture_settings: CaptureSettings,
     pub is_ingested: bool,
     /// For RAW files: path to paired JPEG (if exists). JPEGs never have this set.
     pub jpeg_pair: Option<PathBuf>,
@@ -359,7 +378,7 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
 
-    use super::{CaptureTime, FileCategory, FilterMode, Item};
+    use super::{CaptureSettings, CaptureTime, FileCategory, FilterMode, Item};
 
     fn item_of(media_type: FileCategory) -> Item {
         let second = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
@@ -369,6 +388,7 @@ mod tests {
             size: 0,
             media_type,
             capture_time: CaptureTime::new(second, 0),
+            capture_settings: CaptureSettings::default(),
             is_ingested: false,
             jpeg_pair: None,
             paired: Vec::new(),

@@ -150,7 +150,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use ferrocull_core::{
         FileCategory,
-        media::{CaptureTime, Item},
+        media::{CaptureSettings, CaptureTime, Item},
     };
 
     use super::{Mark, TagState, marks};
@@ -163,6 +163,7 @@ mod tests {
             size: 0,
             media_type: FileCategory::Raw,
             capture_time: CaptureTime::new(second, 0),
+            capture_settings: CaptureSettings::default(),
             is_ingested,
             jpeg_pair: None,
             paired: Vec::new(),
