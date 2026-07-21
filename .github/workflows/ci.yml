@@ -7,12 +7,23 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  LIBJPEG_TURBO_VERSION: 3.2.0
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # turbojpeg needs libturbojpeg >= 3.0; Ubuntu only packages 2.1.5, so
+      # install the upstream release, which lands outside the default
+      # pkg-config and linker search paths.
+      - name: Install libjpeg-turbo
+        run: |
+          deb="libjpeg-turbo-official_${LIBJPEG_TURBO_VERSION}_amd64.deb"
+          curl -fsSLO "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${LIBJPEG_TURBO_VERSION}/${deb}"
+          sudo dpkg -i "$deb"
+          echo "PKG_CONFIG_PATH=/opt/libjpeg-turbo/lib64/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/opt/libjpeg-turbo/lib64" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
