@@ -289,9 +289,11 @@ use iced::keyboard::{Key, Modifiers};
 /// batch.
 #[derive(Debug, Clone)]
 pub(crate) enum ScanEvent {
-    /// EXIF resolved; carries what item construction needs.
+    /// EXIF resolved; carries what item construction needs. `file` is boxed to
+    /// keep the enum near the size of its `ThumbnailCached` variant
+    /// (`clippy::large_enum_variant`): batches are mostly thumbnail events.
     ExifLoaded {
-        file: ScannedFile,
+        file: Box<ScannedFile>,
         canonical_path: PathBuf,
         capture_time: CaptureTime,
         capture_settings: CaptureSettings,
