@@ -12,8 +12,8 @@ use ferrocull_core::{
 use iced::{
     Color, ContentFit, Element, Fill, Shrink,
     widget::{
-        Space, Stack, button, center, column, container, grid, image, mouse_area, opaque,
-        responsive, scrollable, text,
+        Space, Stack, center, column, container, grid, image, mouse_area, opaque, responsive,
+        scrollable, text,
     },
 };
 
@@ -22,7 +22,7 @@ use crate::{
     media_view::TagState,
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
-    views::status,
+    views::{burst, status},
 };
 
 /// What happened inside a thumbnail card (no idx, no path — parent enriches).
@@ -911,11 +911,8 @@ fn rated_badge<Message: 'static>(rating: i8) -> Element<'static, Message> {
 
 /// Burst count badge positioned in top-right corner.
 fn burst_badge(count: usize, burst_key: DateTime<Utc>) -> Element<'static, CellEvent> {
-    // ▣ is a stacked-frames cue with text presentation (never emoji-colored).
-    let clickable_badge = button(text(format!("\u{25A3} {count}")).size(10))
-        .padding([2, 6])
-        .style(styles::burst_badge)
-        .on_press(CellEvent::BurstToggle(burst_key));
+    let clickable_badge =
+        burst::badge(burst::count_label(count), CellEvent::BurstToggle(burst_key));
 
     container(clickable_badge)
         .width(Fill)

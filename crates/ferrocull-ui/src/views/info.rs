@@ -62,11 +62,13 @@ pub(crate) fn differing(
     std::array::from_fn(|field| select[field] != candidate[field])
 }
 
-/// One frame's readout as a single centered line. Differing fields take the
-/// brighter body ink; equal ones stay in the muted secondary tone.
+/// One frame's readout as a single centered line, optionally led by a badge
+/// (the burst marker). Differing fields take the brighter body ink; equal ones
+/// stay in the muted secondary tone.
 pub(crate) fn strip<Message: 'static>(
     values: &[String; FIELD_COUNT],
     differing: [bool; FIELD_COUNT],
+    badge: Option<Element<'static, Message>>,
 ) -> Element<'static, Message> {
     let palette = crate::theme::palette();
     let fields = values.iter().zip(differing).map(|(value, differs)| {
@@ -81,7 +83,7 @@ pub(crate) fn strip<Message: 'static>(
     });
 
     container(
-        row(fields)
+        row(badge.into_iter().chain(fields))
             .spacing(spacing::MD)
             .align_y(Alignment::Center)
             .wrap(),

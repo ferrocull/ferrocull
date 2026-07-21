@@ -1,4 +1,5 @@
 pub(crate) mod backup;
+pub(crate) mod burst;
 pub(crate) mod compare;
 pub(crate) mod date_tree;
 pub(crate) mod delete;
