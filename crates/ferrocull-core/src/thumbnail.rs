@@ -22,7 +22,7 @@ use fast_image_resize::{PixelType, ResizeAlg, ResizeOptions, Resizer, images::Im
 use ferrocull_media::{FileCategory, categorize_extension};
 use image::{DynamicImage, ImageEncoder, ImageError, RgbImage};
 
-use crate::media::CaptureTime;
+use crate::media::{CaptureSettings, CaptureTime};
 
 /// Result of thumbnail generation: JPEG bytes and optional capture time from EXIF.
 #[derive(Debug, Clone)]
@@ -176,6 +176,31 @@ fn parse_capture_time_from_exif(exif: &exif::Exif) -> Option<CaptureTime> {
         .with_timezone(&chrono::Utc);
 
     Some(CaptureTime::new(second, nanos))
+}
+
+/// Read the exposure and lens settings the compare-mode info strip displays.
+/// Each tag is independent: a file carrying only some of them yields the rest
+/// as `None`.
+fn parse_capture_settings_from_exif(exif: &exif::Exif) -> CaptureSettings {
+    // Both rational flavours are accepted: the spec says unsigned, but some
+    // camera writers emit these tags as SRational.
+    let rational = |tag| {
+        exif.get_field(tag, exif::In::PRIMARY)
+            .and_then(|field| match field.value {
+                exif::Value::Rational(ref values) => values.first().map(exif::Rational::to_f64),
+                exif::Value::SRational(ref values) => values.first().map(exif::SRational::to_f64),
+                _ => None,
+            })
+    };
+
+    CaptureSettings {
+        exposure_time: rational(exif::Tag::ExposureTime),
+        aperture: rational(exif::Tag::FNumber),
+        iso: exif
+            .get_field(exif::Tag::PhotographicSensitivity, exif::In::PRIMARY)
+            .and_then(|field| field.value.get_uint(0)),
+        focal_length: rational(exif::Tag::FocalLength),
+    }
 }
 
 /// Encode an RGB image as JPEG bytes.
@@ -392,12 +417,19 @@ fn displayable_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// Parse EXIF capture time from file bytes (only reads header portion).
+/// Parse capture time and capture settings from file bytes (only reads the
+/// header portion). A file with no readable EXIF yields no time and empty
+/// settings; the caller decides how to fill the gap.
 #[must_use]
-pub fn parse_exif_from_bytes(data: &[u8]) -> Option<CaptureTime> {
+pub fn parse_exif_from_bytes(data: &[u8]) -> (Option<CaptureTime>, CaptureSettings) {
     let mut cursor = io::Cursor::new(data);
-    let exif = exif::Reader::new().read_from_container(&mut cursor).ok()?;
-    parse_capture_time_from_exif(&exif)
+    let Ok(exif) = exif::Reader::new().read_from_container(&mut cursor) else {
+        return (None, CaptureSettings::default());
+    };
+    (
+        parse_capture_time_from_exif(&exif),
+        parse_capture_settings_from_exif(&exif),
+    )
 }
 
 /// Generate thumbnail JPEG bytes from file bytes. Parses EXIF once for both

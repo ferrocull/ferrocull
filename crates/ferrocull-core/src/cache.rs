@@ -9,8 +9,8 @@
 //! content changes at the same path.
 //!
 //! Each thumbnail `{key}.jpg` is paired with a `{key}.meta` sidecar holding the
-//! item's [`CaptureTime`], so a cache hit recovers the capture time without
-//! re-reading the media body. A thumbnail whose sidecar is missing or
+//! item's [`CaptureTime`] and [`CaptureSettings`], so a cache hit recovers both
+//! without re-reading the media body. A thumbnail whose sidecar is missing or
 //! unparseable is treated as a miss. Previews carry no sidecar — they are pure
 //! JPEG bytes.
 
@@ -22,7 +22,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use twox_hash::XxHash3_128;
 
-use crate::media::CaptureTime;
+use crate::media::{CaptureSettings, CaptureTime};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -89,7 +89,8 @@ impl ThumbnailCache {
         Ok(())
     }
 
-    /// Loads a cached thumbnail: its JPEG bytes and persisted [`CaptureTime`].
+    /// Loads a cached thumbnail: its JPEG bytes and the capture metadata
+    /// persisted alongside it.
     ///
     /// A hit requires both the JPEG and a parseable `{key}.meta` sidecar. A
     /// missing JPEG, a missing sidecar, or an unparseable sidecar is a miss
@@ -98,30 +99,45 @@ impl ThumbnailCache {
     /// # Errors
     /// Returns `Error::Io` if a read fails for a reason other than the file
     /// being absent.
-    pub fn load(&self, key: &str) -> Result<Option<(Vec<u8>, CaptureTime)>, Error> {
+    pub fn load(&self, key: &str) -> Result<Option<Entry>, Error> {
         let Some(jpeg) = read_if_present(self.cache_dir.join(format!("{key}.jpg")))? else {
             tracing::trace!(?key, "Cache miss");
             return Ok(None);
         };
 
         let Some(meta) = read_if_present(self.cache_dir.join(format!("{key}.meta")))? else {
-            tracing::trace!(?key, "Cache miss: thumbnail without capture-time sidecar");
+            tracing::trace!(
+                ?key,
+                "Cache miss: thumbnail without capture-metadata sidecar"
+            );
             return Ok(None);
         };
 
-        let Some(capture_time) = String::from_utf8(meta).ok().and_then(|s| parse_meta(&s)) else {
-            tracing::trace!(?key, "Cache miss: unparseable capture-time sidecar");
+        let Some((capture_time, capture_settings)) =
+            String::from_utf8(meta).ok().and_then(|s| parse_meta(&s))
+        else {
+            tracing::trace!(?key, "Cache miss: unparseable capture-metadata sidecar");
             return Ok(None);
         };
         tracing::trace!(?key, "Cache hit");
-        Ok(Some((jpeg, capture_time)))
+        Ok(Some(Entry {
+            jpeg,
+            capture_time,
+            capture_settings,
+        }))
     }
 
-    /// Stores a thumbnail's JPEG bytes and capture time by content key.
+    /// Stores a thumbnail's JPEG bytes and capture metadata by content key.
     ///
     /// # Errors
     /// Returns `Error::Io` if writing fails.
-    pub fn put(&self, key: &str, jpeg: &[u8], capture_time: CaptureTime) -> Result<PathBuf, Error> {
+    pub fn put(
+        &self,
+        key: &str,
+        jpeg: &[u8],
+        capture_time: CaptureTime,
+        capture_settings: CaptureSettings,
+    ) -> Result<PathBuf, Error> {
         tracing::trace!(?key, "Saving to cache");
         let jpeg_path = write_entry(self.cache_dir.join(format!("{key}.jpg")), jpeg)?;
 
@@ -129,10 +145,18 @@ impl ThumbnailCache {
         // metadata-less thumbnail, which `load` reads back as a miss.
         write_entry(
             self.cache_dir.join(format!("{key}.meta")),
-            format_meta(capture_time).as_bytes(),
+            format_meta(capture_time, capture_settings).as_bytes(),
         )?;
         Ok(jpeg_path)
     }
+}
+
+/// A cached thumbnail with the capture metadata persisted beside it. Recovering
+/// both from cache is what lets a warm scan skip the media body entirely.
+pub struct Entry {
+    pub jpeg: Vec<u8>,
+    pub capture_time: CaptureTime,
+    pub capture_settings: CaptureSettings,
 }
 
 /// Disk cache for extracted full-screen preview JPEGs, in a namespace separate
@@ -226,27 +250,52 @@ fn write_entry(path: PathBuf, bytes: &[u8]) -> Result<PathBuf, Error> {
     }
 }
 
-/// Serializes a capture time for its `{key}.meta` sidecar: three integer lines
-/// (whole seconds, the timestamp's subsecond nanos, then the capture subsecond
-/// nanos) — a lossless round-trip of both [`CaptureTime`] fields.
-fn format_meta(capture_time: CaptureTime) -> String {
+/// Serializes capture time and settings for a `{key}.meta` sidecar, one value
+/// per line: whole seconds, the timestamp's subsecond nanos, the capture
+/// subsecond nanos, then exposure time, aperture, ISO, and focal length. An
+/// absent setting writes an empty line, so the line count is fixed.
+fn format_meta(capture_time: CaptureTime, settings: CaptureSettings) -> String {
+    fn optional<T: std::fmt::Display>(value: Option<T>) -> String {
+        value.map_or_else(String::new, |v| v.to_string())
+    }
+
     format!(
-        "{}\n{}\n{}\n",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
         capture_time.second.timestamp(),
         capture_time.second.timestamp_subsec_nanos(),
         capture_time.subsec_nanos,
+        optional(settings.exposure_time),
+        optional(settings.aperture),
+        optional(settings.iso),
+        optional(settings.focal_length),
     )
 }
 
-/// Parses a `{key}.meta` sidecar. Any malformed content reconstructs to `None`,
-/// which the caller treats as a cache miss.
-fn parse_meta(contents: &str) -> Option<CaptureTime> {
+/// Parses a `{key}.meta` sidecar. Any malformed content — including a sidecar
+/// written before the settings lines existed — reconstructs to `None`, which
+/// the caller treats as a cache miss.
+fn parse_meta(contents: &str) -> Option<(CaptureTime, CaptureSettings)> {
+    /// An empty line is an absent value; anything unparseable is an error, so a
+    /// corrupt sidecar reads as a miss instead of as missing settings.
+    fn optional<T: std::str::FromStr>(line: &str) -> Result<Option<T>, T::Err> {
+        if line.is_empty() {
+            return Ok(None);
+        }
+        line.parse().map(Some)
+    }
+
     let mut lines = contents.lines();
     let secs: i64 = lines.next()?.parse().ok()?;
     let timestamp_subsec_nanos: u32 = lines.next()?.parse().ok()?;
     let subsec_nanos: u32 = lines.next()?.parse().ok()?;
+    let settings = CaptureSettings {
+        exposure_time: optional(lines.next()?).ok()?,
+        aperture: optional(lines.next()?).ok()?,
+        iso: optional(lines.next()?).ok()?,
+        focal_length: optional(lines.next()?).ok()?,
+    };
     let second = DateTime::<Utc>::from_timestamp(secs, timestamp_subsec_nanos)?;
-    Some(CaptureTime::new(second, subsec_nanos))
+    Some((CaptureTime::new(second, subsec_nanos), settings))
 }
 
 /// Cache key from file path, size, and mtime.
@@ -390,7 +439,9 @@ mod tests {
             DateTime::<Utc>::from_timestamp(1, 0).expect("valid timestamp"),
             0,
         );
-        cache.put("key", b"jpeg", capture).expect("put");
+        cache
+            .put("key", b"jpeg", capture, CaptureSettings::default())
+            .expect("put");
         assert!(cache.load("key").expect("load").is_some(), "entry present");
 
         cache.clear().expect("clear");
@@ -400,7 +451,7 @@ mod tests {
         );
 
         cache
-            .put("key2", b"jpeg", capture)
+            .put("key2", b"jpeg", capture, CaptureSettings::default())
             .expect("put after clear");
         assert!(
             cache.load("key2").expect("load new").is_some(),
@@ -419,7 +470,9 @@ mod tests {
 
         let thumbs = ThumbnailCache::open_in_root(old.path()).expect("open thumbs");
         let previews = PreviewCache::open_in_root(old.path()).expect("open previews");
-        thumbs.put("t", b"thumb", capture).expect("put thumb");
+        thumbs
+            .put("t", b"thumb", capture, CaptureSettings::default())
+            .expect("put thumb");
         previews.put("p", b"preview").expect("put preview");
         drop((thumbs, previews));
 

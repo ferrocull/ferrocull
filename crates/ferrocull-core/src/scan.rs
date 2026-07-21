@@ -20,7 +20,7 @@ use ferrocull_media::FileCategory;
 
 use crate::{
     cache::{self, ThumbnailCache},
-    media::CaptureTime,
+    media::{CaptureSettings, CaptureTime},
     thumbnail::{generate_raw_with_preread, generate_thumbnail_from_bytes, parse_exif_from_bytes},
     xmp,
 };
@@ -41,15 +41,16 @@ pub trait Input {
 /// A file that fails to open or read its head is logged and dropped silently —
 /// no event is emitted for it.
 pub enum Event<T> {
-    /// Capture time (persisted from cache, EXIF, or mtime fallback) and XMP
-    /// sidecar are available; the input file is handed back for item
-    /// construction. `canonical_path` is the file's canonicalized path (or the
+    /// Capture time (persisted from cache, EXIF, or mtime fallback), capture
+    /// settings, and XMP sidecar are available; the input file is handed back
+    /// for item construction. `canonical_path` is the file's canonicalized path (or the
     /// raw path when canonicalization fails), resolved here so the caller does
     /// not repeat that I/O on its update loop.
     ExifLoaded {
         file: T,
         canonical_path: PathBuf,
         capture_time: CaptureTime,
+        capture_settings: CaptureSettings,
         xmp: Option<xmp::Metadata>,
     },
     /// The thumbnail is cached (freshly generated or already present), or its
@@ -91,6 +92,7 @@ struct ReadFile {
     data: Vec<u8>,
     handle: File,
     capture_time: CaptureTime,
+    capture_settings: CaptureSettings,
     key: Option<String>,
 }
 
@@ -174,16 +176,17 @@ where
         }
     };
 
-    // Cache hit: the thumbnail and its persisted capture time are both
+    // Cache hit: the thumbnail and its persisted capture metadata are all
     // present, so we skip every read of the media body.
     if let Some(ref k) = key
         && let Some(c) = cache
-        && let Ok(Some((_, capture_time))) = c.load(k)
+        && let Ok(Some(entry)) = c.load(k)
     {
         on_event(Event::ExifLoaded {
             file,
             canonical_path,
-            capture_time,
+            capture_time: entry.capture_time,
+            capture_settings: entry.capture_settings,
             xmp,
         });
         on_event(Event::ThumbnailReady {
@@ -202,7 +205,8 @@ where
     };
 
     // Fall back to file modification time if EXIF carries no date.
-    let capture_time = parse_exif_from_bytes(&data).unwrap_or_else(|| {
+    let (exif_time, capture_settings) = parse_exif_from_bytes(&data);
+    let capture_time = exif_time.unwrap_or_else(|| {
         let mtime = handle
             .metadata()
             .expect("file already opened")
@@ -215,6 +219,7 @@ where
         file,
         canonical_path,
         capture_time,
+        capture_settings,
         xmp,
     });
 
@@ -237,6 +242,7 @@ where
         data,
         handle,
         capture_time,
+        capture_settings,
         key,
     })
 }
@@ -257,6 +263,7 @@ fn decode_stage<T, F>(
         data,
         mut handle,
         capture_time,
+        capture_settings,
         key,
     } = read;
 
@@ -273,7 +280,11 @@ fn decode_stage<T, F>(
         && let Some(ref k) = key
         && let Some(c) = cache
     {
-        drop(c.put(k, img, capture_time));
+        // A failed cache write only costs a regeneration next scan, so the
+        // file's own pipeline carries on.
+        if let Err(e) = c.put(k, img, capture_time, capture_settings) {
+            tracing::warn!(path = %path.display(), error = %e, "caching thumbnail failed");
+        }
     }
 
     on_event(Event::ThumbnailReady {
@@ -308,26 +319,114 @@ mod tests {
 
     /// A recorded event, flattened so it can be collected without the generic payload.
     enum Rec {
-        Exif(CaptureTime),
+        Exif(CaptureTime, CaptureSettings),
         Thumbnail(Result<(), String>),
     }
 
-    /// Encode a solid-color JPEG (no EXIF, so capture time falls back to mtime).
-    fn write_jpeg(path: &Path) {
+    /// Solid-color JPEG bytes, without any EXIF segment.
+    fn jpeg_bytes() -> Vec<u8> {
         let img = image::RgbImage::from_pixel(64, 48, image::Rgb([120, 90, 60]));
         let dynamic = image::DynamicImage::ImageRgb8(img);
         let mut buf = Vec::new();
         dynamic
             .write_to(&mut io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
             .expect("encode test jpeg");
-        std::fs::write(path, &buf).expect("write test jpeg");
+        buf
+    }
+
+    /// Encode a solid-color JPEG (no EXIF, so capture time falls back to mtime).
+    fn write_jpeg(path: &Path) {
+        std::fs::write(path, jpeg_bytes()).expect("write test jpeg");
+    }
+
+    /// The settings baked into [`write_jpeg_with_exif`]: 1/500s at f/2.8,
+    /// ISO 400, 50mm.
+    const FIXTURE_SETTINGS: CaptureSettings = CaptureSettings {
+        exposure_time: Some(1.0 / 500.0),
+        aperture: Some(2.8),
+        iso: Some(400),
+        focal_length: Some(50.0),
+    };
+
+    /// Encode a solid-color JPEG carrying an EXIF APP1 segment with
+    /// [`FIXTURE_SETTINGS`] and a `DateTimeOriginal` of 2024:05:01 10:14:22.
+    ///
+    /// Hand-built rather than written with an EXIF writer: the scan must read
+    /// the same byte layout a camera emits, and one fixture is cheaper than a
+    /// dependency.
+    fn write_jpeg_with_exif(path: &Path) {
+        let jpeg = jpeg_bytes();
+        let mut out = Vec::with_capacity(jpeg.len() + 256);
+        out.extend_from_slice(&jpeg[..2]); // SOI
+        out.extend_from_slice(&app1_exif());
+        out.extend_from_slice(&jpeg[2..]);
+        std::fs::write(path, &out).expect("write test jpeg");
+    }
+
+    /// An `APP1` segment holding a big-endian TIFF block: IFD0 pointing at an
+    /// Exif sub-IFD with the five fields the info strip reads.
+    fn app1_exif() -> Vec<u8> {
+        /// Byte offset of the Exif sub-IFD from the TIFF header start: 8-byte
+        /// header, then IFD0 (one entry).
+        const EXIF_IFD: u32 = 8 + 2 + 12 + 4;
+        /// Byte offset of the value area, after the Exif sub-IFD's six entries.
+        const VALUES: u32 = EXIF_IFD + 2 + 12 * 6 + 4;
+
+        let mut tiff = vec![0x4D, 0x4D, 0x00, 0x2A];
+        tiff.extend_from_slice(&8u32.to_be_bytes());
+
+        let entry = |tag: u16, format: u16, count: u32, value: [u8; 4], out: &mut Vec<u8>| {
+            out.extend_from_slice(&tag.to_be_bytes());
+            out.extend_from_slice(&format.to_be_bytes());
+            out.extend_from_slice(&count.to_be_bytes());
+            out.extend_from_slice(&value);
+        };
+
+        // IFD0: nothing but the Exif sub-IFD pointer.
+        tiff.extend_from_slice(&1u16.to_be_bytes());
+        entry(0x8769, 4, 1, EXIF_IFD.to_be_bytes(), &mut tiff);
+        tiff.extend_from_slice(&0u32.to_be_bytes());
+
+        // Exif sub-IFD, entries in ascending tag order as the spec requires.
+        tiff.extend_from_slice(&6u16.to_be_bytes());
+        entry(0x829A, 5, 1, VALUES.to_be_bytes(), &mut tiff); // ExposureTime
+        entry(0x829D, 5, 1, (VALUES + 8).to_be_bytes(), &mut tiff); // FNumber
+        entry(0x8827, 3, 1, [0x01, 0x90, 0, 0], &mut tiff); // ISO 400, inline
+        entry(0x9003, 2, 20, (VALUES + 16).to_be_bytes(), &mut tiff); // DateTimeOriginal
+        entry(0x920A, 5, 1, (VALUES + 36).to_be_bytes(), &mut tiff); // FocalLength
+        entry(0x9291, 2, 3, [b'4', b'5', 0, 0], &mut tiff); // SubSecTimeOriginal, inline
+        tiff.extend_from_slice(&0u32.to_be_bytes());
+
+        let rational = |num: u32, den: u32, out: &mut Vec<u8>| {
+            out.extend_from_slice(&num.to_be_bytes());
+            out.extend_from_slice(&den.to_be_bytes());
+        };
+        rational(1, 500, &mut tiff);
+        rational(28, 10, &mut tiff);
+        tiff.extend_from_slice(b"2024:05:01 10:14:22\0");
+        rational(50, 1, &mut tiff);
+
+        let mut app1 = vec![0xFF, 0xE1];
+        let payload_len = 2 + 6 + tiff.len();
+        app1.extend_from_slice(
+            &u16::try_from(payload_len)
+                .expect("exif segment fits a jpeg marker")
+                .to_be_bytes(),
+        );
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(&tiff);
+        app1
     }
 
     fn scan_recording(files: Vec<TestFile>, cache: Option<&ThumbnailCache>) -> Vec<Rec> {
         let recorded = Mutex::new(Vec::new());
         run(files, 256, cache, |event| {
             let rec = match event {
-                Event::ExifLoaded { capture_time, .. } => Rec::Exif(capture_time),
+                Event::ExifLoaded {
+                    capture_time,
+                    capture_settings,
+                    ..
+                } => Rec::Exif(capture_time, capture_settings),
                 Event::ThumbnailReady { result, .. } => Rec::Thumbnail(result),
             };
             recorded.lock().expect("lock recorder").push(rec);
@@ -344,7 +443,7 @@ mod tests {
         let recs = scan_recording(vec![TestFile { path }], None);
 
         assert_eq!(recs.len(), 2, "one exif and one thumbnail event");
-        assert!(matches!(recs[0], Rec::Exif(_)), "exif comes first");
+        assert!(matches!(recs[0], Rec::Exif(..)), "exif comes first");
         assert!(
             matches!(recs[1], Rec::Thumbnail(Ok(()))),
             "thumbnail comes second and succeeds"
@@ -365,7 +464,7 @@ mod tests {
 
         let recs = scan_recording(vec![TestFile { path }], None);
 
-        let Rec::Exif(capture_time) = &recs[0] else {
+        let Rec::Exif(capture_time, _) = &recs[0] else {
             panic!("first event is exif");
         };
         assert_eq!(
@@ -416,12 +515,83 @@ mod tests {
 
         // The second run recovers capture time from the persisted sidecar,
         // never reading the now-corrupt body.
-        let (Rec::Exif(first_time), Rec::Exif(second_time)) = (&first[0], &second[0]) else {
+        let (Rec::Exif(first_time, _), Rec::Exif(second_time, _)) = (&first[0], &second[0]) else {
             panic!("each run emits exif first");
         };
         assert_eq!(
             first_time, second_time,
             "capture time is recovered from cache metadata, matching the first run"
+        );
+    }
+
+    #[test]
+    fn reads_capture_settings_from_exif() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("shot.jpg");
+        write_jpeg_with_exif(&path);
+
+        let recs = scan_recording(vec![TestFile { path }], None);
+
+        let Rec::Exif(capture_time, settings) = &recs[0] else {
+            panic!("first event is exif");
+        };
+        assert_eq!(settings, &FIXTURE_SETTINGS, "every setting is parsed");
+        assert_eq!(
+            capture_time.subsec_nanos, 450_000_000,
+            "subseconds come from SubSecTimeOriginal"
+        );
+    }
+
+    #[test]
+    fn capture_settings_are_absent_without_exif() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("shot.jpg");
+        write_jpeg(&path);
+
+        let recs = scan_recording(vec![TestFile { path }], None);
+
+        let Rec::Exif(_, settings) = &recs[0] else {
+            panic!("first event is exif");
+        };
+        assert_eq!(
+            settings,
+            &CaptureSettings::default(),
+            "a file with no EXIF carries no settings"
+        );
+    }
+
+    #[test]
+    fn cache_hit_recovers_capture_settings() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let cache = ThumbnailCache::open_at(dir.path().join("cache")).expect("open cache");
+
+        let path = dir.path().join("shot.jpg");
+        write_jpeg_with_exif(&path);
+        let stat = std::fs::metadata(&path).expect("stat test jpeg");
+        let mtime = stat.modified().expect("mtime available");
+
+        drop(scan_recording(
+            vec![TestFile { path: path.clone() }],
+            Some(&cache),
+        ));
+
+        // Blank the body while preserving length + mtime: the second run's
+        // settings can only come from the cache sidecar.
+        let corrupt = vec![0u8; usize::try_from(stat.len()).expect("length fits usize")];
+        std::fs::write(&path, &corrupt).expect("overwrite pixels");
+        File::open(&path)
+            .expect("reopen for mtime")
+            .set_modified(mtime)
+            .expect("restore mtime");
+
+        let second = scan_recording(vec![TestFile { path }], Some(&cache));
+
+        let Rec::Exif(_, settings) = &second[0] else {
+            panic!("second run emits exif first");
+        };
+        assert_eq!(
+            settings, &FIXTURE_SETTINGS,
+            "warm scan resurfaces the settings without reading the body"
         );
     }
 }

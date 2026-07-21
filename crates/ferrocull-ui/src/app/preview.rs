@@ -154,8 +154,8 @@ impl Ferrocull {
         Task::perform(
             tokio::task::spawn_blocking(move || {
                 let key = cache_key_from_disk(&path).ok()?;
-                let (jpeg, _capture_time) = cache.load(&key).ok()??;
-                let handle = decode_thumbnail(&jpeg, &path)?;
+                let entry = cache.load(&key).ok()??;
+                let handle = decode_thumbnail(&entry.jpeg, &path)?;
                 Some((path, handle))
             }),
             |r| {
