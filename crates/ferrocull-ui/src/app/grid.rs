@@ -626,8 +626,10 @@ impl Ferrocull {
                 focus_after,
             },
         });
-        self.focused_index
-            .map_or_else(Task::none, |focused| self.scroll_focus_into_view(focused))
+        // Reveal the toggled burst, not the focused card: a badge click does
+        // not move focus, so the stored focus can sit far off-screen and
+        // revealing it would yank the viewport there.
+        self.scroll_focus_into_view(self.media.burst_map()[&key][0])
     }
 
     /// Ctrl+Z: revert the most recent recorded mutation, moving it onto the redo
