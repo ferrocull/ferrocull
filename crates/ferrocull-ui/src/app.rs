@@ -1605,9 +1605,11 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
     // Both readouts are rendered together so each pane can emphasize exactly
     // the fields that differ from the other frame.
     let (select_info, candidate_info) = if state.info_strip_open {
-        let select = views::info::readout(select_item.capture_settings, select_item.capture_time);
-        let candidate =
-            views::info::readout(candidate_item.capture_settings, candidate_item.capture_time);
+        let select = views::info::readout(&select_item.capture_settings, select_item.capture_time);
+        let candidate = views::info::readout(
+            &candidate_item.capture_settings,
+            candidate_item.capture_time,
+        );
         let differing = views::info::differing(&select, &candidate);
         (
             Some(views::info::strip(&select, differing)),

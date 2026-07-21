@@ -219,7 +219,7 @@ where
         file,
         canonical_path,
         capture_time,
-        capture_settings,
+        capture_settings: capture_settings.clone(),
         xmp,
     });
 
@@ -282,7 +282,7 @@ fn decode_stage<T, F>(
     {
         // A failed cache write only costs a regeneration next scan, so the
         // file's own pipeline carries on.
-        if let Err(e) = c.put(k, img, capture_time, capture_settings) {
+        if let Err(e) = c.put(k, img, capture_time, &capture_settings) {
             tracing::warn!(path = %path.display(), error = %e, "caching thumbnail failed");
         }
     }
@@ -340,16 +340,26 @@ mod tests {
     }
 
     /// The settings baked into [`write_jpeg_with_exif`]: 1/500s at f/2.8,
-    /// ISO 400, 50mm.
-    const FIXTURE_SETTINGS: CaptureSettings = CaptureSettings {
-        exposure_time: Some(1.0 / 500.0),
-        aperture: Some(2.8),
-        iso: Some(400),
-        focal_length: Some(50.0),
-    };
+    /// ISO 400, 50mm, on a Canon EOS R5 — the camera identity stripped of the
+    /// padding the fixture writes it with.
+    fn fixture_settings() -> CaptureSettings {
+        CaptureSettings {
+            exposure_time: Some(1.0 / 500.0),
+            aperture: Some(2.8),
+            iso: Some(400),
+            focal_length: Some(50.0),
+            make: Some(String::from("Canon")),
+            model: Some(String::from("Canon EOS R5")),
+        }
+    }
+
+    /// Camera identity as firmware pads it: trailing spaces before the
+    /// terminating NUL.
+    const FIXTURE_MAKE: &[u8] = b"Canon  \0";
+    const FIXTURE_MODEL: &[u8] = b"Canon EOS R5 \0";
 
     /// Encode a solid-color JPEG carrying an EXIF APP1 segment with
-    /// [`FIXTURE_SETTINGS`] and a `DateTimeOriginal` of 2024:05:01 10:14:22.
+    /// [`fixture_settings`] and a `DateTimeOriginal` of 2024:05:01 10:14:22.
     ///
     /// Hand-built rather than written with an EXIF writer: the scan must read
     /// the same byte layout a camera emits, and one fixture is cheaper than a
@@ -363,14 +373,22 @@ mod tests {
         std::fs::write(path, &out).expect("write test jpeg");
     }
 
-    /// An `APP1` segment holding a big-endian TIFF block: IFD0 pointing at an
-    /// Exif sub-IFD with the five fields the info strip reads.
+    /// An `APP1` segment holding a big-endian TIFF block: IFD0 carrying the
+    /// camera identity and a pointer to an Exif sub-IFD with the fields the
+    /// info strip reads.
     fn app1_exif() -> Vec<u8> {
         /// Byte offset of the Exif sub-IFD from the TIFF header start: 8-byte
-        /// header, then IFD0 (one entry).
-        const EXIF_IFD: u32 = 8 + 2 + 12 + 4;
+        /// header, then IFD0 (three entries).
+        const EXIF_IFD: u32 = 8 + 2 + 12 * 3 + 4;
         /// Byte offset of the value area, after the Exif sub-IFD's six entries.
         const VALUES: u32 = EXIF_IFD + 2 + 12 * 6 + 4;
+        /// Offset of the `Make` string, past the Exif sub-IFD's own values:
+        /// two rationals, a 20-byte timestamp, and a third rational.
+        const MAKE: u32 = VALUES + 8 + 8 + 20 + 8;
+
+        let ascii_count =
+            |bytes: &[u8]| u32::try_from(bytes.len()).expect("fixture string length fits u32");
+        let model_offset = MAKE + ascii_count(FIXTURE_MAKE);
 
         let mut tiff = vec![0x4D, 0x4D, 0x00, 0x2A];
         tiff.extend_from_slice(&8u32.to_be_bytes());
@@ -382,8 +400,22 @@ mod tests {
             out.extend_from_slice(&value);
         };
 
-        // IFD0: nothing but the Exif sub-IFD pointer.
-        tiff.extend_from_slice(&1u16.to_be_bytes());
+        // IFD0: the camera identity, then the Exif sub-IFD pointer.
+        tiff.extend_from_slice(&3u16.to_be_bytes());
+        entry(
+            0x010F,
+            2,
+            ascii_count(FIXTURE_MAKE),
+            MAKE.to_be_bytes(),
+            &mut tiff,
+        );
+        entry(
+            0x0110,
+            2,
+            ascii_count(FIXTURE_MODEL),
+            model_offset.to_be_bytes(),
+            &mut tiff,
+        );
         entry(0x8769, 4, 1, EXIF_IFD.to_be_bytes(), &mut tiff);
         tiff.extend_from_slice(&0u32.to_be_bytes());
 
@@ -405,6 +437,8 @@ mod tests {
         rational(28, 10, &mut tiff);
         tiff.extend_from_slice(b"2024:05:01 10:14:22\0");
         rational(50, 1, &mut tiff);
+        tiff.extend_from_slice(FIXTURE_MAKE);
+        tiff.extend_from_slice(FIXTURE_MODEL);
 
         let mut app1 = vec![0xFF, 0xE1];
         let payload_len = 2 + 6 + tiff.len();
@@ -535,7 +569,7 @@ mod tests {
         let Rec::Exif(capture_time, settings) = &recs[0] else {
             panic!("first event is exif");
         };
-        assert_eq!(settings, &FIXTURE_SETTINGS, "every setting is parsed");
+        assert_eq!(settings, &fixture_settings(), "every setting is parsed");
         assert_eq!(
             capture_time.subsec_nanos, 450_000_000,
             "subseconds come from SubSecTimeOriginal"
@@ -590,7 +624,8 @@ mod tests {
             panic!("second run emits exif first");
         };
         assert_eq!(
-            settings, &FIXTURE_SETTINGS,
+            settings,
+            &fixture_settings(),
             "warm scan resurfaces the settings without reading the body"
         );
     }

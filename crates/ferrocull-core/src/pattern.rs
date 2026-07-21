@@ -290,6 +290,27 @@ mod tests {
     }
 
     #[test]
+    fn camera_tokens_render_as_the_camera_reports_them() {
+        let mut ctx = context();
+        ctx.camera_make = Some(String::from("Canon"));
+        ctx.camera_model = Some(String::from("Canon EOS R5"));
+        assert_eq!(
+            render("{camera_make}/{camera_model}/{filename}.{ext}", &ctx),
+            "Canon/Canon EOS R5/IMG_1234.cr3",
+            "spaces and case survive: they are legal in path components"
+        );
+    }
+
+    #[test]
+    fn camera_tokens_render_empty_without_exif() {
+        assert_eq!(
+            render("{camera_make}{camera_model}{filename}", &context()),
+            "IMG_1234",
+            "an absent camera identity contributes nothing"
+        );
+    }
+
+    #[test]
     fn exposure_tokens_render_capture_settings() {
         assert_eq!(
             render("{iso}_{aperture}_{shutter}_{focal}", &context()),
