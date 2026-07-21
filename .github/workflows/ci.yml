@@ -8,12 +8,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
   LIBJPEG_TURBO_VERSION: 3.2.0
+  LIBJPEG_TURBO_SHA256: 21297da4a4eb34ebefc54afca5d8dd86c0fdd6a9dfe49b1b962c5d1eeeafd8ec
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libgphoto2-dev
       # turbojpeg needs libturbojpeg >= 3.0; Ubuntu only packages 2.1.5, so
       # install the upstream release, which lands outside the default
       # pkg-config and linker search paths.
@@ -21,6 +26,7 @@ jobs:
         run: |
           deb="libjpeg-turbo-official_${LIBJPEG_TURBO_VERSION}_amd64.deb"
           curl -fsSLO "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${LIBJPEG_TURBO_VERSION}/${deb}"
+          echo "${LIBJPEG_TURBO_SHA256}  ${deb}" | sha256sum --check --strict
           sudo dpkg -i "$deb"
           echo "PKG_CONFIG_PATH=/opt/libjpeg-turbo/lib64/pkgconfig" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=/opt/libjpeg-turbo/lib64" >> "$GITHUB_ENV"
