@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// The app's persisted working settings, restored at startup and written on change.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
     pub ingest: IngestConfig,
@@ -32,6 +32,25 @@ pub struct AppSettings {
     pub saved_patterns: Vec<String>,
     /// User-adjusted sidebar panel widths, restored on startup.
     pub panel_widths: PanelWidths,
+    /// Whether compare mode's info strip is open.
+    pub info_strip_open: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            ingest: IngestConfig::default(),
+            post_ingest_hooks: Vec::new(),
+            delete_after_ingest: false,
+            preferences: Preferences::default(),
+            view: ViewPrefs::default(),
+            saved_patterns: Vec::new(),
+            panel_widths: PanelWidths::default(),
+            // Open by default: capture settings are part of the comparison,
+            // not an occasional lookup.
+            info_strip_open: true,
+        }
+    }
 }
 
 /// Theme preference. `Auto` follows the OS dark-mode setting; `Dark`/`Light`

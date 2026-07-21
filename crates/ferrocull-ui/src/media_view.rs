@@ -884,7 +884,7 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use ferrocull_core::{
         FileCategory,
-        media::{CaptureTime, FilterMode, Item, SortOrder},
+        media::{CaptureSettings, CaptureTime, FilterMode, Item, SortOrder},
     };
 
     use super::{MediaView, TagState, ViewParams};
@@ -903,6 +903,7 @@ mod tests {
             size: 0,
             media_type: FileCategory::Raw,
             capture_time: CaptureTime::new(second, subsec_nanos),
+            capture_settings: CaptureSettings::default(),
             is_ingested: false,
             jpeg_pair: None,
             paired: Vec::new(),

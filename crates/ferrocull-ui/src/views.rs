@@ -5,6 +5,7 @@ pub(crate) mod delete;
 pub(crate) mod destination;
 pub(crate) mod filters;
 pub(crate) mod hooks;
+pub(crate) mod info;
 pub(crate) mod jobcode;
 pub(crate) mod preview;
 pub(crate) mod profiles;

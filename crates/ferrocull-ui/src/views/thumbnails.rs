@@ -1332,7 +1332,7 @@ mod tests {
         use chrono::{TimeZone, Utc};
         use ferrocull_core::{
             FileCategory,
-            media::{CaptureTime, Item},
+            media::{CaptureSettings, CaptureTime, Item},
         };
 
         // 24h apart at the same UTC time-of-day → distinct Local dates in any
@@ -1346,6 +1346,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2024, 1, day, 12, 0, 0).unwrap(),
                 0,
             ),
+            capture_settings: CaptureSettings::default(),
             is_ingested: false,
             jpeg_pair: None,
             paired: Vec::new(),

@@ -45,6 +45,8 @@ pub(crate) mod compare {
         ViewStateChanged(Pane, widgets::Event),
         /// Reset zoom to fit (Z key)
         ResetZoom,
+        /// Show or hide the info strip under both panes (I key)
+        ToggleInfoStrip,
     }
 }
 
@@ -276,7 +278,10 @@ pub(crate) mod settings {
 
 use std::path::PathBuf;
 
-use ferrocull_core::{media::CaptureTime, xmp::Metadata};
+use ferrocull_core::{
+    media::{CaptureSettings, CaptureTime},
+    xmp::Metadata,
+};
 use ferrocull_devices::ScannedFile;
 use iced::keyboard::{Key, Modifiers};
 
@@ -286,9 +291,14 @@ use iced::keyboard::{Key, Modifiers};
 /// batch.
 #[derive(Debug, Clone)]
 pub(crate) enum ScanEvent {
-    /// EXIF/capture time resolved; carries the scanned file, its canonical path,
-    /// capture time, and XMP sidecar for item construction.
-    ExifLoaded(ScannedFile, PathBuf, CaptureTime, Option<Metadata>),
+    /// EXIF resolved; carries what item construction needs.
+    ExifLoaded {
+        file: ScannedFile,
+        canonical_path: PathBuf,
+        capture_time: CaptureTime,
+        capture_settings: CaptureSettings,
+        xmp: Option<Metadata>,
+    },
     /// The file's thumbnail is on disk (freshly generated or a cache hit), or
     /// generation failed.
     ThumbnailCached(PathBuf, Result<(), String>),

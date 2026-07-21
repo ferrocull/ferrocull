@@ -318,6 +318,9 @@ struct Ferrocull {
     left_panel_visible: bool,
     right_panel_visible: bool,
     panel_widths: PanelWidths,
+    /// Whether compare mode shows the info strip under each pane. Persisted, so
+    /// a photographer who culls with settings visible never re-opens it.
+    info_strip_open: bool,
     preview_cache: HashMap<PathBuf, iced::widget::image::Allocation>,
     /// In-flight preview requests, keyed by path and tagged with generation.
     preview_loading: HashMap<PathBuf, u64>,
@@ -460,6 +463,7 @@ impl Default for Ferrocull {
             left_panel_visible: true,
             right_panel_visible: true,
             panel_widths: settings.panel_widths,
+            info_strip_open: settings.info_strip_open,
             preview_cache: HashMap::new(),
             preview_loading: HashMap::new(),
             preview_generation: 0,
@@ -572,6 +576,7 @@ impl Ferrocull {
             view: self.config.view,
             saved_patterns: self.saved_patterns.clone(),
             panel_widths: self.panel_widths,
+            info_strip_open: self.info_strip_open,
         };
         self.metadata.set_settings(&settings);
     }
@@ -849,6 +854,10 @@ impl Ferrocull {
             'z' | 'Z' if in_compare => {
                 Task::done(Message::Compare(compare_msg::Message::ResetZoom))
             }
+            // I: Photo Mechanic's Info binding, here the compare info strip.
+            'i' | 'I' if in_compare => {
+                Task::done(Message::Compare(compare_msg::Message::ToggleInfoStrip))
+            }
             'z' | 'Z' if in_preview => {
                 Task::done(Message::Preview(preview_msg::Message::ResetZoom))
             }
@@ -985,8 +994,15 @@ fn spawn_thumbnail_sipper(
                         file,
                         canonical_path,
                         capture_time,
+                        capture_settings,
                         xmp,
-                    } => ScanEvent::ExifLoaded(file.0, canonical_path, capture_time, xmp),
+                    } => ScanEvent::ExifLoaded {
+                        file: file.0,
+                        canonical_path,
+                        capture_time,
+                        capture_settings,
+                        xmp,
+                    },
                     scan::Event::ThumbnailReady { path, result } => {
                         ScanEvent::ThumbnailCached(path, result)
                     }
@@ -1146,8 +1162,20 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
         Message::ScanBatch(events) => {
             for event in events {
                 match event {
-                    ScanEvent::ExifLoaded(scanned, canonical_path, time, xmp) => {
-                        state.handle_exif_loaded(scanned, &canonical_path, time, xmp.as_ref());
+                    ScanEvent::ExifLoaded {
+                        file,
+                        canonical_path,
+                        capture_time,
+                        capture_settings,
+                        xmp,
+                    } => {
+                        state.handle_exif_loaded(
+                            file,
+                            &canonical_path,
+                            capture_time,
+                            capture_settings,
+                            xmp.as_ref(),
+                        );
                     }
                     ScanEvent::ThumbnailCached(_path, _result) => {
                         state.handle_thumbnail_cached();
@@ -1491,6 +1519,7 @@ fn shortcuts_overlay() -> Element<'static, Message> {
             shortcut_row(&["O"], "Exit compare"),
             shortcut_row(&["L"], "Lock synced zoom/pan"),
             shortcut_row(&["Z"], "Reset zoom"),
+            shortcut_row(&["I"], "Show / hide the info strip"),
             shortcut_row(&["Tab"], "Switch active pane"),
         ],
     );
@@ -1573,6 +1602,21 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
         active_pane,
         cmp.lock_scroll,
     );
+    // Both readouts are rendered together so each pane can emphasize exactly
+    // the fields that differ from the other frame.
+    let (select_info, candidate_info) = if state.info_strip_open {
+        let select = views::info::readout(select_item.capture_settings, select_item.capture_time);
+        let candidate =
+            views::info::readout(candidate_item.capture_settings, candidate_item.capture_time);
+        let differing = views::info::differing(&select, &candidate);
+        (
+            Some(views::info::strip(&select, differing)),
+            Some(views::info::strip(&candidate, differing)),
+        )
+    } else {
+        (None, None)
+    };
+
     let select_pane = views::compare::image_pane(
         state
             .preview_cache
@@ -1583,6 +1627,7 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
         "SELECT",
         select_item,
         state.selected.contains(&cmp.select_index),
+        select_info,
     );
     let candidate_pane = views::compare::image_pane(
         state
@@ -1594,6 +1639,7 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
         "CANDIDATE",
         candidate_item,
         state.selected.contains(&cmp.candidate_index),
+        candidate_info,
     );
     let bottom = views::compare::bottom_bar(cmp.layout, item_ctrl);
 
