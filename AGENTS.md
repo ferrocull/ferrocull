@@ -54,6 +54,7 @@ Rust **nightly** (pinned via `rust-toolchain.toml`), edition 2024 — nightly fe
 
 - **`Result<T, E>` over `Option<T>` when absence is an error condition** — `None` carries no context.
 - **Typed error enums (`thiserror`), not raw strings** — model domain errors as types the caller can match on.
+- **`anyhow` only in the binary crate** — library crates (`ferrocull-core`, `ferrocull-media`, `ferrocull-devices`, `ferrocull-ui`) expose typed `thiserror` enums; the `ferrocull` binary may use `anyhow` for top-level error reporting where nothing matches on variants.
 - **Wrap I/O errors with context** — attach the file path; a bare "Permission denied" without it is undebuggable.
 - **Never silently swallow errors** — no bare `let _ =` on fallible operations; justify any ignored result with a comment.
 - **No `print!`/`println!`/`dbg!` in app code** — log via `tracing` instead.
