@@ -136,7 +136,7 @@ impl ThumbnailCache {
         key: &str,
         jpeg: &[u8],
         capture_time: CaptureTime,
-        capture_settings: CaptureSettings,
+        capture_settings: &CaptureSettings,
     ) -> Result<PathBuf, Error> {
         tracing::trace!(?key, "Saving to cache");
         let jpeg_path = write_entry(self.cache_dir.join(format!("{key}.jpg")), jpeg)?;
@@ -252,15 +252,17 @@ fn write_entry(path: PathBuf, bytes: &[u8]) -> Result<PathBuf, Error> {
 
 /// Serializes capture time and settings for a `{key}.meta` sidecar, one value
 /// per line: whole seconds, the timestamp's subsecond nanos, the capture
-/// subsecond nanos, then exposure time, aperture, ISO, and focal length. An
-/// absent setting writes an empty line, so the line count is fixed.
-fn format_meta(capture_time: CaptureTime, settings: CaptureSettings) -> String {
+/// subsecond nanos, then exposure time, aperture, ISO, focal length, camera
+/// make, and camera model. An absent setting writes an empty line, so the line
+/// count is fixed. Make and model are single-line by construction (the EXIF
+/// parse drops any value spanning lines), so they cannot shift the layout.
+fn format_meta(capture_time: CaptureTime, settings: &CaptureSettings) -> String {
     fn optional<T: std::fmt::Display>(value: Option<T>) -> String {
         value.map_or_else(String::new, |v| v.to_string())
     }
 
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
         capture_time.second.timestamp(),
         capture_time.second.timestamp_subsec_nanos(),
         capture_time.subsec_nanos,
@@ -268,6 +270,8 @@ fn format_meta(capture_time: CaptureTime, settings: CaptureSettings) -> String {
         optional(settings.aperture),
         optional(settings.iso),
         optional(settings.focal_length),
+        optional(settings.make.as_deref()),
+        optional(settings.model.as_deref()),
     )
 }
 
@@ -284,6 +288,11 @@ fn parse_meta(contents: &str) -> Option<(CaptureTime, CaptureSettings)> {
         line.parse().map(Some)
     }
 
+    /// A string field: empty line means absent, anything else is the value.
+    fn text(line: &str) -> Option<String> {
+        (!line.is_empty()).then(|| line.to_owned())
+    }
+
     let mut lines = contents.lines();
     let secs: i64 = lines.next()?.parse().ok()?;
     let timestamp_subsec_nanos: u32 = lines.next()?.parse().ok()?;
@@ -293,6 +302,8 @@ fn parse_meta(contents: &str) -> Option<(CaptureTime, CaptureSettings)> {
         aperture: optional(lines.next()?).ok()?,
         iso: optional(lines.next()?).ok()?,
         focal_length: optional(lines.next()?).ok()?,
+        make: text(lines.next()?),
+        model: text(lines.next()?),
     };
     let second = DateTime::<Utc>::from_timestamp(secs, timestamp_subsec_nanos)?;
     Some((CaptureTime::new(second, subsec_nanos), settings))
@@ -406,6 +417,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sidecar_round_trips_capture_settings() {
+        let capture = CaptureTime::new(
+            DateTime::<Utc>::from_timestamp(1_714_558_462, 0).expect("valid timestamp"),
+            450_000_000,
+        );
+        let settings = CaptureSettings {
+            exposure_time: Some(1.0 / 500.0),
+            aperture: Some(2.8),
+            iso: Some(400),
+            focal_length: Some(50.0),
+            make: Some(String::from("Canon")),
+            model: Some(String::from("Canon EOS R5")),
+        };
+
+        let parsed = parse_meta(&format_meta(capture, &settings)).expect("sidecar parses");
+        assert_eq!(parsed, (capture, settings));
+    }
+
+    #[test]
+    fn sidecar_round_trips_settings_that_are_all_absent() {
+        let capture = CaptureTime::new(
+            DateTime::<Utc>::from_timestamp(1_714_558_462, 0).expect("valid timestamp"),
+            0,
+        );
+        let settings = CaptureSettings::default();
+
+        let parsed = parse_meta(&format_meta(capture, &settings)).expect("sidecar parses");
+        assert_eq!(parsed, (capture, settings));
+    }
+
+    #[test]
     fn preview_cache_round_trips_without_sidecar() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let cache = PreviewCache::open_at(dir.path().join("previews")).expect("open preview cache");
@@ -440,7 +482,7 @@ mod tests {
             0,
         );
         cache
-            .put("key", b"jpeg", capture, CaptureSettings::default())
+            .put("key", b"jpeg", capture, &CaptureSettings::default())
             .expect("put");
         assert!(cache.load("key").expect("load").is_some(), "entry present");
 
@@ -451,7 +493,7 @@ mod tests {
         );
 
         cache
-            .put("key2", b"jpeg", capture, CaptureSettings::default())
+            .put("key2", b"jpeg", capture, &CaptureSettings::default())
             .expect("put after clear");
         assert!(
             cache.load("key2").expect("load new").is_some(),
@@ -471,7 +513,7 @@ mod tests {
         let thumbs = ThumbnailCache::open_in_root(old.path()).expect("open thumbs");
         let previews = PreviewCache::open_in_root(old.path()).expect("open previews");
         thumbs
-            .put("t", b"thumb", capture, CaptureSettings::default())
+            .put("t", b"thumb", capture, &CaptureSettings::default())
             .expect("put thumb");
         previews.put("p", b"preview").expect("put preview");
         drop((thumbs, previews));

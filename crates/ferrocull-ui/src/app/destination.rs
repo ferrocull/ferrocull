@@ -219,8 +219,8 @@ fn item_to_media_file(
         datetime: item.capture_time.second,
         filename: stem,
         extension: ext,
-        camera_make: None,
-        camera_model: None,
+        camera_make: item.capture_settings.make.clone(),
+        camera_model: item.capture_settings.model.clone(),
         sequence: {
             sequence.update(|s| s + 1);
             sequence.get()
@@ -434,5 +434,65 @@ impl Ferrocull {
             self.backup_destinations.push(path);
             self.persist_settings();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use ferrocull_core::media::{CaptureSettings, CaptureTime};
+
+    use super::{Cell, FileCategory, Item, PathBuf, Pattern, item_to_media_file};
+
+    fn item(capture_settings: CaptureSettings) -> Item {
+        let second = Utc
+            .with_ymd_and_hms(2024, 5, 1, 10, 14, 22)
+            .single()
+            .expect("unambiguous test timestamp");
+        Item {
+            path: PathBuf::from("/cards/A/IMG_1234.CR3"),
+            source_id: "IMG_1234.CR3".to_owned(),
+            size: 0,
+            media_type: FileCategory::Raw,
+            capture_time: CaptureTime::new(second, 0),
+            capture_settings,
+            is_ingested: false,
+            jpeg_pair: None,
+            paired: Vec::new(),
+            sidecars: Vec::new(),
+            xmp_sidecar: None,
+            rating: 0,
+            color_label: None,
+        }
+    }
+
+    fn rendered_dest(capture_settings: CaptureSettings) -> String {
+        let pattern = Pattern::parse("{camera_make}/{camera_model}/{filename}.{ext}")
+            .expect("test pattern parses");
+        item_to_media_file(
+            &item(capture_settings),
+            &pattern,
+            &pattern,
+            &Cell::new(0),
+            "",
+        )
+        .rendered_dest
+        .expect("every rendered file carries a destination")
+    }
+
+    #[test]
+    fn camera_tokens_resolve_from_the_scanned_item() {
+        let dest = rendered_dest(CaptureSettings {
+            make: Some(String::from("Canon")),
+            model: Some(String::from("Canon EOS R5")),
+            ..CaptureSettings::default()
+        });
+        assert_eq!(dest, "Canon/Canon EOS R5/IMG_1234.cr3");
+    }
+
+    #[test]
+    fn a_file_without_camera_tags_still_renders_a_destination() {
+        let dest = rendered_dest(CaptureSettings::default());
+        assert_eq!(dest, "//IMG_1234.cr3", "both tokens render empty");
     }
 }
