@@ -426,4 +426,23 @@ mod tests {
         assert_eq!(loaded.panel_widths.left, 320.0);
         assert_eq!(loaded.panel_widths.right, 180.0);
     }
+
+    #[test]
+    fn info_strip_preference_roundtrips() {
+        let mut store = store();
+        assert!(
+            store.settings().info_strip_open,
+            "the strip starts open in both compare and the preview"
+        );
+
+        store.set_settings(&AppSettings {
+            info_strip_open: false,
+            ..AppSettings::default()
+        });
+
+        assert!(
+            !store.settings().info_strip_open,
+            "closing the strip is persisted, not session-local"
+        );
+    }
 }

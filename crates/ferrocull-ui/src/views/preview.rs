@@ -123,9 +123,14 @@ pub(crate) fn bottom_bar(item_controls: Element<'static, Message>) -> Element<'s
 }
 
 /// Assembles the full preview overlay from pre-built sub-elements.
+///
+/// `info` is the info-strip readout when the strip is open. It sits between the
+/// image and the bottom bar, so it never covers image pixels and the bottom bar
+/// keeps its single job of carrying the item controls.
 pub(crate) fn compose(
     top: Element<'static, Message>,
     image: Element<'static, Message>,
+    info: Option<Element<'static, Message>>,
     bottom: Element<'static, Message>,
 ) -> Element<'static, Message> {
     let content = column![
@@ -135,8 +140,9 @@ pub(crate) fn compose(
             .height(Fill)
             .center_x(Fill)
             .center_y(Fill),
-        bottom,
-    ];
+    ]
+    .extend(info)
+    .push(bottom);
 
     container(content)
         .width(Fill)

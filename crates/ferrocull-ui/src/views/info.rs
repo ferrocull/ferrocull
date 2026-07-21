@@ -1,7 +1,8 @@
 //! The info strip: a frame's capture settings, rendered as one quiet line.
 //!
-//! Formatting and diffing are pure and kept apart from the compare layout, so a
-//! future loupe readout reads the same values the same way.
+//! Formatting and diffing are pure and kept apart from the view layouts, so
+//! compare mode and the preview read the same values the same way. Diffing is
+//! compare-only: emphasis means "differs from the other frame".
 
 use chrono::Local;
 use ferrocull_core::media::{CaptureSettings, CaptureTime};
@@ -61,7 +62,7 @@ pub(crate) fn differing(
     std::array::from_fn(|field| select[field] != candidate[field])
 }
 
-/// One pane's readout as a single centered line. Differing fields take the
+/// One frame's readout as a single centered line. Differing fields take the
 /// brighter body ink; equal ones stay in the muted secondary tone.
 pub(crate) fn strip<Message: 'static>(
     values: &[String; FIELD_COUNT],
@@ -70,7 +71,7 @@ pub(crate) fn strip<Message: 'static>(
     let palette = crate::theme::palette();
     let fields = values.iter().zip(differing).map(|(value, differs)| {
         text(value.clone())
-            .size(10)
+            .size(12)
             .color(if differs {
                 palette.background.base.text
             } else {

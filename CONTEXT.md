@@ -77,7 +77,7 @@ The compare-mode action (`G` key) where the [[candidate]] beats the [[select]]: 
 _Avoid_: Choose, Pick.
 
 **Info strip**:
-A retractable readout in compare mode showing each frame's capture settings — shutter, aperture, ISO, focal length, and capture time — beneath its photo, with values that differ between the frames emphasized. Toggled with `I` (matching Photo Mechanic's Info binding); whether it is open is a remembered preference. Named "info" rather than "exposure" because capture time and focal length are not exposure data.
+A retractable readout showing a frame's capture settings — shutter, aperture, ISO, focal length, and capture time — beneath its photo, in both compare mode and the preview. Toggled with `I` (matching Photo Mechanic's Info binding); whether it is open is a single remembered preference shared across views. In compare mode, values that differ between the two frames are emphasized; the preview shows plain values. Absent values render as an em-dash so the strip never reflows or hides itself per file. Named "info" rather than "exposure" because capture time and focal length are not exposure data.
 _Avoid_: Exposure strip, EXIF panel, Metadata bar.
 
 ## Flagged ambiguities

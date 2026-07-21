@@ -32,7 +32,7 @@ pub struct AppSettings {
     pub saved_patterns: Vec<String>,
     /// User-adjusted sidebar panel widths, restored on startup.
     pub panel_widths: PanelWidths,
-    /// Whether compare mode's info strip is open.
+    /// Whether the info strip is open. One flag for compare and the preview.
     pub info_strip_open: bool,
 }
 
@@ -46,7 +46,7 @@ impl Default for AppSettings {
             view: ViewPrefs::default(),
             saved_patterns: Vec::new(),
             panel_widths: PanelWidths::default(),
-            // Open by default: capture settings are part of the comparison,
+            // Open by default: capture settings are part of judging a frame,
             // not an occasional lookup.
             info_strip_open: true,
         }
