@@ -996,7 +996,7 @@ fn spawn_thumbnail_sipper(
                         capture_settings,
                         xmp,
                     } => ScanEvent::ExifLoaded {
-                        file: file.0,
+                        file: Box::new(file.0),
                         canonical_path,
                         capture_time,
                         capture_settings,
@@ -1174,7 +1174,7 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
                         xmp,
                     } => {
                         state.handle_exif_loaded(
-                            file,
+                            *file,
                             &canonical_path,
                             capture_time,
                             capture_settings,
