@@ -82,11 +82,6 @@ pub(super) fn update(state: &mut Ferrocull, msg: compare::Message) -> Task<Messa
             }
             Task::none()
         }
-        compare::Message::ToggleInfoStrip => {
-            state.info_strip_open = !state.info_strip_open;
-            state.persist_settings();
-            Task::none()
-        }
         compare::Message::ResetZoom => {
             if let ViewMode::Compare(ref mut cmp) = state.view_mode {
                 match (cmp.lock_scroll, cmp.active_pane) {
