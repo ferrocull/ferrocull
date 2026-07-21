@@ -194,7 +194,9 @@ fn parse_capture_settings_from_exif(exif: &exif::Exif) -> CaptureSettings {
     };
 
     CaptureSettings {
-        exposure_time: rational(exif::Tag::ExposureTime),
+        // A zero or negative exposure time is malformed EXIF: it divides into
+        // an infinite shutter fraction downstream, so it never leaves the parse.
+        exposure_time: rational(exif::Tag::ExposureTime).filter(|seconds| *seconds > 0.0),
         aperture: rational(exif::Tag::FNumber),
         iso: exif
             .get_field(exif::Tag::PhotographicSensitivity, exif::In::PRIMARY)

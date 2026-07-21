@@ -27,7 +27,7 @@ const BUILTIN_PRESETS: &[&str] = &[
 const PICKER_STRIP_WIDTH: f32 = 28.0;
 
 /// One-line reference of every token the pattern engine understands.
-const TOKEN_REFERENCE: &str = "{YYYY} {MM} {DD} {HH} {MIN} {SS} {filename} {ext} {EXT} {seq} {camera_make} {camera_model} {jobcode} {iso} {aperture} {shutter}";
+const TOKEN_REFERENCE: &str = "{YYYY} {MM} {DD} {HH} {MIN} {SS} {filename} {ext} {EXT} {seq} {camera_make} {camera_model} {jobcode} {iso} {aperture} {shutter} {focal}";
 
 fn sample_context(today: NaiveDate) -> RenderContext {
     RenderContext {
@@ -37,9 +37,10 @@ fn sample_context(today: NaiveDate) -> RenderContext {
         camera_make: Some(String::from("Canon")),
         camera_model: Some(String::from("EOS R5")),
         sequence: 1,
-        iso: None,
-        aperture: None,
-        shutter: None,
+        iso: Some(400),
+        aperture: Some(2.8),
+        shutter: Some(1.0 / 500.0),
+        focal_length: Some(50.0),
         job_code: None,
     }
 }

@@ -25,6 +25,7 @@ enum VariableName {
     Iso,
     Aperture,
     Shutter,
+    FocalLength,
     JobCode,
 }
 
@@ -46,6 +47,7 @@ impl VariableName {
             "iso" => Some(Self::Iso),
             "aperture" => Some(Self::Aperture),
             "shutter" => Some(Self::Shutter),
+            "focal" => Some(Self::FocalLength),
             "jobcode" => Some(Self::JobCode),
             _ => None,
         }
@@ -85,8 +87,12 @@ pub struct RenderContext {
     pub camera_model: Option<String>,
     pub sequence: u32,
     pub iso: Option<u32>,
+    /// Aperture as an f-number.
     pub aperture: Option<f64>,
-    pub shutter: Option<String>,
+    /// Shutter speed in seconds.
+    pub shutter: Option<f64>,
+    /// Focal length in millimetres.
+    pub focal_length: Option<f64>,
     pub job_code: Option<String>,
 }
 
@@ -221,7 +227,122 @@ fn resolve_variable(name: VariableName, ctx: &RenderContext) -> Cow<'_, str> {
         VariableName::Aperture => ctx
             .aperture
             .map_or(Cow::Borrowed(""), |v| Cow::Owned(format!("{v:.1}"))),
-        VariableName::Shutter => Cow::Borrowed(ctx.shutter.as_deref().unwrap_or("")),
+        VariableName::Shutter => ctx
+            .shutter
+            .map_or(Cow::Borrowed(""), |v| Cow::Owned(format_shutter(v))),
+        VariableName::FocalLength => ctx.focal_length.map_or(Cow::Borrowed(""), |v| {
+            Cow::Owned(format!("{}mm", decimal(v)))
+        }),
         VariableName::JobCode => Cow::Borrowed(ctx.job_code.as_deref().unwrap_or("")),
+    }
+}
+
+/// Shutter speed as a filename-safe fraction: `1/500` would open a directory
+/// level, so the divider is a hyphen. A second or longer reads as a decimal.
+fn format_shutter(seconds: f64) -> String {
+    if seconds >= 1.0 {
+        return format!("{}s", decimal(seconds));
+    }
+    let denominator = 1.0 / seconds;
+    // The third-stop marks just under a second (1/1.6, 1/1.3) round to a whole
+    // denominator that names a different exposure entirely.
+    if denominator < 10.0 {
+        return format!("1-{}", decimal(denominator));
+    }
+    format!("1-{denominator:.0}")
+}
+
+/// One decimal place with a trailing `.0` dropped: `2.5`, `30`, `50`.
+fn decimal(value: f64) -> String {
+    let text = format!("{value:.1}");
+    text.strip_suffix(".0").unwrap_or(&text).to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+
+    use super::{Pattern, RenderContext};
+
+    fn context() -> RenderContext {
+        RenderContext {
+            datetime: Utc
+                .with_ymd_and_hms(2024, 5, 1, 10, 14, 22)
+                .single()
+                .expect("unambiguous test timestamp"),
+            filename: String::from("IMG_1234"),
+            extension: String::from("cr3"),
+            camera_make: None,
+            camera_model: None,
+            sequence: 1,
+            iso: Some(400),
+            aperture: Some(2.8),
+            shutter: Some(0.002),
+            focal_length: Some(50.0),
+            job_code: None,
+        }
+    }
+
+    fn render(pattern: &str, ctx: &RenderContext) -> String {
+        Pattern::parse(pattern)
+            .expect("test pattern parses")
+            .render(ctx)
+    }
+
+    #[test]
+    fn exposure_tokens_render_capture_settings() {
+        assert_eq!(
+            render("{iso}_{aperture}_{shutter}_{focal}", &context()),
+            "400_2.8_1-500_50mm"
+        );
+    }
+
+    #[test]
+    fn shutter_never_renders_a_path_separator() {
+        let mut ctx = context();
+        ctx.shutter = Some(1.0 / 8000.0);
+        assert!(!render("{shutter}", &ctx).contains('/'));
+    }
+
+    #[test]
+    fn long_exposures_render_as_seconds() {
+        let mut ctx = context();
+        ctx.shutter = Some(2.5);
+        assert_eq!(render("{shutter}", &ctx), "2.5s");
+
+        ctx.shutter = Some(30.0);
+        assert_eq!(render("{shutter}", &ctx), "30s");
+    }
+
+    #[test]
+    fn third_stop_marks_below_a_second_keep_their_denominator() {
+        let mut ctx = context();
+        ctx.shutter = Some(0.625);
+        assert_eq!(render("{shutter}", &ctx), "1-1.6");
+
+        ctx.shutter = Some(1.0 / 1.3);
+        assert_eq!(render("{shutter}", &ctx), "1-1.3");
+    }
+
+    #[test]
+    fn fractional_focal_lengths_keep_their_decimal() {
+        let mut ctx = context();
+        ctx.focal_length = Some(10.5);
+        assert_eq!(render("{focal}", &ctx), "10.5mm");
+    }
+
+    #[test]
+    fn absent_capture_settings_render_empty() {
+        let mut ctx = context();
+        ctx.iso = None;
+        ctx.aperture = None;
+        ctx.shutter = None;
+        ctx.focal_length = None;
+        assert_eq!(render("a{iso}{aperture}{shutter}{focal}b", &ctx), "ab");
+    }
+
+    #[test]
+    fn iso_accepts_zero_padding() {
+        assert_eq!(render("{iso:5}", &context()), "00400");
     }
 }
