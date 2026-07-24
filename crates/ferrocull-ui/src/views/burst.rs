@@ -29,13 +29,34 @@ pub(crate) fn status_label(status: BurstStatus) -> String {
     }
 }
 
+/// How prominent the pill is, set by where it sits. On a grid cell it is one
+/// mark among many and stays at the label scale; leading a full-screen view's
+/// info strip it is the frame's headline and takes the title scale.
+#[derive(Clone, Copy)]
+pub(crate) enum Size {
+    Cell,
+    Strip,
+}
+
+impl Size {
+    /// Text size and symmetric `[vertical, horizontal]` padding for this scale.
+    const fn metrics(self) -> (f32, [u16; 2]) {
+        match self {
+            Self::Cell => (10.0, [2, 6]),
+            Self::Strip => (13.0, [3, 10]),
+        }
+    }
+}
+
 /// The pill itself, which folds and unfolds the burst when pressed.
 pub(crate) fn badge<Message: Clone + 'static>(
     label: String,
+    size: Size,
     on_press: Message,
 ) -> Element<'static, Message> {
-    button(text(label).size(10))
-        .padding([2, 6])
+    let (text_size, padding) = size.metrics();
+    button(text(label).size(text_size))
+        .padding(padding)
         .style(styles::burst_badge)
         .on_press(on_press)
         .into()

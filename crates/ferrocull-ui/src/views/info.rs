@@ -7,14 +7,20 @@
 use chrono::Local;
 use ferrocull_core::media::{CaptureSettings, CaptureTime};
 use iced::{
-    Alignment, Element,
-    widget::{container, row, text},
+    Alignment, Element, Fill,
+    alignment::Horizontal,
+    widget::{Space, container, row, text},
 };
 
 use crate::theme::spacing;
 
 /// Fields in display order: shutter, aperture, ISO, focal length, capture time.
 pub(crate) const FIELD_COUNT: usize = 5;
+
+/// Fixed strip height, tall enough for the burst badge. Holding it constant
+/// keeps the bar from growing on the frames that carry a badge and shrinking on
+/// the ones that do not.
+const HEIGHT: f32 = 28.0;
 
 /// Stands in for a value the file does not carry, so both panes keep the same
 /// five columns and absence reads as absence rather than as a gap.
@@ -62,9 +68,14 @@ pub(crate) fn differing(
     std::array::from_fn(|field| select[field] != candidate[field])
 }
 
-/// One frame's readout as a single centered line, optionally led by a badge
+/// One frame's readout as a single centered line, optionally fronted by a badge
 /// (the burst marker). Differing fields take the brighter body ink; equal ones
 /// stay in the muted secondary tone.
+///
+/// With a badge the strip is three regions: the badge in a left flank, the
+/// readout, and an equal-weight empty right flank. Equal flanks center the
+/// readout on the strip; right-aligning the badge in its flank sets it just in
+/// front of the readout, so the badge never shifts the fields off center.
 pub(crate) fn strip<Message: 'static>(
     values: &[String; FIELD_COUNT],
     differing: [bool; FIELD_COUNT],
@@ -81,16 +92,28 @@ pub(crate) fn strip<Message: 'static>(
             })
             .into()
     });
+    let readout = row(fields)
+        .spacing(spacing::MD)
+        .align_y(Alignment::Center)
+        .wrap();
 
-    container(
-        row(badge.into_iter().chain(fields))
-            .spacing(spacing::MD)
-            .align_y(Alignment::Center)
-            .wrap(),
-    )
-    .center_x(iced::Fill)
-    .padding([spacing::XS, spacing::SM])
-    .into()
+    let content: Element<'static, Message> = match badge {
+        Some(pill) => row![
+            container(pill).width(Fill).align_x(Horizontal::Right),
+            readout,
+            Space::new().width(Fill),
+        ]
+        .spacing(spacing::MD)
+        .align_y(Alignment::Center)
+        .into(),
+        None => container(readout).center_x(Fill).into(),
+    };
+
+    container(content)
+        .width(Fill)
+        .center_y(HEIGHT)
+        .padding([0.0, spacing::SM])
+        .into()
 }
 
 fn absent() -> String {

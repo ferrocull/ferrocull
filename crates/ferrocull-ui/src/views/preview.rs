@@ -98,6 +98,7 @@ pub(crate) fn image_area(
 pub(crate) fn burst_badge(status: BurstStatus) -> Element<'static, Message> {
     views::burst::badge(
         views::burst::status_label(status),
+        views::burst::Size::Strip,
         Message::Preview(preview::Message::ToggleBurst),
     )
 }

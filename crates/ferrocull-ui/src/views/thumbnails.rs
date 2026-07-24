@@ -911,8 +911,11 @@ fn rated_badge<Message: 'static>(rating: i8) -> Element<'static, Message> {
 
 /// Burst count badge positioned in top-right corner.
 fn burst_badge(count: usize, burst_key: DateTime<Utc>) -> Element<'static, CellEvent> {
-    let clickable_badge =
-        burst::badge(burst::count_label(count), CellEvent::BurstToggle(burst_key));
+    let clickable_badge = burst::badge(
+        burst::count_label(count),
+        burst::Size::Cell,
+        CellEvent::BurstToggle(burst_key),
+    );
 
     container(clickable_badge)
         .width(Fill)
