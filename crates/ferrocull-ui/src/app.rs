@@ -36,7 +36,7 @@ use iced::{
 use sipper::sipper;
 
 use crate::{
-    media_view::{MediaView, TagState, ViewParams},
+    media_view::{BurstStatus, MediaView, TagState, ViewParams},
     messages::{
         Message, Panel, ScanEvent, Section, compare as compare_msg, destination as destination_msg,
         filters as filters_msg, grid as grid_msg, preview as preview_msg, settings as settings_msg,
@@ -515,6 +515,16 @@ impl Ferrocull {
             .ordinal_position(item_idx, self.config.view.ascending)
     }
 
+    /// How an item's burst membership reads to the photographer, for the views
+    /// that badge it.
+    fn burst_status(&self, item_idx: usize) -> Option<BurstStatus> {
+        self.media.burst_status(
+            item_idx,
+            self.config.view.ascending,
+            self.config.view.sort_order,
+        )
+    }
+
     /// The logical group to fan out to: collapsed-burst members plus RAW+JPEG siblings.
     fn group_of(&self, idx: usize) -> Vec<usize> {
         self.media.group_of(
@@ -860,8 +870,12 @@ impl Ferrocull {
             'z' | 'Z' if in_preview => {
                 Task::done(Message::Preview(preview_msg::Message::ResetZoom))
             }
-            // B: toggle collapse/expand of the focused item's burst.
-            'b' | 'B' if !in_preview && !in_compare => {
+            // B: toggle collapse/expand of the burst the cursor sits on: the
+            // focused card in the grid, the shown frame in the preview.
+            'b' | 'B' if in_preview => {
+                Task::done(Message::Preview(preview_msg::Message::ToggleBurst))
+            }
+            'b' | 'B' if !in_compare => {
                 Task::done(Message::Grid(grid_msg::Message::ToggleFocusedBurst))
             }
             // T: tag toggle (selection toggle, Photo Mechanic convention)
@@ -1616,8 +1630,8 @@ fn compare_overlay(state: &Ferrocull, cmp: &CompareState) -> Element<'static, Me
         );
         let differing = views::info::differing(&select, &candidate);
         (
-            Some(views::info::strip(&select, differing)),
-            Some(views::info::strip(&candidate, differing)),
+            Some(views::info::strip(&select, differing, None)),
+            Some(views::info::strip(&candidate, differing, None)),
         )
     } else {
         (None, None)
@@ -1677,7 +1691,8 @@ fn preview_overlay(state: &Ferrocull, p: &PreviewState) -> Element<'static, Mess
     // screen every field stays in the muted tone.
     let info = state.info_strip_open.then(|| {
         let values = views::info::readout(&item.capture_settings, item.capture_time);
-        views::info::strip(&values, [false; views::info::FIELD_COUNT])
+        let badge = state.burst_status(p.index).map(views::preview::burst_badge);
+        views::info::strip(&values, [false; views::info::FIELD_COUNT], badge)
     });
     let bottom = views::preview::bottom_bar(item_ctrl);
 

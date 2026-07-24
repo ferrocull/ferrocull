@@ -76,6 +76,33 @@ impl TagState {
     }
 }
 
+/// What a frame's burst membership means for the view showing it: how many
+/// frames a collapsed representative fronts, or where an expanded member sits
+/// in the run. A frame outside any burst has no status at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BurstStatus {
+    /// The burst is folded; this frame is its representative and stands for
+    /// `count` frames in total.
+    Collapsed { key: DateTime<Utc>, count: usize },
+    /// The burst is open; this frame is the `position`-th of `count` in display
+    /// order (1-based).
+    Expanded {
+        key: DateTime<Utc>,
+        position: usize,
+        count: usize,
+    },
+}
+
+impl BurstStatus {
+    /// The burst to toggle when the photographer acts on this frame.
+    #[must_use]
+    pub(crate) const fn key(self) -> DateTime<Utc> {
+        match self {
+            Self::Collapsed { key, .. } | Self::Expanded { key, .. } => key,
+        }
+    }
+}
+
 /// Result of pruning selection/focus against the current visible set.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RebuildOutcome {
@@ -229,6 +256,60 @@ impl MediaView {
         Some(&self.burst_map[key])
     }
 
+    /// How `idx`'s burst membership should read to the photographer, or `None`
+    /// when `idx` belongs to no burst (including when burst grouping is off,
+    /// which leaves the burst indices empty).
+    #[must_use]
+    pub(crate) fn burst_status(
+        &self,
+        idx: usize,
+        ascending: bool,
+        sort_order: SortOrder,
+    ) -> Option<BurstStatus> {
+        let key = *self.burst_of.get(&idx)?;
+        let members = &self.burst_map[&key];
+        let count = members.len();
+        if !self.expanded_bursts.contains(&key) {
+            return Some(BurstStatus::Collapsed { key, count });
+        }
+
+        // Rank by display key rather than by capture-time member order: the
+        // position must count the way next/previous walks, which a descending
+        // direction or a non-time sort order reverses or reorders.
+        let own = self.display_key(idx, sort_order);
+        let preceding = members
+            .iter()
+            .filter(|&&member| {
+                let member_key = self.display_key(member, sort_order);
+                if ascending {
+                    member_key < own
+                } else {
+                    member_key > own
+                }
+            })
+            .count();
+        Some(BurstStatus::Expanded {
+            key,
+            position: preceding + 1,
+            count,
+        })
+    }
+
+    /// Where a cursor sitting on `idx` must move now that burst `key` has
+    /// folded: onto the burst's [representative](Self::burst_status), the face
+    /// of the folded burst.
+    ///
+    /// `None` means the cursor stays put. A frame can be off screen for reasons
+    /// this fold knows nothing about (filtered out, or hidden by another burst),
+    /// and only the fold that hid it may move the cursor.
+    #[must_use]
+    pub(crate) fn burst_repair_target(&self, idx: usize, key: DateTime<Utc>) -> Option<usize> {
+        if self.is_visible(idx) || self.burst_of.get(&idx) != Some(&key) {
+            return None;
+        }
+        Some(self.burst_map[&key][0])
+    }
+
     /// The deduplicated logical unit an action fans out over: `idx` plus its
     /// collapsed-burst members (an expanded burst does not fan out) plus each
     /// member's hidden JPEG sibling.
@@ -301,6 +382,17 @@ impl MediaView {
         }
     }
 
+    /// Where `idx` sits in the display sequence. Falls back to a computed key
+    /// for an item that is being viewed but filtered or collapsed out of the
+    /// view, so it can still be ordered against the items that are shown.
+    #[must_use]
+    fn display_key(&self, idx: usize, sort_order: SortOrder) -> SortKey {
+        self.sort_key_by_idx
+            .get(&idx)
+            .cloned()
+            .unwrap_or_else(|| SortKey::from_item(&self.items[idx], sort_order))
+    }
+
     /// Adjacent item in display order, or `None` at a boundary. Falls back to a
     /// computed key when `current` is being viewed but filtered out of the view.
     #[must_use]
@@ -311,11 +403,7 @@ impl MediaView {
         ascending: bool,
         sort_order: SortOrder,
     ) -> Option<usize> {
-        let current_key = self
-            .sort_key_by_idx
-            .get(&current)
-            .cloned()
-            .unwrap_or_else(|| SortKey::from_item(&self.items[current], sort_order));
+        let current_key = self.display_key(current, sort_order);
 
         if forward == ascending {
             self.sorted_view
@@ -887,7 +975,7 @@ mod tests {
         media::{CaptureSettings, CaptureTime, FilterMode, Item, SortOrder},
     };
 
-    use super::{MediaView, TagState, ViewParams};
+    use super::{BurstStatus, MediaView, TagState, ViewParams};
 
     fn base_time() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap()
@@ -1668,6 +1756,155 @@ mod tests {
 
         view.toggle_burst_expansion(key, &params.view());
         assert_eq!(visible_names(&view), ["a.raw"], "collapsed again");
+    }
+
+    /// A burst of three between two lone frames, for the status and navigation
+    /// cases the preview's burst badge reads.
+    fn burst_between_singles() -> [Item; 5] {
+        [
+            item_at("before.raw", 0, 0),
+            item_at("a.raw", 10, 0),
+            item_at("a2.raw", 10, 300_000_000),
+            item_at("a3.raw", 10, 600_000_000),
+            item_at("after.raw", 20, 0),
+        ]
+    }
+
+    #[test]
+    fn a_frame_outside_any_burst_has_no_burst_status() {
+        let params = Params::new();
+        let view = build_incremental(&burst_between_singles(), &params);
+        let lone = view.index_of(Path::new("/src/before.raw")).unwrap();
+        assert_eq!(view.burst_status(lone, true, SortOrder::Time), None);
+    }
+
+    #[test]
+    fn a_collapsed_burst_reports_its_member_count() {
+        let params = Params::new();
+        let view = build_incremental(&burst_between_singles(), &params);
+        let representative = view.index_of(Path::new("/src/a.raw")).unwrap();
+        let key = *view.burst_map.keys().next().unwrap();
+        assert_eq!(
+            view.burst_status(representative, true, SortOrder::Time),
+            Some(BurstStatus::Collapsed { key, count: 3 })
+        );
+    }
+
+    #[test]
+    fn every_expanded_member_reports_its_own_position() {
+        let params = Params::new();
+        let mut view = build_incremental(&burst_between_singles(), &params);
+        let key = *view.burst_map.keys().next().unwrap();
+        view.toggle_burst_expansion(key, &params.view());
+
+        for (offset, name) in ["a.raw", "a2.raw", "a3.raw"].into_iter().enumerate() {
+            let idx = view
+                .index_of(&PathBuf::from(format!("/src/{name}")))
+                .unwrap();
+            assert_eq!(
+                view.burst_status(idx, true, SortOrder::Time),
+                Some(BurstStatus::Expanded {
+                    key,
+                    position: offset + 1,
+                    count: 3,
+                }),
+                "{name} is frame {} of the open burst",
+                offset + 1
+            );
+        }
+    }
+
+    #[test]
+    fn a_descending_view_counts_burst_positions_the_way_it_navigates() {
+        let params = Params::new();
+        let mut view = build_incremental(&burst_between_singles(), &params);
+        let key = *view.burst_map.keys().next().unwrap();
+        view.toggle_burst_expansion(key, &params.view());
+
+        let newest = view.index_of(Path::new("/src/a3.raw")).unwrap();
+        assert_eq!(
+            view.burst_status(newest, false, SortOrder::Time),
+            Some(BurstStatus::Expanded {
+                key,
+                position: 1,
+                count: 3,
+            }),
+            "the last shot leads the burst when the newest frame comes first"
+        );
+    }
+
+    #[test]
+    fn folding_a_burst_sends_its_hidden_members_to_the_representative() {
+        let params = Params::new();
+        let mut view = build_incremental(&burst_between_singles(), &params);
+        let key = *view.burst_map.keys().next().unwrap();
+        view.toggle_burst_expansion(key, &params.view());
+        let representative = view.index_of(Path::new("/src/a.raw")).unwrap();
+        let hidden = view.index_of(Path::new("/src/a3.raw")).unwrap();
+        view.toggle_burst_expansion(key, &params.view());
+
+        assert_eq!(view.burst_repair_target(hidden, key), Some(representative));
+        assert_eq!(
+            view.burst_repair_target(representative, key),
+            None,
+            "the face of the folded burst is still on screen"
+        );
+    }
+
+    #[test]
+    fn folding_a_burst_leaves_a_frame_it_did_not_hide_alone() {
+        let params = Params::new();
+        let mut items = burst_between_singles().to_vec();
+        items.extend([
+            item_at("b.raw", 40, 0),
+            item_at("b2.raw", 40, 300_000_000),
+            item_at("b3.raw", 40, 600_000_000),
+        ]);
+        let mut view = build_incremental(&items, &params);
+        let [first, second]: [DateTime<Utc>; 2] = {
+            let mut keys: Vec<DateTime<Utc>> = view.burst_map.keys().copied().collect();
+            keys.sort_unstable();
+            keys.try_into().unwrap()
+        };
+        // A frame the *other* burst is hiding: folding `first` must not claim it.
+        view.toggle_burst_expansion(second, &params.view());
+        let stranger = view.index_of(Path::new("/src/b3.raw")).unwrap();
+        view.toggle_burst_expansion(second, &params.view());
+
+        assert!(!view.is_visible(stranger), "the other burst hides it");
+        assert_eq!(view.burst_repair_target(stranger, first), None);
+    }
+
+    #[test]
+    fn navigation_skips_a_collapsed_burst_and_walks_an_expanded_one() {
+        let params = Params::new();
+        let mut view = build_incremental(&burst_between_singles(), &params);
+        let before = view.index_of(Path::new("/src/before.raw")).unwrap();
+        let after = view.index_of(Path::new("/src/after.raw")).unwrap();
+        let representative = view.index_of(Path::new("/src/a.raw")).unwrap();
+
+        let step = |media: &MediaView, from| {
+            media
+                .adjacent_index(from, true, true, SortOrder::Time)
+                .unwrap()
+        };
+        assert_eq!(step(&view, before), representative);
+        assert_eq!(
+            step(&view, representative),
+            after,
+            "a folded burst is one frame in the sequence"
+        );
+
+        let key = *view.burst_map.keys().next().unwrap();
+        view.toggle_burst_expansion(key, &params.view());
+        let second = step(&view, representative);
+        let third = step(&view, second);
+        assert_eq!(
+            [second, third].map(|idx| view.items[idx].path.clone()),
+            [PathBuf::from("/src/a2.raw"), PathBuf::from("/src/a3.raw")],
+            "an open burst is walked frame by frame"
+        );
+        assert_eq!(step(&view, third), after);
     }
 
     /// The four New × type-mode combinations the ticket calls out: New ANDs with

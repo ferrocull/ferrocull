@@ -202,6 +202,9 @@ pub(crate) mod preview {
         Prev,
         Next,
         NavigateTo(usize),
+        /// Collapse/expand the burst the previewed frame belongs to (`B` key or
+        /// a click on the info strip's burst badge).
+        ToggleBurst,
         /// View state changed (zoom/pan from `Viewer`)
         ViewStateChanged(widgets::Event),
         /// Reset zoom to fit / toggle zoom (Z key)

@@ -55,6 +55,17 @@ pub(super) fn update(state: &mut Ferrocull, msg: preview::Message) -> Task<Messa
                 return state.load_preview_for_index(idx);
             }
         }
+        preview::Message::ToggleBurst => {
+            let ViewMode::Preview(ref p) = state.view_mode else {
+                return Task::none();
+            };
+            let index = p.index;
+            // A frame outside any burst has nothing to fold: `B` and the badge
+            // are both no-ops there.
+            if let Some(status) = state.burst_status(index) {
+                return state.toggle_burst(status.key(), index);
+            }
+        }
         preview::Message::ViewStateChanged(event) => {
             if let ViewMode::Preview(ref mut p) = state.view_mode {
                 use crate::widgets::Event;

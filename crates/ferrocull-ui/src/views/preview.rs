@@ -8,10 +8,11 @@ use iced::{
 use iced_aw::Spinner;
 
 use crate::{
+    media_view::BurstStatus,
     messages::{Message, preview},
     styles,
     theme::spacing,
-    views::status,
+    views::{self, status},
     widgets::{ViewState, Viewer},
 };
 
@@ -90,6 +91,16 @@ pub(crate) fn image_area(
     // edge lines up with the position text directly above it; the vertical one
     // is larger so the row clears the bar rather than hugging it.
     status::marked(content, item, is_tagged, [spacing::LG, spacing::LG])
+}
+
+/// The info strip's burst badge: the grid's pill, worded for the one frame on
+/// screen, folding the same burst when pressed.
+pub(crate) fn burst_badge(status: BurstStatus) -> Element<'static, Message> {
+    views::burst::badge(
+        views::burst::status_label(status),
+        views::burst::Size::Strip,
+        Message::Preview(preview::Message::ToggleBurst),
+    )
 }
 
 /// Renders the bottom bar with navigation and pre-mapped item controls.
