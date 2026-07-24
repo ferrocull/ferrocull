@@ -597,10 +597,11 @@ impl Ferrocull {
 
     /// Collapse/expand burst `key` as one undoable view-state entry, repairing
     /// focus onto the burst's visible representative when a collapse hides the
-    /// focused member. Shared by the `B` key and the badge-click path so both
-    /// are undoable and repair focus identically. `key` must name a live burst;
-    /// `target` is the acted-on item, used for the status echo.
-    fn toggle_burst(&mut self, key: DateTime<Utc>, target: usize) -> Task<Message> {
+    /// focused member. Shared by the `B` key and the badge-click path, in the
+    /// grid and in the preview alike, so every route is undoable and repairs
+    /// identically. `key` must name a live burst; `target` is the acted-on item,
+    /// used for the status echo.
+    pub(super) fn toggle_burst(&mut self, key: DateTime<Utc>, target: usize) -> Task<Message> {
         let focus_before = self.focused_index;
         let expanded_before = self.media.is_burst_expanded(key);
         self.media
@@ -614,6 +615,7 @@ impl Ferrocull {
         {
             self.focused_index = Some(self.media.burst_map()[&key][0]);
         }
+        let preview_repair = self.snap_preview_to_representative(key);
         self.reconcile_selection();
         let focus_after = self.focused_index;
         self.undo_stack.record(undo::Entry {
@@ -629,7 +631,24 @@ impl Ferrocull {
         // Reveal the toggled burst, not the focused card: a badge click does
         // not move focus, so the stored focus can sit far off-screen and
         // revealing it would yank the viewport there.
-        self.scroll_focus_into_view(self.media.burst_map()[&key][0])
+        let reveal = self.scroll_focus_into_view(self.media.burst_map()[&key][0]);
+        Task::batch([preview_repair, reveal])
+    }
+
+    /// Snap the previewed frame onto burst `key`'s representative when folding
+    /// that burst has just hidden it. The preview's counterpart to the grid's
+    /// focus repair, applied wherever a burst folds. A no-op outside preview
+    /// mode, and whenever the media view says the cursor stays put.
+    fn snap_preview_to_representative(&mut self, key: DateTime<Utc>) -> Task<Message> {
+        let ViewMode::Preview(ref mut preview) = self.view_mode else {
+            return Task::none();
+        };
+        let Some(representative) = self.media.burst_repair_target(preview.index, key) else {
+            return Task::none();
+        };
+        preview.index = representative;
+        preview.view_state = crate::widgets::ViewState::new();
+        self.load_preview_for_index(representative)
     }
 
     /// Ctrl+Z: revert the most recent recorded mutation, moving it onto the redo
@@ -745,19 +764,27 @@ impl Ferrocull {
         }
         self.reconcile_selection();
 
+        // A replayed collapse can hide the previewed frame just as a live toggle
+        // can, so the same repair applies.
+        let preview_repair = match &entry.action {
+            undo::Action::Burst { key, .. } => self.snap_preview_to_representative(*key),
+            _ => Task::none(),
+        };
+
         // Metadata/tag actions return to the acted-on card; a burst restored its
         // own focus above.
         let focus = match &entry.action {
             undo::Action::Burst { .. } => self.focused_index,
             _ => Some(entry.target),
         };
-        match focus {
+        let reveal = match focus {
             Some(target) if self.media.is_visible(target) => {
                 self.focused_index = Some(target);
                 self.scroll_focus_into_view(target)
             }
             _ => Task::none(),
-        }
+        };
+        Task::batch([preview_repair, reveal])
     }
 
     fn handle_file_tag_toggled(&mut self, path: &Path) {
