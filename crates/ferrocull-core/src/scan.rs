@@ -21,7 +21,7 @@ use ferrocull_media::FileCategory;
 use crate::{
     cache::{self, ThumbnailCache},
     media::{CaptureSettings, CaptureTime},
-    thumbnail::{generate_raw_with_preread, generate_thumbnail_from_bytes, parse_exif_from_bytes},
+    thumbnail::{self, generate_photo_thumbnail, generate_raw_with_preread, parse_exif_from_bytes},
     xmp,
 };
 
@@ -63,7 +63,7 @@ pub enum Event<T> {
     /// generation failed. Carries no pixel data.
     ThumbnailReady {
         path: PathBuf,
-        result: Result<(), String>,
+        result: Result<(), thumbnail::Error>,
     },
 }
 
@@ -97,6 +97,7 @@ struct ReadFile {
     category: FileCategory,
     data: Vec<u8>,
     handle: File,
+    orientation: u32,
     capture_time: CaptureTime,
     capture_settings: CaptureSettings,
     key: Option<String>,
@@ -210,8 +211,10 @@ where
         }
     };
 
-    // Fall back to file modification time if EXIF carries no date.
-    let (exif_time, capture_settings) = parse_exif_from_bytes(&data);
+    // Parse EXIF once here; orientation rides through to the decode pool so it
+    // is not re-parsed there. Fall back to file modification time if EXIF
+    // carries no date.
+    let (orientation, exif_time, capture_settings) = parse_exif_from_bytes(&data);
     let capture_time = exif_time.unwrap_or_else(|| {
         let mtime = handle
             .metadata()
@@ -233,12 +236,13 @@ where
     // pool. RAW files usually decode from the pre-read head; the rare
     // continuation reads happen on the decode pool instead.
     if category == FileCategory::Photo
-        && let Err(e) = handle.read_to_end(&mut data)
+        && let Err(source) = handle.read_to_end(&mut data)
     {
-        on_event(Event::ThumbnailReady {
-            path,
-            result: Err(e.to_string()),
+        let result = Err(thumbnail::Error::Io {
+            path: path.clone(),
+            source,
         });
+        on_event(Event::ThumbnailReady { path, result });
         return None;
     }
 
@@ -247,6 +251,7 @@ where
         category,
         data,
         handle,
+        orientation,
         capture_time,
         capture_settings,
         key,
@@ -268,18 +273,18 @@ fn decode_stage<T, F>(
         category,
         data,
         mut handle,
+        orientation,
         capture_time,
         capture_settings,
         key,
     } = read;
 
     let thumb_result = match category {
-        FileCategory::Photo => generate_thumbnail_from_bytes(&data, &path, thumbnail_size)
-            .map(|r| r.jpeg)
-            .map_err(|e| e.to_string()),
-        FileCategory::Raw => generate_raw_with_preread(data, &mut handle, thumbnail_size, &path)
-            .map_err(|e| e.to_string()),
-        _ => Err("unsupported format".to_owned()),
+        FileCategory::Photo => generate_photo_thumbnail(&data, orientation, thumbnail_size),
+        FileCategory::Raw => {
+            generate_raw_with_preread(data, &mut handle, orientation, thumbnail_size, &path)
+        }
+        _ => Err(thumbnail::Error::UnsupportedFormat { path: path.clone() }),
     };
 
     if let Ok(ref img) = thumb_result
@@ -467,7 +472,9 @@ mod tests {
                     capture_settings,
                     ..
                 } => Rec::Exif(capture_time, capture_settings),
-                Event::ThumbnailReady { result, .. } => Rec::Thumbnail(result),
+                Event::ThumbnailReady { result, .. } => {
+                    Rec::Thumbnail(result.map_err(|e| e.to_string()))
+                }
             };
             recorded.lock().expect("lock recorder").push(rec);
         });
