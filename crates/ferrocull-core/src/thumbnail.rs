@@ -502,16 +502,23 @@ fn generate_from_raw_bytes_with_orientation(
     })
 }
 
-/// Byte-size floor used only to order candidates in the final fallback pass
-/// ([`JpegScanner::into_sorted_spans`]), once pixel-based early termination
-/// ([`JpegScanner::good_preview_span`]) has exhausted the file.
-const MIN_PREVIEW_BYTES: usize = 50_000;
-
-/// Scan data for JPEG spans (SOI to EOI), return sorted by preference.
+/// Scan data for JPEG spans (SOI to EOI), return sorted largest-in-pixels first.
 fn find_jpeg_spans(data: &[u8]) -> Vec<(usize, usize)> {
     let mut scanner = JpegScanner::new();
     scanner.scan(data);
-    scanner.into_sorted_spans()
+    scanner.into_sorted_spans(data)
+}
+
+/// Pixel dimensions of a stored scanner span, read from its SOF header.
+fn span_dimensions(data: &[u8], start: usize, len: usize) -> (u32, u32) {
+    displayable_dimensions(&data[start..start + len])
+        .expect("scanner only stores spans with a displayable SOF header")
+}
+
+/// Pixel count of a stored scanner span.
+fn span_pixels(data: &[u8], start: usize, len: usize) -> u64 {
+    let (w, h) = span_dimensions(data, start, len);
+    u64::from(w) * u64::from(h)
 }
 
 /// Incremental JPEG span scanner. Tracks open SOI markers across multiple `scan()` calls
@@ -571,8 +578,7 @@ impl JpegScanner {
         self.spans
             .iter()
             .find(|(start, len)| {
-                let (w, h) = displayable_dimensions(&data[*start..*start + *len])
-                    .expect("scanner only stores spans with a displayable SOF header");
+                let (w, h) = span_dimensions(data, *start, *len);
                 w.max(h) >= size
             })
             .copied()
@@ -584,21 +590,16 @@ impl JpegScanner {
     fn largest_by_pixels(&self, data: &[u8]) -> Option<(usize, usize)> {
         self.spans
             .iter()
-            .max_by_key(|(start, len)| {
-                // Every stored span passed the scanner's SOF gate, so its
-                // dimensions parse.
-                let (w, h) = displayable_dimensions(&data[*start..*start + *len])
-                    .expect("scanner only stores spans with a displayable SOF header");
-                u64::from(w) * u64::from(h)
-            })
+            .max_by_key(|(start, len)| span_pixels(data, *start, *len))
             .copied()
     }
 
-    /// Consume the scanner, returning spans sorted by preference:
-    /// "good enough" (>= `MIN_PREVIEW_BYTES`) first, largest first within each group.
-    fn into_sorted_spans(mut self) -> Vec<(usize, usize)> {
+    /// Consume the scanner, returning spans sorted largest-in-pixels first, so
+    /// fallback decoding tries the best candidate before lesser ones. `data`
+    /// is the buffer the spans index into.
+    fn into_sorted_spans(mut self, data: &[u8]) -> Vec<(usize, usize)> {
         self.spans
-            .sort_by_key(|(_, len)| (*len < MIN_PREVIEW_BYTES, Reverse(*len)));
+            .sort_by_key(|(start, len)| Reverse(span_pixels(data, *start, *len)));
         self.spans
     }
 }
@@ -666,7 +667,7 @@ pub fn generate_raw_with_preread(
     // Final pass: try all found spans sorted by preference, keep the last error
     // so the user sees what actually went wrong if every candidate failed.
     let mut last_err = None;
-    for (start, len) in scanner.into_sorted_spans() {
+    for (start, len) in scanner.into_sorted_spans(&data) {
         let jpeg = &data[start..start + len];
         match try_decode_resize_encode(jpeg, orientation, size) {
             Ok(result) => return Ok(result),
@@ -915,8 +916,8 @@ mod tests {
         let small = jpeg_with_dimensions(160, 120, 4000);
         let large = jpeg_with_dimensions(1620, 1080, 0x60);
         assert!(
-            large.len() < MIN_PREVIEW_BYTES,
-            "the qualifying span must be small in bytes for this test to be meaningful"
+            large.len() < small.len(),
+            "the qualifying span must be the smaller one in bytes for this test to be meaningful"
         );
 
         let mut data = small;
