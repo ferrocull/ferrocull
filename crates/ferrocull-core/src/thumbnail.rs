@@ -502,7 +502,9 @@ fn generate_from_raw_bytes_with_orientation(
     })
 }
 
-/// Minimum preview size to consider "good enough" for early termination.
+/// Byte-size floor used only to order candidates in the final fallback pass
+/// ([`JpegScanner::into_sorted_spans`]), once pixel-based early termination
+/// ([`JpegScanner::good_preview_span`]) has exhausted the file.
 const MIN_PREVIEW_BYTES: usize = 50_000;
 
 /// Scan data for JPEG spans (SOI to EOI), return sorted by preference.
@@ -559,11 +561,20 @@ impl JpegScanner {
         self.offset = end;
     }
 
-    /// Return the first completed span >= `MIN_PREVIEW_BYTES` as (start, len).
-    fn good_preview_span(&self) -> Option<(usize, usize)> {
+    /// Return the first completed span whose pixel dimensions suffice for a
+    /// `size`-pixel thumbnail (longest side >= `size`) as (start, len). Byte
+    /// length is not the gate here: a heavily compressed preview can be a few
+    /// tens of KB yet full thumbnail resolution, and rejecting it forces
+    /// continuation reads deep into the file. `data` is the buffer the spans
+    /// index into.
+    fn good_preview_span(&self, data: &[u8], size: u32) -> Option<(usize, usize)> {
         self.spans
             .iter()
-            .find(|(_, len)| *len >= MIN_PREVIEW_BYTES)
+            .find(|(start, len)| {
+                let (w, h) = displayable_dimensions(&data[*start..*start + *len])
+                    .expect("scanner only stores spans with a displayable SOF header");
+                w.max(h) >= size
+            })
             .copied()
     }
 
@@ -626,7 +637,7 @@ pub fn generate_raw_with_preread(
     let mut scanner = JpegScanner::new();
     scanner.scan(&data);
 
-    if let Some((start, len)) = scanner.good_preview_span()
+    if let Some((start, len)) = scanner.good_preview_span(&data, size)
         && let Ok(result) = try_decode_resize_encode(&data[start..start + len], orientation, size)
     {
         return Ok(result);
@@ -644,7 +655,7 @@ pub fn generate_raw_with_preread(
         data.extend_from_slice(&buf[..n]);
         scanner.scan(&data);
 
-        if let Some((start, len)) = scanner.good_preview_span()
+        if let Some((start, len)) = scanner.good_preview_span(&data, size)
             && let Ok(result) =
                 try_decode_resize_encode(&data[start..start + len], orientation, size)
         {
@@ -892,6 +903,50 @@ mod tests {
         assert_eq!(
             scanner.largest_by_pixels(&data),
             Some((genuine_start, genuine.len()))
+        );
+    }
+
+    #[test]
+    fn good_preview_span_gates_on_pixels_not_bytes() {
+        // A byte-heavy span below the requested size followed by a byte-light
+        // span at full thumbnail resolution — the shape of a dark, heavily
+        // compressed NEF preview. The old >=50KB byte gate rejected the second
+        // span and forced continuation reads; the pixel gate must accept it.
+        let small = jpeg_with_dimensions(160, 120, 4000);
+        let large = jpeg_with_dimensions(1620, 1080, 0x60);
+        assert!(
+            large.len() < MIN_PREVIEW_BYTES,
+            "the qualifying span must be small in bytes for this test to be meaningful"
+        );
+
+        let mut data = small;
+        let large_start = data.len();
+        data.extend_from_slice(&large);
+
+        let mut scanner = JpegScanner::new();
+        scanner.scan(&data);
+        assert_eq!(
+            scanner.good_preview_span(&data, 512),
+            Some((large_start, large.len())),
+            "the low-res span is skipped, the byte-light high-res one accepted"
+        );
+    }
+
+    #[test]
+    fn good_preview_span_boundary_is_longest_side() {
+        let jpeg = jpeg_with_dimensions(512, 340, 0x60);
+        let mut scanner = JpegScanner::new();
+        scanner.scan(&jpeg);
+
+        assert_eq!(
+            scanner.good_preview_span(&jpeg, 512),
+            Some((0, jpeg.len())),
+            "a span whose longest side equals the requested size qualifies"
+        );
+        assert_eq!(
+            scanner.good_preview_span(&jpeg, 513),
+            None,
+            "one pixel short on the longest side does not"
         );
     }
 

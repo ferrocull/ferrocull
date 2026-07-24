@@ -26,7 +26,13 @@ use crate::{
 };
 
 /// Bytes pre-read from the head of each file, reused for EXIF and thumbnail.
-const INITIAL_READ: usize = 2 * 1024 * 1024;
+///
+/// Sized to cover the embedded preview of typical RAW files (a Nikon Z5 II
+/// preview ends around 270KB) while staying small: cold scans are I/O-bound
+/// and per-file time scales with bytes read, so every head byte counts on
+/// slow media. Files whose preview lies deeper fall back to continuation
+/// reads on the decode pool.
+const INITIAL_READ: usize = 512 * 1024;
 
 /// A file to scan. The concrete value is echoed back unchanged in
 /// [`Event::ExifLoaded`] so the caller can build its own item from it.
