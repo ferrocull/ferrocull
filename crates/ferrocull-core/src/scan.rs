@@ -218,9 +218,9 @@ where
     let capture_time = exif_time.unwrap_or_else(|| {
         let mtime = handle
             .metadata()
-            .expect("file already opened")
+            .expect("fstat failed on an open file")
             .modified()
-            .expect("modification time available");
+            .expect("file mtime unavailable");
         CaptureTime::new(DateTime::<Utc>::from(mtime), 0)
     });
 

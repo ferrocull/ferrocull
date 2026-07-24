@@ -1201,7 +1201,10 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
                             xmp.as_ref(),
                         );
                     }
-                    ScanEvent::ThumbnailCached(_path, _result) => {
+                    ScanEvent::ThumbnailCached(path, result) => {
+                        if let Err(error) = result {
+                            tracing::warn!(path = %path.display(), %error, "thumbnail generation failed");
+                        }
                         state.handle_thumbnail_cached();
                         // A newly-cached thumbnail is now loadable from disk, so
                         // the next reconcile must retry every in-window thumbnail.

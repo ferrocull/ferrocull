@@ -60,7 +60,7 @@ pub fn extract_largest_preview(path: &Path) -> Result<Vec<u8>, Error> {
                 path: path.to_path_buf(),
                 source,
             })?;
-            let (orientation, _) = parse_exif_fields(&data);
+            let orientation = parse_orientation(&data);
             if orientation <= 1 {
                 return Ok(data);
             }
@@ -89,13 +89,12 @@ fn extract_raw_largest_preview(path: &Path) -> Result<Vec<u8>, Error> {
     let mut scanner = JpegScanner::new();
     scanner.scan(&data);
 
-    let (start, len) = scanner
+    let span = scanner
         .largest_by_pixels(&data)
         .ok_or(Error::NoEmbeddedPreview {
             path: path.to_path_buf(),
         })?;
-    let (orientation, _) = parse_exif_fields(&data);
-    oriented_preview(&data[start..start + len], orientation)
+    oriented_preview(span.bytes(&data), parse_orientation(&data))
 }
 
 /// Return embedded preview JPEG bytes, applying EXIF orientation only if needed.
@@ -116,15 +115,12 @@ const THUMBNAIL_JPEG_QUALITY: u8 = 80;
 /// JPEG quality for full-screen previews (quality matters).
 const PREVIEW_JPEG_QUALITY: u8 = 92;
 
-/// Parse both orientation and capture time from EXIF bytes in a single parse.
-fn parse_exif_fields(data: &[u8]) -> (u32, Option<CaptureTime>) {
-    let Ok(exif) = exif::Reader::new().read_from_container(&mut io::Cursor::new(data)) else {
-        return (1, None);
-    };
-    (
-        orientation_from_exif(&exif),
-        parse_capture_time_from_exif(&exif),
-    )
+/// Parse the EXIF orientation from file bytes, defaulting to 1 (no transform)
+/// when the file carries no readable EXIF.
+fn parse_orientation(data: &[u8]) -> u32 {
+    exif::Reader::new()
+        .read_from_container(&mut io::Cursor::new(data))
+        .map_or(1, |exif| orientation_from_exif(&exif))
 }
 
 /// EXIF orientation tag, defaulting to 1 (no transform) when absent.
@@ -442,7 +438,7 @@ fn displayable_dimensions(data: &[u8]) -> Option<(u32, u32)> {
 /// EXIF yields orientation 1, no time, and empty settings; the caller decides
 /// how to fill the gaps.
 #[must_use]
-pub fn parse_exif_from_bytes(data: &[u8]) -> (u32, Option<CaptureTime>, CaptureSettings) {
+pub(crate) fn parse_exif_from_bytes(data: &[u8]) -> (u32, Option<CaptureTime>, CaptureSettings) {
     let mut cursor = io::Cursor::new(data);
     let Ok(exif) = exif::Reader::new().read_from_container(&mut cursor) else {
         return (1, None, CaptureSettings::default());
@@ -463,21 +459,41 @@ pub(crate) fn generate_photo_thumbnail(
     size: u32,
 ) -> Result<Vec<u8>, Error> {
     let img = decode_photo_scaled(data, size)?;
+    resize_orient_encode(img, orientation, size)
+}
+
+/// Shared tail of thumbnail generation: resize to `size`, apply the EXIF
+/// orientation, and encode at thumbnail quality.
+fn resize_orient_encode(img: DynamicImage, orientation: u32, size: u32) -> Result<Vec<u8>, Error> {
     let resized = resize_fast(img, size)?;
     let oriented = apply_orientation_transform(DynamicImage::ImageRgb8(resized), orientation);
     encode_jpeg(&oriented.into_rgb8(), THUMBNAIL_JPEG_QUALITY)
 }
 
-/// Pixel dimensions of a stored scanner span, read from its SOF header.
-fn span_dimensions(data: &[u8], start: usize, len: usize) -> (u32, u32) {
-    displayable_dimensions(&data[start..start + len])
-        .expect("scanner only stores spans with a displayable SOF header")
+/// A completed JPEG stream (SOI through EOI) found inside a scanned buffer,
+/// as byte offsets into that buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Span {
+    start: usize,
+    len: usize,
 }
 
-/// Pixel count of a stored scanner span.
-fn span_pixels(data: &[u8], start: usize, len: usize) -> u64 {
-    let (w, h) = span_dimensions(data, start, len);
-    u64::from(w) * u64::from(h)
+impl Span {
+    fn bytes(self, data: &[u8]) -> &[u8] {
+        &data[self.start..self.start + self.len]
+    }
+
+    /// Pixel dimensions from the span's SOF header.
+    fn dimensions(self, data: &[u8]) -> (u32, u32) {
+        displayable_dimensions(self.bytes(data))
+            .expect("scanner only stores spans with a displayable SOF header")
+    }
+
+    /// Pixel count from the span's SOF header.
+    fn pixels(self, data: &[u8]) -> u64 {
+        let (w, h) = self.dimensions(data);
+        u64::from(w) * u64::from(h)
+    }
 }
 
 /// Incremental JPEG span scanner. Tracks open SOI markers across multiple `scan()` calls
@@ -487,8 +503,8 @@ struct JpegScanner {
     offset: usize,
     /// SOI positions that haven't found their EOI yet.
     open_sois: Vec<usize>,
-    /// Completed (start, length) spans.
-    spans: Vec<(usize, usize)>,
+    /// Completed spans.
+    spans: Vec<Span>,
 }
 
 impl JpegScanner {
@@ -517,7 +533,7 @@ impl JpegScanner {
                     if let Some(soi) = self.open_sois.pop() {
                         let len = eoi_end - soi;
                         if len > 100 && is_displayable_jpeg(&data[soi..eoi_end]) {
-                            self.spans.push((soi, len));
+                            self.spans.push(Span { start: soi, len });
                         }
                     }
                 }
@@ -528,48 +544,41 @@ impl JpegScanner {
     }
 
     /// Return the first not-yet-attempted completed span whose pixel dimensions
-    /// suffice for a `size`-pixel thumbnail (longest side >= `size`) as
-    /// (start, len). `attempted` holds the start offsets already tried, so an
-    /// incremental read tries each qualifying span at most once instead of
-    /// re-selecting a span that failed to decode on every subsequent chunk.
+    /// suffice for a `size`-pixel thumbnail (longest side >= `size`).
+    /// `attempted` holds the spans already tried, so an incremental read tries
+    /// each qualifying span at most once instead of re-selecting a span that
+    /// failed to decode on every subsequent chunk.
     ///
     /// Byte length is not the gate here: a heavily compressed preview can be a
     /// few tens of KB yet full thumbnail resolution, and rejecting it forces
     /// continuation reads deep into the file. `data` is the buffer the spans
     /// index into.
-    fn next_preview_span(
-        &self,
-        data: &[u8],
-        size: u32,
-        attempted: &[usize],
-    ) -> Option<(usize, usize)> {
+    fn next_preview_span(&self, data: &[u8], size: u32, attempted: &[Span]) -> Option<Span> {
         self.spans
             .iter()
-            .find(|(start, len)| {
-                !attempted.contains(start) && {
-                    let (w, h) = span_dimensions(data, *start, *len);
+            .find(|span| {
+                !attempted.contains(span) && {
+                    let (w, h) = span.dimensions(data);
                     w.max(h) >= size
                 }
             })
             .copied()
     }
 
-    /// Return the completed span with the most pixels as (start, len), reading
-    /// dimensions from each span's SOF header. `data` is the buffer the spans
-    /// index into.
-    fn largest_by_pixels(&self, data: &[u8]) -> Option<(usize, usize)> {
+    /// Return the completed span with the most pixels, reading dimensions from
+    /// each span's SOF header. `data` is the buffer the spans index into.
+    fn largest_by_pixels(&self, data: &[u8]) -> Option<Span> {
         self.spans
             .iter()
-            .max_by_key(|(start, len)| span_pixels(data, *start, *len))
+            .max_by_key(|span| span.pixels(data))
             .copied()
     }
 
     /// Consume the scanner, returning spans sorted largest-in-pixels first, so
     /// fallback decoding tries the best candidate before lesser ones. `data`
     /// is the buffer the spans index into.
-    fn into_sorted_spans(mut self, data: &[u8]) -> Vec<(usize, usize)> {
-        self.spans
-            .sort_by_key(|(start, len)| Reverse(span_pixels(data, *start, *len)));
+    fn into_sorted_spans(mut self, data: &[u8]) -> Vec<Span> {
+        self.spans.sort_by_key(|span| Reverse(span.pixels(data)));
         self.spans
     }
 }
@@ -584,9 +593,7 @@ const READ_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 /// they surface to the user, which is more informative than a bare "no preview".
 fn try_decode_resize_encode(jpeg: &[u8], orientation: u32, size: u32) -> Result<Vec<u8>, Error> {
     let img = decode_jpeg_scaled(jpeg, size)?;
-    let resized = resize_fast(img, size)?;
-    let oriented = apply_orientation_transform(DynamicImage::ImageRgb8(resized), orientation);
-    encode_jpeg(&oriented.into_rgb8(), THUMBNAIL_JPEG_QUALITY)
+    resize_orient_encode(img, orientation, size)
 }
 
 /// Generate a RAW thumbnail from the pre-read head, continuing to read from
@@ -599,7 +606,7 @@ fn try_decode_resize_encode(jpeg: &[u8], orientation: u32, size: u32) -> Result<
 /// pass. The last decode error is kept so the caller surfaces the real cause;
 /// [`Error::NoEmbeddedPreview`] is reported only when no candidate span existed
 /// at all.
-pub fn generate_raw_with_preread(
+pub(crate) fn generate_raw_with_preread(
     mut data: Vec<u8>,
     file: &mut File,
     orientation: u32,
@@ -616,14 +623,14 @@ pub fn generate_raw_with_preread(
     let mut scanner = JpegScanner::new();
     scanner.scan(&data);
 
-    let mut attempted: Vec<usize> = Vec::new();
+    let mut attempted: Vec<Span> = Vec::new();
     let mut last_err = None;
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
     loop {
-        if let Some((start, len)) = scanner.next_preview_span(&data, size, &attempted) {
-            attempted.push(start);
-            match try_decode_resize_encode(&data[start..start + len], orientation, size) {
+        if let Some(span) = scanner.next_preview_span(&data, size, &attempted) {
+            attempted.push(span);
+            match try_decode_resize_encode(span.bytes(&data), orientation, size) {
                 Ok(result) => return Ok(result),
                 Err(e) => last_err = Some(e),
             }
@@ -644,11 +651,11 @@ pub fn generate_raw_with_preread(
 
     // Final pass: try the spans not yet attempted, best (most pixels) first,
     // keeping the last error so the caller sees what actually went wrong.
-    for (start, len) in scanner.into_sorted_spans(&data) {
-        if attempted.contains(&start) {
+    for span in scanner.into_sorted_spans(&data) {
+        if attempted.contains(&span) {
             continue;
         }
-        match try_decode_resize_encode(&data[start..start + len], orientation, size) {
+        match try_decode_resize_encode(span.bytes(&data), orientation, size) {
             Ok(result) => return Ok(result),
             Err(e) => last_err = Some(e),
         }
@@ -738,12 +745,17 @@ mod tests {
         jpeg_with_dimensions(64, 48, 0x60)
     }
 
+    /// Shorthand [`Span`] constructor for assertions.
+    const fn span(start: usize, len: usize) -> Span {
+        Span { start, len }
+    }
+
     #[test]
     fn scan_finds_span_in_single_pass() {
         let jpeg = minimal_jpeg();
         let mut scanner = JpegScanner::new();
         scanner.scan(&jpeg);
-        assert_eq!(scanner.spans, vec![(0, jpeg.len())]);
+        assert_eq!(scanner.spans, vec![span(0, jpeg.len())]);
     }
 
     #[test]
@@ -760,7 +772,7 @@ mod tests {
 
         // Growing buffer delivers the 0xD9; the split EOI is now recognized.
         scanner.scan(&jpeg);
-        assert_eq!(scanner.spans, vec![(0, jpeg.len())]);
+        assert_eq!(scanner.spans, vec![span(0, jpeg.len())]);
     }
 
     #[test]
@@ -787,7 +799,7 @@ mod tests {
 
         let mut scanner = JpegScanner::new();
         scanner.scan(&data);
-        assert_eq!(scanner.spans, vec![(0, data.len())]);
+        assert_eq!(scanner.spans, vec![span(0, data.len())]);
     }
 
     #[test]
@@ -816,7 +828,7 @@ mod tests {
         assert_eq!(scanner.spans.len(), 2);
         assert_eq!(
             scanner.largest_by_pixels(&data),
-            Some((high_start, high_res.len()))
+            Some(span(high_start, high_res.len()))
         );
     }
 
@@ -877,12 +889,12 @@ mod tests {
         scanner.scan(&data);
         assert_eq!(
             scanner.spans,
-            vec![(genuine_start, genuine.len())],
+            vec![span(genuine_start, genuine.len())],
             "only the genuine preview should be admitted as a candidate"
         );
         assert_eq!(
             scanner.largest_by_pixels(&data),
-            Some((genuine_start, genuine.len()))
+            Some(span(genuine_start, genuine.len()))
         );
     }
 
@@ -907,7 +919,7 @@ mod tests {
         scanner.scan(&data);
         assert_eq!(
             scanner.next_preview_span(&data, 512, &[]),
-            Some((large_start, large.len())),
+            Some(span(large_start, large.len())),
             "the low-res span is skipped, the byte-light high-res one accepted"
         );
     }
@@ -930,16 +942,20 @@ mod tests {
 
         assert_eq!(
             scanner.next_preview_span(&data, 512, &[]),
-            Some((0, first.len())),
+            Some(span(0, first.len())),
             "the first qualifying span is offered when nothing has been tried"
         );
         assert_eq!(
-            scanner.next_preview_span(&data, 512, &[0]),
-            Some((second_start, second.len())),
+            scanner.next_preview_span(&data, 512, &[span(0, first.len())]),
+            Some(span(second_start, second.len())),
             "a failed span is skipped, the next qualifying one is offered"
         );
         assert_eq!(
-            scanner.next_preview_span(&data, 512, &[0, second_start]),
+            scanner.next_preview_span(
+                &data,
+                512,
+                &[span(0, first.len()), span(second_start, second.len())]
+            ),
             None,
             "no qualifying span remains once both have been attempted"
         );
@@ -953,7 +969,7 @@ mod tests {
 
         assert_eq!(
             scanner.next_preview_span(&jpeg, 512, &[]),
-            Some((0, jpeg.len())),
+            Some(span(0, jpeg.len())),
             "a span whose longest side equals the requested size qualifies"
         );
         assert_eq!(
