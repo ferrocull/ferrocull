@@ -322,7 +322,7 @@ impl Ferrocull {
     /// Memoized on [`GridRowsKey`]: `on_scroll` calls this on every frame, but
     /// the row model only changes with the media view, sort/grouping, or column
     /// geometry — so a plain scroll hands out a cheap `Rc` clone instead of
-    /// re-walking every item in `section_counts`.
+    /// re-walking every item in `sections`.
     fn grid_rows(&mut self, grid_width: f32) -> Rc<[views::thumbnails::RowStart]> {
         let grouped = self.config.view.sort_order == SortOrder::Time;
         let key = super::GridRowsKey {
@@ -337,15 +337,20 @@ impl Ferrocull {
         {
             return Rc::clone(rows);
         }
-        let counts = views::thumbnails::section_counts(
+        let sections = views::thumbnails::sections(
             self.media.items(),
             self.media.sorted_view(),
             self.config.view.ascending,
             grouped,
         );
         let (cols, cell_width) = views::thumbnails::grid_metrics(grid_width, self.window_scale);
-        let rows: Rc<[views::thumbnails::RowStart]> =
-            views::thumbnails::row_starts(&counts, cols, cell_width, grouped).into();
+        let rows: Rc<[views::thumbnails::RowStart]> = views::thumbnails::row_starts(
+            &sections,
+            cols,
+            cell_width,
+            views::thumbnails::header_block(grouped),
+        )
+        .into();
         self.grid_rows_cache = Some((key, Rc::clone(&rows)));
         rows
     }
