@@ -109,6 +109,18 @@ fn grid_width(cols: usize, cell_width: f32) -> f32 {
 /// depend on text metrics. Applied via `.height(...)` on the header container.
 pub(crate) const DATE_HEADER_HEIGHT: f32 = 26.0;
 
+/// Vertical space a date header takes above its section grid: the header itself
+/// plus the `XS` gap the section column puts under it. Zero when not grouping,
+/// which makes an ungrouped view one headerless section rather than a separate
+/// layout path.
+pub(crate) fn header_block(grouped: bool) -> f32 {
+    if grouped {
+        DATE_HEADER_HEIGHT + spacing::XS
+    } else {
+        0.0
+    }
+}
+
 /// Extra content kept rendered above and below the viewport. A fast scroll then
 /// reveals already-built cells, and the update side preloads their thumbnails
 /// before they enter view. Replaces the old per-cell `sensor(...).anticipate`.
@@ -132,33 +144,29 @@ pub(crate) struct RowStart {
 
 /// Scroll anchors for every grid row, in display order.
 ///
-/// `section_counts` is the card count per date section (a single entry in
-/// ungrouped mode). The first row of each section anchors to the section top so
-/// its header stays visible; later rows anchor to the row itself. Square cells
-/// make the row pitch `cell_width + spacing::SM`.
+/// `sections` is the `(start, count)` run per section from [`sections`], and
+/// `header_block` the space each section's header takes above its grid. The
+/// first row of each section anchors to the section top so its header stays
+/// visible; later rows anchor to the row itself. Square cells make the row pitch
+/// `cell_width + spacing::SM`.
 #[expect(
     clippy::cast_precision_loss,
     reason = "row and column counts are far below f32's exact-integer range"
 )]
 pub(crate) fn row_starts(
-    section_counts: &[usize],
+    sections: &[(usize, usize)],
     cols: usize,
     cell_width: f32,
-    grouped: bool,
+    header_block: f32,
 ) -> Vec<RowStart> {
     let pitch = cell_width + spacing::SM;
     let mut rows = Vec::new();
     // Content-y cursor; starts at the scrollable content's MD top padding.
     let mut y = spacing::MD;
-    let mut ordinal = 0;
-    for &count in section_counts {
+    for &(start, count) in sections {
         let num_rows = count.div_ceil(cols);
         let header_top = y;
-        let grid_top = if grouped {
-            header_top + DATE_HEADER_HEIGHT + spacing::XS
-        } else {
-            header_top
-        };
+        let grid_top = header_top + header_block;
         for r in 0..num_rows {
             let row_top = grid_top + r as f32 * pitch;
             let offset = if r == 0 {
@@ -168,10 +176,9 @@ pub(crate) fn row_starts(
             };
             rows.push(RowStart {
                 offset,
-                ordinal: ordinal + r * cols,
+                ordinal: start + r * cols,
             });
         }
-        ordinal += count;
         let grid_height =
             num_rows as f32 * cell_width + num_rows.saturating_sub(1) as f32 * spacing::SM;
         y = grid_top + grid_height + spacing::LG;
@@ -179,41 +186,28 @@ pub(crate) fn row_starts(
     rows
 }
 
-/// Display-order card count per date section (Time sort) or a single section
-/// (any other sort). Time sort keeps each date contiguous, so counting runs
-/// over `sorted_view` reproduces exactly what the grouped view renders.
-pub(crate) fn section_counts(
+/// Display-order `(start, count)` runs: one per date section under Time sort,
+/// a single section under any other sort. `start` is a position in display
+/// order, not an index into `items`. Both the render and the scroll-anchor row
+/// model build from this one call, so they cannot drift apart.
+pub(crate) fn sections(
     items: &[Item],
     sorted_view: &BTreeMap<SortKey, usize>,
     ascending: bool,
     grouped: bool,
-) -> Vec<usize> {
+) -> Vec<(usize, usize)> {
     if !grouped {
         return if sorted_view.is_empty() {
             Vec::new()
         } else {
-            vec![sorted_view.len()]
+            vec![(0, sorted_view.len())]
         };
     }
-    let ordered: Box<dyn Iterator<Item = usize>> = if ascending {
-        Box::new(sorted_view.values().copied())
+    if ascending {
+        date_sections(items, sorted_view.values().copied())
     } else {
-        Box::new(sorted_view.values().rev().copied())
-    };
-    let mut counts: Vec<usize> = Vec::new();
-    let mut current: Option<NaiveDate> = None;
-    for idx in ordered {
-        let date = capture_date(&items[idx]);
-        if current == Some(date) {
-            *counts
-                .last_mut()
-                .expect("current date implies a section exists") += 1;
-        } else {
-            counts.push(1);
-            current = Some(date);
-        }
+        date_sections(items, sorted_view.values().rev().copied())
     }
-    counts
 }
 
 /// Row index `steps` rows from `offset` (positive down, negative up). When
@@ -545,19 +539,12 @@ pub(crate) fn thumbnail_grid<'a>(
             sorted_view.values().rev().copied().collect()
         };
 
-        // Split into date sections (one section when not grouping). Sections are
-        // contiguous runs in `order` under Time sort, matching `section_counts`.
-        let sections: Vec<(usize, usize)> = if group_by_date {
-            date_sections(items, &order)
-        } else {
-            vec![(0, order.len())]
-        };
+        let sections = sections(items, sorted_view, ascending, group_by_date);
 
         // The same row model and window function the update side uses to decide
         // which thumbnails to load (`window_item_indices`), so the rendered
         // rows and the loaded thumbnails cannot drift apart.
-        let counts: Vec<usize> = sections.iter().map(|&(_, count)| count).collect();
-        let rows = row_starts(&counts, cols, cell_width, group_by_date);
+        let rows = row_starts(&sections, cols, cell_width, header_block(group_by_date));
         let row_window = visible_row_window(&rows, scroll_y, viewport_height, GRID_OVERSCAN)
             .expect("a non-empty sorted view yields rows");
 
@@ -612,20 +599,23 @@ pub(crate) fn thumbnail_grid<'a>(
         .into()
 }
 
-/// Split display-order indices into contiguous `(start, count)` runs sharing a
-/// capture date, matching [`section_counts`] so the render and the scroll-anchor
-/// row model stay in lockstep.
-fn date_sections(items: &[Item], order: &[usize]) -> Vec<(usize, usize)> {
-    let mut sections = Vec::new();
-    let mut i = 0;
-    while i < order.len() {
-        let date = capture_date(&items[order[i]]);
-        let mut j = i + 1;
-        while j < order.len() && capture_date(&items[order[j]]) == date {
-            j += 1;
+/// Split display order into contiguous `(start, count)` runs sharing a capture
+/// date. `order` yields item indices in display order; `start` is a position
+/// within that sequence, not an index into `items`.
+fn date_sections(items: &[Item], order: impl IntoIterator<Item = usize>) -> Vec<(usize, usize)> {
+    let mut sections: Vec<(usize, usize)> = Vec::new();
+    let mut current = None;
+    for (position, index) in order.into_iter().enumerate() {
+        let date = capture_date(&items[index]);
+        if current == Some(date) {
+            sections
+                .last_mut()
+                .expect("no open section for the current date")
+                .1 += 1;
+        } else {
+            sections.push((position, 1));
+            current = Some(date);
         }
-        sections.push((i, j - i));
-        i = j;
     }
     sections
 }
@@ -652,11 +642,7 @@ fn build_sections<'a>(
     row_window: (usize, usize),
     build_cell: &dyn Fn(usize) -> Element<'a, Event>,
 ) -> Element<'a, Event> {
-    let header_block = if grouped {
-        DATE_HEADER_HEIGHT + spacing::XS
-    } else {
-        0.0
-    };
+    let header_block = header_block(grouped);
 
     let mut section_els: Vec<Element<'a, Event>> = Vec::with_capacity(sections.len());
     // Global index of the current section's first row, in `row_starts` numbering.
@@ -972,7 +958,7 @@ fn preview_icon() -> Element<'static, CellEvent> {
 mod tests {
     use super::{
         CELL_WIDTH, DATE_HEADER_HEIGHT, RowStart, anchor_row, grid_metrics, grid_width,
-        row_for_ordinal, row_run_spacers, row_starts, step_row, visible_row_window,
+        header_block, row_for_ordinal, row_run_spacers, row_starts, step_row, visible_row_window,
     };
     use crate::theme::spacing;
 
@@ -997,7 +983,7 @@ mod tests {
         // 7 cards, 3 columns → 3 rows. First row anchors to the top (offset 0);
         // later rows keep an SM gap so the previous row ends at the viewport
         // edge instead of bleeding its card bottoms in.
-        let rows = row_starts(&[7], 3, CW, false);
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
         assert_eq!(offsets(&rows), vec![0.0, PITCH + GAP, 2.0 * PITCH + GAP]);
         assert_eq!(ordinals(&rows), vec![0, 3, 6]);
     }
@@ -1005,7 +991,7 @@ mod tests {
     #[test]
     fn grouped_sections_add_header_and_section_gaps() {
         // Section 0: 4 cards / 3 cols = 2 rows. Section 1: 5 cards / 3 cols = 2 rows.
-        let rows = row_starts(&[4, 5], 3, CW, true);
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true));
         let header_block = DATE_HEADER_HEIGHT + spacing::XS; // 30
 
         // Section 0, row 0 snaps to the header top (offset 0).
@@ -1025,7 +1011,7 @@ mod tests {
 
     #[test]
     fn step_row_moves_one_row_per_step_from_aligned_offset() {
-        let rows = row_starts(&[7], 3, CW, false);
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
         let o = offsets(&rows);
         assert_eq!(step_row(&rows, o[0], 1), Some(1));
         assert_eq!(step_row(&rows, o[0], 2), Some(2));
@@ -1036,7 +1022,7 @@ mod tests {
 
     #[test]
     fn step_row_realigns_from_unaligned_offset() {
-        let rows = row_starts(&[7], 3, CW, false); // offsets 0, 116, 224
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0); // offsets 0, 116, 224
         // Mid-way between row 0 and row 1 after a free drag.
         assert_eq!(step_row(&rows, 50.0, 1), Some(1));
         assert_eq!(step_row(&rows, 50.0, -1), Some(0));
@@ -1047,7 +1033,7 @@ mod tests {
 
     #[test]
     fn step_row_clamps_within_rows_and_noops_past_the_ends() {
-        let rows = row_starts(&[7], 3, CW, false); // 3 rows
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0); // 3 rows
         let o = offsets(&rows);
         // A next/previous boundary exists: overshooting steps clamp to it.
         assert_eq!(step_row(&rows, o[1], 5), Some(2));
@@ -1083,7 +1069,7 @@ mod tests {
 
     #[test]
     fn anchor_row_finds_row_containing_offset() {
-        let rows = row_starts(&[7], 3, CW, false);
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
         let o = offsets(&rows);
         assert_eq!(anchor_row(&rows, o[0]), Some(0));
         assert_eq!(anchor_row(&rows, 50.0), Some(0));
@@ -1094,7 +1080,7 @@ mod tests {
 
     #[test]
     fn row_for_ordinal_maps_card_to_its_row() {
-        let rows = row_starts(&[4, 5], 3, CW, true); // ordinals 0, 3, 4, 7
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true)); // ordinals 0, 3, 4, 7
         assert_eq!(row_for_ordinal(&rows, 0), Some(0));
         assert_eq!(row_for_ordinal(&rows, 3), Some(1));
         assert_eq!(row_for_ordinal(&rows, 4), Some(2));
@@ -1106,7 +1092,7 @@ mod tests {
     fn reanchor_is_a_noop_at_unchanged_geometry() {
         // The resize-pinning invariant: anchoring an exact row offset and
         // re-resolving it under identical geometry returns the same offset.
-        let rows = row_starts(&[4, 5], 3, CW, true);
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true));
         for row in &rows {
             let anchor = anchor_row(&rows, row.offset).expect("row exists");
             let ordinal = rows[anchor].ordinal;
@@ -1123,8 +1109,8 @@ mod tests {
     fn reanchor_keeps_top_card_visible_across_column_change() {
         // Grouped [4, 5]. At 3 columns the last row starts at card 7; after a
         // reflow to 2 columns that card must still sit in the row placed at top.
-        let old = row_starts(&[4, 5], 3, CW, true);
-        let new = row_starts(&[4, 5], 2, CW, true);
+        let old = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true));
+        let new = row_starts(&[(0, 4), (4, 5)], 2, CW, header_block(true));
 
         // Anchored at the section-1 second row (offset for card 7) under 3 cols.
         let old_idx = 3;
@@ -1148,7 +1134,7 @@ mod tests {
         // 5 cols → 9 at 3 cols → 8 at 2 cols), drifting toward the grid start.
         let anchor = 12;
         for cols in [5, 4, 3, 2, 3, 4, 5] {
-            let rows = row_starts(&[72], cols, CW, false);
+            let rows = row_starts(&[(0, 72)], cols, CW, 0.0);
             let target = row_for_ordinal(&rows, anchor).expect("card maps to a row");
             let start = rows[target].ordinal;
             assert!(
@@ -1157,7 +1143,7 @@ mod tests {
             );
         }
         // Returning to the original geometry restores the original top card.
-        let rows = row_starts(&[72], 2, CW, false);
+        let rows = row_starts(&[(0, 72)], 2, CW, 0.0);
         let target = row_for_ordinal(&rows, anchor).expect("card maps to a row");
         assert_eq!(rows[target].ordinal, 12);
     }
@@ -1364,7 +1350,7 @@ mod tests {
         ];
         let order: Vec<usize> = (0..items.len()).collect();
         assert_eq!(
-            super::date_sections(&items, &order),
+            super::date_sections(&items, order.iter().copied()),
             vec![(0, 2), (2, 1), (3, 2)]
         );
     }
