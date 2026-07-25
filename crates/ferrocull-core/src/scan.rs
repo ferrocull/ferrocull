@@ -21,12 +21,19 @@ use ferrocull_media::FileCategory;
 use crate::{
     cache::{self, ThumbnailCache},
     media::{CaptureSettings, CaptureTime},
-    thumbnail::{generate_raw_with_preread, generate_thumbnail_from_bytes, parse_exif_from_bytes},
+    thumbnail::{
+        self, ExifMetadata, Orientation, generate_photo_thumbnail, generate_raw_with_preread,
+    },
     xmp,
 };
 
 /// Bytes pre-read from the head of each file, reused for EXIF and thumbnail.
-const INITIAL_READ: usize = 2 * 1024 * 1024;
+///
+/// Large enough to cover the embedded preview of a typical RAW file, small
+/// enough to stay cheap: cold scans are I/O-bound and per-file time scales
+/// with bytes read. Files whose preview lies deeper fall back to continuation
+/// reads on the decode pool.
+const INITIAL_READ: usize = 512 * 1024;
 
 /// A file to scan. The concrete value is echoed back unchanged in
 /// [`Event::ExifLoaded`] so the caller can build its own item from it.
@@ -57,7 +64,7 @@ pub enum Event<T> {
     /// generation failed. Carries no pixel data.
     ThumbnailReady {
         path: PathBuf,
-        result: Result<(), String>,
+        result: Result<(), thumbnail::Error>,
     },
 }
 
@@ -91,6 +98,7 @@ struct ReadFile {
     category: FileCategory,
     data: Vec<u8>,
     handle: File,
+    orientation: Orientation,
     capture_time: CaptureTime,
     capture_settings: CaptureSettings,
     key: Option<String>,
@@ -118,9 +126,11 @@ where
             let queue = &queue;
             let on_event = &on_event;
             scope.spawn(move || {
-                loop {
-                    let next = queue.lock().expect("reader queue lock poisoned").next();
-                    let Some(file) = next else { break };
+                // Keep the lock inside the closure: a `queue.lock()...next()`
+                // scrutinee holds the guard across the whole loop body, which
+                // serializes the readers.
+                let next_file = || queue.lock().expect("reader queue lock poisoned").next();
+                while let Some(file) = next_file() {
                     if let Some(read) = read_stage(file, cache, on_event) {
                         tx.send(read).expect("decode pool hung up");
                     }
@@ -182,6 +192,7 @@ where
         && let Some(c) = cache
         && let Ok(Some(entry)) = c.load(k)
     {
+        tracing::debug!(path = %path.display(), "thumbnail cache hit");
         on_event(Event::ExifLoaded {
             file,
             canonical_path,
@@ -196,6 +207,7 @@ where
         return None;
     }
 
+    tracing::debug!(path = %path.display(), "thumbnail cache miss, generating");
     let (mut data, mut handle) = match preread(&path) {
         Ok(v) => v,
         Err(e) => {
@@ -204,14 +216,15 @@ where
         }
     };
 
-    // Fall back to file modification time if EXIF carries no date.
-    let (exif_time, capture_settings) = parse_exif_from_bytes(&data);
-    let capture_time = exif_time.unwrap_or_else(|| {
+    // Orientation rides through to the decode pool so EXIF is parsed once per
+    // file. Fall back to file modification time if EXIF carries no date.
+    let exif = ExifMetadata::parse(&data);
+    let capture_time = exif.capture_time.unwrap_or_else(|| {
         let mtime = handle
             .metadata()
-            .expect("file already opened")
+            .expect("fstat failed on an open file")
             .modified()
-            .expect("modification time available");
+            .expect("file mtime unavailable");
         CaptureTime::new(DateTime::<Utc>::from(mtime), 0)
     });
 
@@ -219,7 +232,7 @@ where
         file,
         canonical_path,
         capture_time,
-        capture_settings: capture_settings.clone(),
+        capture_settings: exif.capture_settings.clone(),
         xmp,
     });
 
@@ -227,12 +240,13 @@ where
     // pool. RAW files usually decode from the pre-read head; the rare
     // continuation reads happen on the decode pool instead.
     if category == FileCategory::Photo
-        && let Err(e) = handle.read_to_end(&mut data)
+        && let Err(source) = handle.read_to_end(&mut data)
     {
-        on_event(Event::ThumbnailReady {
-            path,
-            result: Err(e.to_string()),
+        let result = Err(thumbnail::Error::Io {
+            path: path.clone(),
+            source,
         });
+        on_event(Event::ThumbnailReady { path, result });
         return None;
     }
 
@@ -241,8 +255,9 @@ where
         category,
         data,
         handle,
+        orientation: exif.orientation,
         capture_time,
-        capture_settings,
+        capture_settings: exif.capture_settings,
         key,
     })
 }
@@ -262,18 +277,18 @@ fn decode_stage<T, F>(
         category,
         data,
         mut handle,
+        orientation,
         capture_time,
         capture_settings,
         key,
     } = read;
 
     let thumb_result = match category {
-        FileCategory::Photo => generate_thumbnail_from_bytes(&data, &path, thumbnail_size)
-            .map(|r| r.jpeg)
-            .map_err(|e| e.to_string()),
-        FileCategory::Raw => generate_raw_with_preread(data, &mut handle, thumbnail_size, &path)
-            .map_err(|e| e.to_string()),
-        _ => Err("unsupported format".to_owned()),
+        FileCategory::Photo => generate_photo_thumbnail(&data, orientation, thumbnail_size),
+        FileCategory::Raw => {
+            generate_raw_with_preread(data, &mut handle, orientation, thumbnail_size, &path)
+        }
+        _ => Err(thumbnail::Error::UnsupportedFormat { path: path.clone() }),
     };
 
     if let Ok(ref img) = thumb_result
@@ -461,7 +476,9 @@ mod tests {
                     capture_settings,
                     ..
                 } => Rec::Exif(capture_time, capture_settings),
-                Event::ThumbnailReady { result, .. } => Rec::Thumbnail(result),
+                Event::ThumbnailReady { result, .. } => {
+                    Rec::Thumbnail(result.map_err(|e| e.to_string()))
+                }
             };
             recorded.lock().expect("lock recorder").push(rec);
         });

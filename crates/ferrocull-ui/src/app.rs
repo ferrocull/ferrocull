@@ -990,6 +990,8 @@ fn spawn_thumbnail_sipper(
         rayon::spawn(move || {
             let inputs = files.into_iter().map(ScanFile).collect();
             scan::run(inputs, thumbnail_size, Some(cache.as_ref()), |event| {
+                // A send error means the sipper task is gone (UI closed or scan
+                // superseded), so the event has nowhere to go.
                 drop(tx.send(event));
             });
         });
@@ -1017,7 +1019,7 @@ fn spawn_thumbnail_sipper(
                         xmp,
                     },
                     scan::Event::ThumbnailReady { path, result } => {
-                        ScanEvent::ThumbnailCached(path, result)
+                        ScanEvent::ThumbnailCached(path, result.map_err(|e| e.to_string()))
                     }
                 })
                 .collect();
@@ -1195,7 +1197,10 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
                             xmp.as_ref(),
                         );
                     }
-                    ScanEvent::ThumbnailCached(_path, _result) => {
+                    ScanEvent::ThumbnailCached(path, result) => {
+                        if let Err(error) = result {
+                            tracing::warn!(path = %path.display(), %error, "thumbnail generation failed");
+                        }
                         state.handle_thumbnail_cached();
                         // A newly-cached thumbnail is now loadable from disk, so
                         // the next reconcile must retry every in-window thumbnail.
