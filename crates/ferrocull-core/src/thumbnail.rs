@@ -60,13 +60,12 @@ pub fn extract_largest_preview(path: &Path) -> Result<Vec<u8>, Error> {
                 path: path.to_path_buf(),
                 source,
             })?;
-            let orientation = parse_orientation(&data);
-            if orientation <= 1 {
+            let orientation = Orientation::parse(&data);
+            if orientation == Orientation::Normal {
                 return Ok(data);
             }
             let img = image::load_from_memory(&data)?;
-            let oriented = apply_orientation_transform(img, orientation);
-            encode_jpeg(&oriented.to_rgb8(), PREVIEW_JPEG_QUALITY)
+            encode_jpeg(&orientation.apply(img).to_rgb8(), PREVIEW_JPEG_QUALITY)
         }
         FileCategory::Raw => extract_raw_largest_preview(path),
         FileCategory::Video | FileCategory::Sidecar => Err(Error::UnsupportedFormat {
@@ -94,19 +93,18 @@ fn extract_raw_largest_preview(path: &Path) -> Result<Vec<u8>, Error> {
         .ok_or(Error::NoEmbeddedPreview {
             path: path.to_path_buf(),
         })?;
-    oriented_preview(span.bytes(&data), parse_orientation(&data))
+    oriented_preview(span.bytes(&data), Orientation::parse(&data))
 }
 
 /// Return embedded preview JPEG bytes, applying EXIF orientation only if needed.
 /// Orients at full resolution: previews keep their native size for full-screen
 /// display.
-fn oriented_preview(jpeg: &[u8], orientation: u32) -> Result<Vec<u8>, Error> {
-    if orientation <= 1 {
+fn oriented_preview(jpeg: &[u8], orientation: Orientation) -> Result<Vec<u8>, Error> {
+    if orientation == Orientation::Normal {
         return Ok(jpeg.to_vec());
     }
     let img = image::load_from_memory(jpeg)?;
-    let oriented = apply_orientation_transform(img, orientation);
-    encode_jpeg(&oriented.to_rgb8(), PREVIEW_JPEG_QUALITY)
+    encode_jpeg(&orientation.apply(img).to_rgb8(), PREVIEW_JPEG_QUALITY)
 }
 
 /// JPEG quality for thumbnails (small images, size matters more than quality).
@@ -115,19 +113,60 @@ const THUMBNAIL_JPEG_QUALITY: u8 = 80;
 /// JPEG quality for full-screen previews (quality matters).
 const PREVIEW_JPEG_QUALITY: u8 = 92;
 
-/// Parse the EXIF orientation from file bytes, defaulting to 1 (no transform)
-/// when the file carries no readable EXIF.
-fn parse_orientation(data: &[u8]) -> u32 {
-    exif::Reader::new()
-        .read_from_container(&mut io::Cursor::new(data))
-        .map_or(1, |exif| orientation_from_exif(&exif))
+/// EXIF orientation (TIFF 6.0 tag 0x0112): the transform that takes stored
+/// pixels to display orientation. Absent, unreadable, or out-of-range tag
+/// values are [`Orientation::Normal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Orientation {
+    #[default]
+    Normal,
+    FlipHorizontal,
+    Rotate180,
+    FlipVertical,
+    Transpose,
+    Rotate90,
+    Transverse,
+    Rotate270,
 }
 
-/// EXIF orientation tag, defaulting to 1 (no transform) when absent.
-fn orientation_from_exif(exif: &exif::Exif) -> u32 {
-    exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
-        .and_then(|f| f.value.get_uint(0))
-        .unwrap_or(1)
+impl Orientation {
+    /// Parse from file bytes, reading only the header portion.
+    fn parse(data: &[u8]) -> Self {
+        exif::Reader::new()
+            .read_from_container(&mut io::Cursor::new(data))
+            .map_or(Self::Normal, |exif| Self::from_exif(&exif))
+    }
+
+    fn from_exif(exif: &exif::Exif) -> Self {
+        match exif
+            .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+            .and_then(|f| f.value.get_uint(0))
+        {
+            Some(2) => Self::FlipHorizontal,
+            Some(3) => Self::Rotate180,
+            Some(4) => Self::FlipVertical,
+            Some(5) => Self::Transpose,
+            Some(6) => Self::Rotate90,
+            Some(7) => Self::Transverse,
+            Some(8) => Self::Rotate270,
+            _ => Self::Normal,
+        }
+    }
+
+    /// Apply the transform. [`Self::Normal`] returns `img` untouched, so
+    /// callers can skip a decode/re-encode round trip by checking for it.
+    fn apply(self, img: DynamicImage) -> DynamicImage {
+        match self {
+            Self::Normal => img,
+            Self::FlipHorizontal => img.fliph(),
+            Self::Rotate180 => img.rotate180(),
+            Self::FlipVertical => img.flipv(),
+            Self::Transpose => img.rotate90().fliph(),
+            Self::Rotate90 => img.rotate90(),
+            Self::Transverse => img.rotate270().fliph(),
+            Self::Rotate270 => img.rotate270(),
+        }
+    }
 }
 
 /// Shared EXIF capture time parsing from parsed Exif data.
@@ -346,20 +385,6 @@ fn scale_dimensions(src_w: u32, src_h: u32, target: u32) -> (u32, u32) {
     }
 }
 
-/// Apply orientation transform based on EXIF orientation value.
-fn apply_orientation_transform(img: DynamicImage, orientation: u32) -> DynamicImage {
-    match orientation {
-        2 => img.fliph(),
-        3 => img.rotate180(),
-        4 => img.flipv(),
-        5 => img.rotate90().fliph(),
-        6 => img.rotate90(),
-        7 => img.rotate270().fliph(),
-        8 => img.rotate270(),
-        _ => img,
-    }
-}
-
 /// True if the span is a JPEG our decode pipeline can display: a well-formed
 /// marker stream whose frame header is Huffman baseline/extended/progressive
 /// (SOF0/1/2). Expects `data` to start with SOI, which the scanner guarantees
@@ -433,29 +458,36 @@ fn displayable_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// Parse orientation, capture time, and capture settings from file bytes (only
-/// reads the header portion) in a single EXIF pass. A file with no readable
-/// EXIF yields orientation 1, no time, and empty settings; the caller decides
-/// how to fill the gaps.
-#[must_use]
-pub(crate) fn parse_exif_from_bytes(data: &[u8]) -> (u32, Option<CaptureTime>, CaptureSettings) {
-    let mut cursor = io::Cursor::new(data);
-    let Ok(exif) = exif::Reader::new().read_from_container(&mut cursor) else {
-        return (1, None, CaptureSettings::default());
-    };
-    (
-        orientation_from_exif(&exif),
-        parse_capture_time_from_exif(&exif),
-        parse_capture_settings_from_exif(&exif),
-    )
+/// What a single EXIF pass over a file header yields. A file with no readable
+/// EXIF parses to [`Orientation::Normal`], no capture time, and empty
+/// settings; the caller decides how to fill the gaps.
+#[derive(Debug, Default)]
+pub(crate) struct ExifMetadata {
+    pub(crate) orientation: Orientation,
+    pub(crate) capture_time: Option<CaptureTime>,
+    pub(crate) capture_settings: CaptureSettings,
 }
 
-/// Generate thumbnail JPEG bytes from a fully-read Photo (JPEG or PNG). The
-/// caller has already parsed EXIF, so orientation is passed in rather than
-/// re-derived here.
+impl ExifMetadata {
+    /// Parse from file bytes, reading only the header portion.
+    #[must_use]
+    pub(crate) fn parse(data: &[u8]) -> Self {
+        let mut cursor = io::Cursor::new(data);
+        let Ok(exif) = exif::Reader::new().read_from_container(&mut cursor) else {
+            return Self::default();
+        };
+        Self {
+            orientation: Orientation::from_exif(&exif),
+            capture_time: parse_capture_time_from_exif(&exif),
+            capture_settings: parse_capture_settings_from_exif(&exif),
+        }
+    }
+}
+
+/// Generate thumbnail JPEG bytes from a fully-read Photo (JPEG or PNG).
 pub(crate) fn generate_photo_thumbnail(
     data: &[u8],
-    orientation: u32,
+    orientation: Orientation,
     size: u32,
 ) -> Result<Vec<u8>, Error> {
     let img = decode_photo_scaled(data, size)?;
@@ -464,9 +496,13 @@ pub(crate) fn generate_photo_thumbnail(
 
 /// Shared tail of thumbnail generation: resize to `size`, apply the EXIF
 /// orientation, and encode at thumbnail quality.
-fn resize_orient_encode(img: DynamicImage, orientation: u32, size: u32) -> Result<Vec<u8>, Error> {
+fn resize_orient_encode(
+    img: DynamicImage,
+    orientation: Orientation,
+    size: u32,
+) -> Result<Vec<u8>, Error> {
     let resized = resize_fast(img, size)?;
-    let oriented = apply_orientation_transform(DynamicImage::ImageRgb8(resized), orientation);
+    let oriented = orientation.apply(DynamicImage::ImageRgb8(resized));
     encode_jpeg(&oriented.into_rgb8(), THUMBNAIL_JPEG_QUALITY)
 }
 
@@ -546,13 +582,12 @@ impl JpegScanner {
     /// Return the first not-yet-attempted completed span whose pixel dimensions
     /// suffice for a `size`-pixel thumbnail (longest side >= `size`).
     /// `attempted` holds the spans already tried, so an incremental read tries
-    /// each qualifying span at most once instead of re-selecting a span that
-    /// failed to decode on every subsequent chunk.
+    /// each qualifying span at most once. `data` is the buffer the spans index
+    /// into.
     ///
-    /// Byte length is not the gate here: a heavily compressed preview can be a
-    /// few tens of KB yet full thumbnail resolution, and rejecting it forces
-    /// continuation reads deep into the file. `data` is the buffer the spans
-    /// index into.
+    /// The gate is pixels, not byte length: a heavily compressed preview can be
+    /// a few tens of KB yet full thumbnail resolution, and rejecting it would
+    /// force continuation reads deep into the file.
     fn next_preview_span(&self, data: &[u8], size: u32, attempted: &[Span]) -> Option<Span> {
         self.spans
             .iter()
@@ -591,25 +626,27 @@ const READ_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 /// Callers chain multiple candidate JPEGs and try the next one on `Err`, so
 /// per-candidate failures aren't fatal — but the LAST attempt's error is what
 /// they surface to the user, which is more informative than a bare "no preview".
-fn try_decode_resize_encode(jpeg: &[u8], orientation: u32, size: u32) -> Result<Vec<u8>, Error> {
+fn try_decode_resize_encode(
+    jpeg: &[u8],
+    orientation: Orientation,
+    size: u32,
+) -> Result<Vec<u8>, Error> {
     let img = decode_jpeg_scaled(jpeg, size)?;
     resize_orient_encode(img, orientation, size)
 }
 
 /// Generate a RAW thumbnail from the pre-read head, continuing to read from
-/// `file` until a decodable embedded preview is found. The caller has already
-/// parsed EXIF, so orientation is passed in. Uses incremental JPEG scanning to
-/// avoid re-scanning already-processed bytes.
+/// `file` until a decodable embedded preview is found. Uses incremental JPEG
+/// scanning to avoid re-scanning already-processed bytes.
 ///
 /// Each qualifying span is decoded at most once: a span that fails to decode is
-/// recorded in `attempted` and skipped on every later chunk and in the final
-/// pass. The last decode error is kept so the caller surfaces the real cause;
-/// [`Error::NoEmbeddedPreview`] is reported only when no candidate span existed
-/// at all.
+/// skipped on every later chunk and in the final pass. The last decode error is
+/// kept so the caller surfaces the real cause; [`Error::NoEmbeddedPreview`] is
+/// reported only when no candidate span existed at all.
 pub(crate) fn generate_raw_with_preread(
     mut data: Vec<u8>,
     file: &mut File,
-    orientation: u32,
+    orientation: Orientation,
     size: u32,
     path: &Path,
 ) -> Result<Vec<u8>, Error> {
@@ -628,25 +665,25 @@ pub(crate) fn generate_raw_with_preread(
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
     loop {
-        if let Some(span) = scanner.next_preview_span(&data, size, &attempted) {
+        while let Some(span) = scanner.next_preview_span(&data, size, &attempted) {
             attempted.push(span);
             match try_decode_resize_encode(span.bytes(&data), orientation, size) {
                 Ok(result) => return Ok(result),
                 Err(e) => last_err = Some(e),
             }
-        } else if (data.len() as u64) >= file_len {
-            break;
-        } else {
-            let n = file.read(&mut buf).map_err(|source| Error::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            if n == 0 {
-                break;
-            }
-            data.extend_from_slice(&buf[..n]);
-            scanner.scan(&data);
         }
+        if (data.len() as u64) >= file_len {
+            break;
+        }
+        let n = file.read(&mut buf).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if n == 0 {
+            break;
+        }
+        data.extend_from_slice(&buf[..n]);
+        scanner.scan(&data);
     }
 
     // Final pass: try the spans not yet attempted, best (most pixels) first,
@@ -901,9 +938,8 @@ mod tests {
     #[test]
     fn next_preview_span_gates_on_pixels_not_bytes() {
         // A byte-heavy span below the requested size followed by a byte-light
-        // span at full thumbnail resolution — the shape of a dark, heavily
-        // compressed NEF preview. The old >=50KB byte gate rejected the second
-        // span and forced continuation reads; the pixel gate must accept it.
+        // span at full thumbnail resolution, the shape of a heavily compressed
+        // RAW preview.
         let small = jpeg_with_dimensions(160, 120, 4000);
         let large = jpeg_with_dimensions(1620, 1080, 0x60);
         assert!(
@@ -926,10 +962,6 @@ mod tests {
 
     #[test]
     fn next_preview_span_skips_already_attempted_spans() {
-        // Two qualifying spans in discovery order. With nothing attempted the
-        // first is returned; once it is recorded as attempted the selector must
-        // move on to the second rather than re-offer the failed one, and with
-        // both attempted it must report none.
         let first = jpeg_with_dimensions(1024, 768, 0x60);
         let second = jpeg_with_dimensions(1600, 1200, 0x60);
 
@@ -986,8 +1018,8 @@ mod tests {
         let resized = resize_fast(img, 100).expect("resize succeeds");
         assert_eq!((resized.width(), resized.height()), (100, 50));
 
-        // Orientation 6 (rotate 90) on the small image swaps to portrait 50x100.
-        let oriented = apply_orientation_transform(DynamicImage::ImageRgb8(resized), 6);
+        // Rotating the small image 90 degrees swaps it to portrait 50x100.
+        let oriented = Orientation::Rotate90.apply(DynamicImage::ImageRgb8(resized));
         assert_eq!((oriented.width(), oriented.height()), (50, 100));
     }
 
@@ -1006,8 +1038,7 @@ mod tests {
     fn preread_skips_corrupt_qualifying_span_for_a_good_one() {
         // A corrupt-but-displayable span (valid SOF header, no decodable
         // entropy) qualifies on pixels but fails to decode; a genuine preview
-        // follows it, arriving via a continuation read. The bad span must be
-        // attempted at most once and must not block the good one.
+        // follows it.
         let bad = jpeg_with_dimensions(1600, 1200, 0x60);
         let good = real_jpeg(640, 480);
 
@@ -1017,13 +1048,13 @@ mod tests {
         file_bytes.extend_from_slice(&good);
         fs::write(&path, &file_bytes).expect("write raw fixture");
 
-        // The preread holds only the bad span; the good span arrives on
-        // continuation, the shape that used to re-decode the bad span per chunk.
+        // The preread holds only the bad span, so the good one arrives through
+        // a continuation read.
         let mut file = File::open(&path).expect("open raw fixture");
         let mut preread = vec![0u8; bad.len()];
         file.read_exact(&mut preread).expect("read preread head");
 
-        let thumb = generate_raw_with_preread(preread, &mut file, 1, 256, &path)
+        let thumb = generate_raw_with_preread(preread, &mut file, Orientation::Normal, 256, &path)
             .expect("the genuine preview decodes despite the leading corrupt span");
         assert!(is_jpeg_magic(&thumb), "the generated thumbnail is a JPEG");
     }

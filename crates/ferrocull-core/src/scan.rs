@@ -21,16 +21,17 @@ use ferrocull_media::FileCategory;
 use crate::{
     cache::{self, ThumbnailCache},
     media::{CaptureSettings, CaptureTime},
-    thumbnail::{self, generate_photo_thumbnail, generate_raw_with_preread, parse_exif_from_bytes},
+    thumbnail::{
+        self, ExifMetadata, Orientation, generate_photo_thumbnail, generate_raw_with_preread,
+    },
     xmp,
 };
 
 /// Bytes pre-read from the head of each file, reused for EXIF and thumbnail.
 ///
-/// Sized to cover the embedded preview of typical RAW files (a Nikon Z5 II
-/// preview ends around 270KB) while staying small: cold scans are I/O-bound
-/// and per-file time scales with bytes read, so every head byte counts on
-/// slow media. Files whose preview lies deeper fall back to continuation
+/// Large enough to cover the embedded preview of a typical RAW file, small
+/// enough to stay cheap: cold scans are I/O-bound and per-file time scales
+/// with bytes read. Files whose preview lies deeper fall back to continuation
 /// reads on the decode pool.
 const INITIAL_READ: usize = 512 * 1024;
 
@@ -97,7 +98,7 @@ struct ReadFile {
     category: FileCategory,
     data: Vec<u8>,
     handle: File,
-    orientation: u32,
+    orientation: Orientation,
     capture_time: CaptureTime,
     capture_settings: CaptureSettings,
     key: Option<String>,
@@ -125,9 +126,11 @@ where
             let queue = &queue;
             let on_event = &on_event;
             scope.spawn(move || {
-                loop {
-                    let next = queue.lock().expect("reader queue lock poisoned").next();
-                    let Some(file) = next else { break };
+                // Keep the lock inside the closure: a `queue.lock()...next()`
+                // scrutinee holds the guard across the whole loop body, which
+                // serializes the readers.
+                let next_file = || queue.lock().expect("reader queue lock poisoned").next();
+                while let Some(file) = next_file() {
                     if let Some(read) = read_stage(file, cache, on_event) {
                         tx.send(read).expect("decode pool hung up");
                     }
@@ -189,6 +192,7 @@ where
         && let Some(c) = cache
         && let Ok(Some(entry)) = c.load(k)
     {
+        tracing::debug!(path = %path.display(), "thumbnail cache hit");
         on_event(Event::ExifLoaded {
             file,
             canonical_path,
@@ -203,6 +207,7 @@ where
         return None;
     }
 
+    tracing::debug!(path = %path.display(), "thumbnail cache miss, generating");
     let (mut data, mut handle) = match preread(&path) {
         Ok(v) => v,
         Err(e) => {
@@ -211,11 +216,10 @@ where
         }
     };
 
-    // Parse EXIF once here; orientation rides through to the decode pool so it
-    // is not re-parsed there. Fall back to file modification time if EXIF
-    // carries no date.
-    let (orientation, exif_time, capture_settings) = parse_exif_from_bytes(&data);
-    let capture_time = exif_time.unwrap_or_else(|| {
+    // Orientation rides through to the decode pool so EXIF is parsed once per
+    // file. Fall back to file modification time if EXIF carries no date.
+    let exif = ExifMetadata::parse(&data);
+    let capture_time = exif.capture_time.unwrap_or_else(|| {
         let mtime = handle
             .metadata()
             .expect("fstat failed on an open file")
@@ -228,7 +232,7 @@ where
         file,
         canonical_path,
         capture_time,
-        capture_settings: capture_settings.clone(),
+        capture_settings: exif.capture_settings.clone(),
         xmp,
     });
 
@@ -251,9 +255,9 @@ where
         category,
         data,
         handle,
-        orientation,
+        orientation: exif.orientation,
         capture_time,
-        capture_settings,
+        capture_settings: exif.capture_settings,
         key,
     })
 }

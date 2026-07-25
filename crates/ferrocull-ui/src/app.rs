@@ -990,9 +990,8 @@ fn spawn_thumbnail_sipper(
         rayon::spawn(move || {
             let inputs = files.into_iter().map(ScanFile).collect();
             scan::run(inputs, thumbnail_size, Some(cache.as_ref()), |event| {
-                // A send error means the receiver was dropped: the sipper task
-                // is gone (UI closed or scan superseded), so the event has
-                // nowhere to go and is safely discarded.
+                // A send error means the sipper task is gone (UI closed or scan
+                // superseded), so the event has nowhere to go.
                 drop(tx.send(event));
             });
         });
@@ -1020,9 +1019,6 @@ fn spawn_thumbnail_sipper(
                         xmp,
                     },
                     scan::Event::ThumbnailReady { path, result } => {
-                        // The typed `thumbnail::Error` flows through the whole
-                        // core pipeline; the UI message layer is its display
-                        // boundary, so stringify it here.
                         ScanEvent::ThumbnailCached(path, result.map_err(|e| e.to_string()))
                     }
                 })

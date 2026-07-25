@@ -6,9 +6,6 @@
 //! thumbnail cache, printing throughput. Evict the page cache first for a
 //! cold-storage measurement.
 
-// An example only exercises a slice of the crate; the unused-dependency lint
-// is aimed at the library itself, and a bench reports through stdout/stderr
-// rather than `tracing`.
 #![expect(unused_crate_dependencies, reason = "example uses few crate deps")]
 #![expect(
     clippy::print_stdout,
