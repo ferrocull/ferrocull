@@ -352,8 +352,8 @@ struct Ferrocull {
     grid_wheel_lines: f32,
     /// Memoized grid row model. The row starts only change when the media view,
     /// sort/grouping, or derived column geometry change, but `on_scroll` fires
-    /// many times per second — this caches the `O(items)` `section_counts` walk
-    /// so a scroll frame doesn't rebuild it. Held behind an `Rc` so the hot path
+    /// many times per second, so this caches the `O(items)` `sections` walk to
+    /// keep a scroll frame from rebuilding it. Held behind an `Rc` so the hot path
     /// hands out a cheap refcount bump instead of cloning the row vector.
     grid_rows_cache: Option<(GridRowsKey, Rc<[views::thumbnails::RowStart]>)>,
 }
