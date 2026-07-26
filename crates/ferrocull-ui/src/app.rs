@@ -1041,14 +1041,33 @@ fn boot() -> (Ferrocull, Task<Message>) {
     (state, task)
 }
 
+/// Freedesktop application ID. Must stay in sync with the basename of
+/// `assets/<APP_ID>.desktop` and of the installed icon: compositors match a
+/// window to its desktop entry by this string, and a mismatch costs the dock
+/// icon and window grouping.
+#[cfg(target_os = "linux")]
+const APP_ID: &str = "io.github.ferrocull.Ferrocull";
+
 /// # Errors
 /// Returns an error if the iced application fails to initialize or run.
 pub fn run() -> iced::Result {
     iced::application(boot, update, view)
         .title("Ferrocull")
+        .window(window_settings())
         .theme(theme)
         .subscription(subscription)
         .run()
+}
+
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: APP_ID.to_owned(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 fn subscription(_state: &Ferrocull) -> Subscription<Message> {
