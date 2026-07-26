@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Ferrocull
+GenericName=Photo Culler
+Comment=Cull and ingest photos, in the Photo Mechanic tradition
+Exec=ferrocull
+Icon=io.github.ferrocull.Ferrocull
+Terminal=false
+Categories=Graphics;Photography;Viewer;
+Keywords=photo;culling;rating;raw;ingest;
+StartupNotify=true
+StartupWMClass=io.github.ferrocull.Ferrocull
