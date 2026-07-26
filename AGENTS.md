@@ -94,7 +94,7 @@ Match Photo Mechanic for both shortcuts and user-facing terminology. Rationale: 
 
 ### Issue tracker
 
-GitHub Issues on `remigastaldi/ferrocull` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+GitHub Issues on `ferrocull/ferrocull` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
