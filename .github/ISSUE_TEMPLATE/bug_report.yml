@@ -1,0 +1,58 @@
+name: Bug report
+description: Something in Ferrocull behaves the wrong way
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Culling bugs are usually specific to a camera, a file format, or a platform, so the fields below are what make a report reproducible.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The commit you built from, since there are no releases yet. `git rev-parse --short HEAD`
+      placeholder: 1a179f3
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Fedora 42, macOS 15.3, Arch (kernel 7.1.2)
+    validations:
+      required: true
+
+  - type: input
+    id: files
+    attributes:
+      label: Camera and file format
+      description: Which camera wrote the files, and what you were culling. Say "not applicable" if the bug has nothing to do with the images.
+      placeholder: Canon EOS R5, CR3 plus JPEG on a CFexpress card
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what Ferrocull did in response.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log output
+      description: Run with `RUST_LOG=debug ferrocull` and paste anything relevant. Automatically formatted as code, no backticks needed.
+      render: shell
+    validations:
+      required: false

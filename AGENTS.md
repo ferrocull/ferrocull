@@ -18,10 +18,7 @@ Rust **nightly** (pinned via `rust-toolchain.toml`), edition 2024 — nightly fe
 
 ## Commands
 
-- Build: `cargo build`
-- Run the app: `cargo run`
-- Test: `cargo test --workspace`
-- Pre-push gate: `cargo fmt` then `cargo clippy --workspace --all-targets` — resolve all lints
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for build, run, test, and the pre-push gate. It is the single source for those commands; do not restate them here.
 
 ## Workspace Layout
 
