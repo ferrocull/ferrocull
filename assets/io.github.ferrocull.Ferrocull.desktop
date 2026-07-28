@@ -2,7 +2,7 @@
 Type=Application
 Name=Ferrocull
 GenericName=Photo Culler
-Comment=Cull and ingest photos, in the Photo Mechanic tradition
+Comment=Cull and ingest photos fast, straight off the card
 Exec=ferrocull
 Icon=io.github.ferrocull.Ferrocull
 Terminal=false

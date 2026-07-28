@@ -40,6 +40,13 @@ Packagers can stage the tree with `make install prefix=/usr DESTDIR=$pkgdir`;
 
 Ferrocull is a personal project first, but pull requests and suggestions are welcome. There's no `CONTRIBUTING.md` yet, for now, open an issue to discuss anything non-trivial before sending a PR.
 
+## Trademarks
+
+Photo Mechanic is a trademark of Camera Bits, Inc. Ferrocull is an independent
+project, not affiliated with, sponsored by, or endorsed by Camera Bits. The name
+is used only to describe where Ferrocull's keyboard shortcuts and vocabulary come
+from.
+
 ## License
 
 [Apache-2.0](./LICENSE)
