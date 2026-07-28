@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 use ferrocull_devices::Source;
 use iced::{
-    Element, Fill, Length,
+    Center, Element, Fill, Length,
     widget::{Space, button, checkbox, column, container, progress_bar, row, text},
 };
 
@@ -109,39 +109,19 @@ fn source_row(
         ),
     };
 
-    let mut info_column = column![
-        text(name).size(12).color(palette.background.base.text),
-        text(subtitle)
-            .size(10)
-            .color(palette.background.strong.text),
-    ]
-    .spacing(2);
-
-    if let Some((total, used)) = storage {
-        let bar = container(
-            progress_bar(0.0..=1.0, storage_ratio(used, total)).style(styles::storage_progress),
-        )
-        .height(Length::Fixed(3.0));
-        info_column = info_column
-            .push(Space::new().height(spacing::XS))
-            .push(bar)
-            .push(
-                text(format_storage(used, total))
-                    .size(10)
-                    .color(palette.background.strong.text),
-            );
-    }
-
-    let mut r = row![].spacing(spacing::SM);
+    let mut header = row![].spacing(spacing::SM).align_y(Center);
 
     if let Some(toggle_msg) = on_toggle {
-        r = r.push(checkbox(is_selected).on_toggle(move |_| toggle_msg.clone()));
+        header = header.push(checkbox(is_selected).on_toggle(move |_| toggle_msg.clone()));
     }
 
-    r = r.push(text(icon).size(14)).push(info_column);
+    header = header
+        .push(text(icon).size(14))
+        .push(text(name).size(12).color(palette.background.base.text))
+        .push(Space::new().width(Fill));
 
     if let Some(act) = action {
-        r = r.push(Space::new().width(Fill)).push(
+        header = header.push(
             button(text(act.label).size(10).color(palette.background.base.text))
                 .on_press(act.message)
                 .padding([spacing::XS, spacing::SM])
@@ -149,7 +129,37 @@ fn source_row(
         );
     }
 
-    r.into()
+    // Details sit outside the header row so they span the card's full width
+    // instead of being boxed into the column right of the checkbox and icon.
+    let mut path_row = row![
+        text(subtitle)
+            .size(10)
+            .color(palette.background.strong.text),
+    ]
+    .spacing(spacing::SM)
+    .align_y(Center);
+
+    if let Some((total, used)) = storage {
+        path_row = path_row.push(Space::new().width(Fill)).push(
+            text(format_storage(used, total))
+                .size(10)
+                .color(palette.background.strong.text),
+        );
+    }
+
+    let mut details = column![path_row].spacing(spacing::XS);
+
+    if let Some((total, used)) = storage {
+        details = details.push(
+            container(
+                progress_bar(0.0..=1.0, storage_ratio(used, total)).style(styles::storage_progress),
+            )
+            .width(Fill)
+            .height(Length::Fixed(3.0)),
+        );
+    }
+
+    column![header, details].spacing(spacing::SM).into()
 }
 
 #[expect(
