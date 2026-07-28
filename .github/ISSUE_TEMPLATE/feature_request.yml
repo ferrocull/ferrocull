@@ -1,0 +1,23 @@
+name: Feature request
+description: Something Ferrocull should do and does not
+labels: ["needs-triage", "enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ferrocull is a culling and ingest tool. Editing, cataloguing and asset management are deliberately out of scope, so requests in that direction will be closed as `wontfix` however good the idea is. [PRODUCT.md](https://github.com/ferrocull/ferrocull/blob/main/PRODUCT.md) explains where the line sits.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What slows you down today
+      description: Describe the moment in your workflow where this bites, rather than the feature you have in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What Ferrocull should do instead
+    validations:
+      required: true
