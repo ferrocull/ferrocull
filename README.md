@@ -4,7 +4,7 @@ A FOSS culling tool for photographers, in the Photo Mechanic tradition, but open
 
 ## Status
 
-Alpha. Core culling (rating, color labels, tag/selection, RAW+JPEG grouping, burst detection, full-screen preview, compare mode) and ingest (pattern-based renaming, SHA256 verification, multi-destination, post-hooks, XMP sidecar export) are implemented. See [GitHub issues](https://github.com/remigastaldi/ferrocull/issues) for what's next.
+Alpha. Core culling (rating, color labels, tag/selection, RAW+JPEG grouping, burst detection, full-screen preview, compare mode) and ingest (pattern-based renaming, SHA256 verification, multi-destination, post-hooks, XMP sidecar export) are implemented. See [GitHub issues](https://github.com/ferrocull/ferrocull/issues) for what's next.
 
 ## Build
 
