@@ -12,8 +12,8 @@ use ferrocull_core::{
 use iced::{
     Color, ContentFit, Element, Fill, Shrink,
     widget::{
-        Space, Stack, center, column, container, grid, image, mouse_area, opaque, responsive,
-        scrollable, text,
+        Space, Stack, center, column, container, grid, image, mouse_area, responsive, scrollable,
+        text,
     },
 };
 
@@ -868,8 +868,10 @@ fn pair_badge<Message: 'static>() -> Element<'static, Message> {
         .into()
 }
 
+/// A full-cell wash. Transparent to input, so presses reach the card's
+/// `mouse_area` and a washed frame still focuses and opens in preview.
 fn color_overlay<Message: 'static>(color: Color) -> Element<'static, Message> {
-    container(opaque(container("").width(Fill).height(Fill)))
+    container("")
         .width(Fill)
         .height(Fill)
         .style(styles::solid_fill(color))
