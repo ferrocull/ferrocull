@@ -39,7 +39,11 @@ pub(crate) fn top_bar(
 
     let filename_text = text(filename).size(13).color(palette.background.base.text);
 
-    let close_btn = button(text("✕").size(14).color(palette.background.base.text))
+    let close_btn = button(
+        crate::icons::close()
+            .size(14)
+            .color(palette.background.base.text),
+    )
         .padding([6, 12])
         .style(styles::ghost_button)
         .on_press(Message::Preview(preview::Message::Close));

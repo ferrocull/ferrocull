@@ -5,7 +5,7 @@
 use ferrocull_core::media::Item;
 use iced::{
     Element, Fill,
-    widget::{Stack, container, text},
+    widget::{Stack, container},
 };
 
 use crate::{
@@ -119,12 +119,12 @@ pub(crate) fn marked<Message: 'static>(
 fn pill<Message: 'static>(mark: Mark, size: f32) -> Element<'static, Message> {
     let pad_y = size * 0.2;
     match mark {
-        // U+2717 ballot X — the same reject mark the "Hide ✗" filter uses.
-        Mark::Rejected => container(text("\u{2717}").size(size))
+        // The same reject mark the "Hide" filter toggle carries.
+        Mark::Rejected => container(crate::icons::reject().size(size))
             .padding([pad_y, size * 0.6])
             .style(styles::rounded_badge(colors::BADGE_REJECTED))
             .into(),
-        Mark::Tagged => container(text("\u{2713}").size(size).color(colors::ACCENT))
+        Mark::Tagged => container(crate::icons::tag_check().size(size).color(colors::ACCENT))
             .padding([pad_y, size * 0.5])
             .style(styles::overlay_badge)
             .into(),
@@ -132,14 +132,20 @@ fn pill<Message: 'static>(mark: Mark, size: f32) -> Element<'static, Message> {
         // this is tagged" without the solid badge's claim over the whole group.
         // The card also withholds the tagged wash, which is the cue that reads
         // first at thumbnail size.
-        Mark::PartiallyTagged => container(text("\u{2713}").size(size).color(colors::ACCENT))
-            .padding([pad_y, size * 0.5])
-            .style(styles::outlined_badge(colors::ACCENT))
-            .into(),
-        Mark::Ingested => container(text("\u{2913}").size(size).color(colors::BADGE_INGESTED))
-            .padding([pad_y, size * 0.5])
-            .style(styles::overlay_badge)
-            .into(),
+        Mark::PartiallyTagged => {
+            container(crate::icons::tag_check().size(size).color(colors::ACCENT))
+                .padding([pad_y, size * 0.5])
+                .style(styles::outlined_badge(colors::ACCENT))
+                .into()
+        }
+        Mark::Ingested => container(
+            crate::icons::ingested()
+                .size(size)
+                .color(colors::BADGE_INGESTED),
+        )
+        .padding([pad_y, size * 0.5])
+        .style(styles::overlay_badge)
+        .into(),
     }
 }
 

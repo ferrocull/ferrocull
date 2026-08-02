@@ -76,13 +76,13 @@ pub(crate) fn star_rating_row(
 
     let stars = row((1..=5i8).map(|i| {
         let (symbol, color) = if i <= display_rating {
-            ("★", filled_color)
+            (crate::icons::star_filled(), filled_color)
         } else {
-            ("☆", empty_color)
+            (crate::icons::star_outline(), empty_color)
         };
 
         let new_rating = if i == current_rating { 0 } else { i };
-        let star_text = text(symbol).size(font_size).color(color);
+        let star_text = symbol.size(font_size).color(color);
         mouse_area(star_text)
             .on_press(StarEvent::Rated(new_rating))
             .on_enter(StarEvent::Hover(Some(i)))

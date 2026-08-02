@@ -46,8 +46,12 @@ const fn month_name(month: u32) -> &'static str {
     }
 }
 
-const fn expand_icon(expanded: bool) -> &'static str {
-    if expanded { "▼" } else { "▶" }
+fn expand_icon(expanded: bool) -> iced::widget::Text<'static> {
+    if expanded {
+        crate::icons::chevron_expanded()
+    } else {
+        crate::icons::chevron_collapsed()
+    }
 }
 
 fn ordered_keys<K: Copy, V>(map: &BTreeMap<K, V>, ascending: bool) -> Vec<K> {
@@ -108,7 +112,7 @@ pub(crate) fn date_tree<'a>(
             rows.push(
                 button(
                     row![
-                        button(text(expand_icon(is_expanded)).size(10))
+                        button(expand_icon(is_expanded).size(10))
                             .padding([2, 4])
                             .style(button::text)
                             .on_press(Message::YearExpanded(year)),
@@ -135,7 +139,14 @@ pub(crate) fn date_tree<'a>(
             }
         }
 
-        let sort_toggle = button(text(if ascending { "↑" } else { "↓" }).size(11))
+        let sort_toggle = button(
+            if ascending {
+                crate::icons::sort_ascending()
+            } else {
+                crate::icons::sort_descending()
+            }
+            .size(11),
+        )
             .padding([2, 6])
             .style(styles::secondary_button)
             .on_press(Message::DateSortToggled);
@@ -173,7 +184,7 @@ fn push_month_rows(
             button(
                 row![
                     Space::new().width(16.0),
-                    button(text(expand_icon(is_expanded)).size(10))
+                    button(expand_icon(is_expanded).size(10))
                         .padding([2, 4])
                         .style(button::text)
                         .on_press(Message::MonthExpanded(year, month)),

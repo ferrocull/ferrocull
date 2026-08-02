@@ -6,13 +6,9 @@ use iced::{
 };
 
 use crate::{
-    styles,
+    icons, styles,
     theme::{colors, spacing},
 };
-
-/// Unicode chevrons for expand/collapse indicators.
-const CHEVRON_DOWN: &str = "▾";
-const CHEVRON_RIGHT: &str = "▸";
 
 pub(crate) fn collapsible_section<'a, Message: Clone + 'a>(
     title: &'a str,
@@ -21,9 +17,9 @@ pub(crate) fn collapsible_section<'a, Message: Clone + 'a>(
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let chevron = if expanded {
-        CHEVRON_DOWN
+        icons::chevron_expanded()
     } else {
-        CHEVRON_RIGHT
+        icons::chevron_collapsed()
     };
     let chevron_color = if expanded {
         colors::ACCENT
@@ -33,7 +29,7 @@ pub(crate) fn collapsible_section<'a, Message: Clone + 'a>(
 
     let header = button(
         row![
-            text(chevron).size(10).color(chevron_color),
+            chevron.size(10).color(chevron_color),
             Space::new().width(spacing::SM),
             text(title).size(12),
         ]
