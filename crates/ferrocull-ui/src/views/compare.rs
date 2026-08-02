@@ -67,8 +67,12 @@ pub(crate) fn top_bar(
             palette.background.base.text
         });
 
-    let lock_icon = if lock_scroll { "🔒" } else { "🔓" };
-    let lock_btn = button(text(lock_icon).size(14))
+    let lock_icon = if lock_scroll {
+        crate::icons::scroll_locked()
+    } else {
+        crate::icons::scroll_unlocked()
+    };
+    let lock_btn = button(lock_icon.size(14))
         .padding([4, 8])
         .style(if lock_scroll {
             styles::primary_button
@@ -77,10 +81,14 @@ pub(crate) fn top_bar(
         })
         .on_press(Message::Compare(compare::Message::ToggleLockScroll));
 
-    let close_btn = button(text("✕").size(14).color(palette.background.base.text))
-        .padding([6, 12])
-        .style(styles::ghost_button)
-        .on_press(Message::Compare(compare::Message::Exit));
+    let close_btn = button(
+        crate::icons::close()
+            .size(14)
+            .color(palette.background.base.text),
+    )
+    .padding([6, 12])
+    .style(styles::ghost_button)
+    .on_press(Message::Compare(compare::Message::Exit));
 
     // The select may be filtered out of the view; show "–" rather than a
     // misleading position.
@@ -221,15 +229,23 @@ pub(crate) fn bottom_bar(
     .style(styles::secondary_button)
     .on_press(Message::Compare(compare::Message::Promote));
 
-    let nav_prev = button(text("‹").size(24).color(palette.background.base.text))
-        .padding([10, 20])
-        .style(styles::ghost_button)
-        .on_press(Message::Compare(compare::Message::CandidatePrev));
+    let nav_prev = button(
+        crate::icons::nav_previous()
+            .size(14)
+            .color(palette.background.base.text),
+    )
+    .padding([10, 20])
+    .style(styles::ghost_button)
+    .on_press(Message::Compare(compare::Message::CandidatePrev));
 
-    let nav_next = button(text("›").size(24).color(palette.background.base.text))
-        .padding([10, 20])
-        .style(styles::ghost_button)
-        .on_press(Message::Compare(compare::Message::CandidateNext));
+    let nav_next = button(
+        crate::icons::nav_next()
+            .size(14)
+            .color(palette.background.base.text),
+    )
+    .padding([10, 20])
+    .style(styles::ghost_button)
+    .on_press(Message::Compare(compare::Message::CandidateNext));
 
     let h_btn = layout_toggle_btn(
         "H",

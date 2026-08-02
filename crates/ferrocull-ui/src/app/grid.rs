@@ -19,7 +19,8 @@ fn rating_desc(rating: i8) -> String {
     match rating {
         -1 => "Rejected".to_owned(),
         0 => "Unrated".to_owned(),
-        n => format!("\u{2605}{n}"),
+        1 => "1 star".to_owned(),
+        n => format!("{n} stars"),
     }
 }
 
@@ -1004,5 +1005,30 @@ impl Ferrocull {
                 self.media.item(idx).source_id.clone()
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rating_desc;
+
+    #[test]
+    fn rating_desc_words_every_rating_state() {
+        assert_eq!(rating_desc(-1), "Rejected");
+        assert_eq!(rating_desc(0), "Unrated");
+        assert_eq!(rating_desc(1), "1 star");
+        assert_eq!(rating_desc(3), "3 stars");
+        assert_eq!(rating_desc(5), "5 stars");
+    }
+
+    /// Status echoes are one plain string rendered in the UI font, so a rating
+    /// is spelled out: an icon-font glyph cannot ride in a format string, and a
+    /// Unicode star would fall back to whatever the system serves.
+    #[test]
+    fn rating_desc_carries_no_glyph() {
+        for rating in -1..=5 {
+            let desc = rating_desc(rating);
+            assert!(desc.is_ascii(), "{rating} echoes non-ASCII: {desc}");
+        }
     }
 }

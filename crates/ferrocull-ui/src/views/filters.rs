@@ -35,8 +35,12 @@ pub(crate) fn sort_controls(order: SortOrder, ascending: bool) -> Element<'stati
         .text_size(12)
         .padding([4, 8]);
 
-    let arrow = if ascending { "↑" } else { "↓" };
-    let asc_btn = button(text(arrow).size(12))
+    let arrow = if ascending {
+        crate::icons::sort_ascending()
+    } else {
+        crate::icons::sort_descending()
+    };
+    let asc_btn = button(arrow.size(12))
         .padding([4, 8])
         .style(styles::secondary_button)
         .on_press(Message::AscendingToggled);
@@ -81,26 +85,35 @@ pub(crate) fn grouping_controls(
     group_bursts: bool,
     hide_rejected: bool,
 ) -> Element<'static, Message> {
+    // The reject mark can't ride inside the checkbox's label string (it is an
+    // icon-font glyph), so the icon sits as a sibling of a "Hide" label.
+    let hide_rejected_toggle = row![
+        bool_toggle(hide_rejected, "Hide", Message::HideRejectedToggled),
+        crate::icons::reject().size(10).color(colors::DANGER),
+    ]
+    .spacing(3)
+    .align_y(iced::Alignment::Center);
+
     row![
         bool_toggle(group_raw_jpeg, "R+J", Message::GroupRawJpegToggled),
         bool_toggle(group_bursts, "Bursts", Message::GroupBurstsToggled),
-        bool_toggle(hide_rejected, "Hide ✗", Message::HideRejectedToggled),
+        hide_rejected_toggle,
     ]
     .spacing(spacing::MD)
     .into()
 }
 
 pub(crate) fn rating_filter(selected: &BTreeSet<i8>) -> Element<'_, Message> {
-    let rating_label = text("★").size(13).color(colors::ACCENT);
+    let rating_label = crate::icons::star_filled().size(13).color(colors::ACCENT);
 
     let rating_buttons = row((0..=5i8).map(|rating| {
         let is_selected = selected.contains(&rating);
-        let label = if rating == 0 {
-            "○".to_owned()
+        let label: Element<'static, Message> = if rating == 0 {
+            crate::icons::unrated().size(10).into()
         } else {
-            format!("{rating}")
+            text(rating.to_string()).size(10).into()
         };
-        button(text(label).size(10))
+        button(label)
             .padding([3, 7])
             .style(styles::filter_pill(is_selected))
             .on_press(Message::RatingFilterToggled(rating))

@@ -1,4 +1,6 @@
 mod app;
+pub(crate) mod fonts;
+pub(crate) mod icons;
 pub(crate) mod media_view;
 pub(crate) mod messages;
 pub(crate) mod styles;

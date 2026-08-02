@@ -16,6 +16,7 @@ iced = { workspace = true, features = [
   "sipper"
 ] }
 iced_aw = { version = "0.14", default-features = false, features = ["spinner"] }
+iced_fonts = { version = "0.3", features = ["bootstrap"] }
 image = { workspace = true }
 rayon = "1.12"
 rfd = "0.17"

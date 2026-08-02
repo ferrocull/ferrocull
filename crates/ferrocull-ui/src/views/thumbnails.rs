@@ -12,8 +12,8 @@ use ferrocull_core::{
 use iced::{
     Color, ContentFit, Element, Fill, Shrink,
     widget::{
-        Space, Stack, center, column, container, grid, image, mouse_area, responsive, scrollable,
-        text,
+        Space, Stack, center, column, container, grid, image, mouse_area, responsive, row,
+        scrollable, text,
     },
 };
 
@@ -881,9 +881,14 @@ fn color_overlay<Message: 'static>(color: Color) -> Element<'static, Message> {
 /// Rating indicator badge positioned in bottom-left corner (shown when not hovered).
 fn rated_badge<Message: 'static>(rating: i8) -> Element<'static, Message> {
     let badge = container(
-        text(format!("★{rating}"))
-            .size(10)
-            .color(colors::RATING_STAR),
+        row![
+            crate::icons::star_filled()
+                .size(9)
+                .color(colors::RATING_STAR),
+            text(rating.to_string()).size(10).color(colors::RATING_STAR),
+        ]
+        .spacing(2)
+        .align_y(iced::Alignment::Center),
     )
     .padding([2, 4])
     .style(styles::overlay_badge);
@@ -938,10 +943,9 @@ fn color_label_bar<Message: 'static>(label: ColorLabel) -> Element<'static, Mess
 }
 
 /// Preview affordance (zoom-in glyph) positioned in bottom-right corner on
-/// hover. ⊕ has text presentation, so it renders in the badge ink, not as a
-/// colored emoji.
+/// hover.
 fn preview_icon() -> Element<'static, CellEvent> {
-    let icon = container(text("\u{2295}").size(14))
+    let icon = container(crate::icons::zoom().size(14))
         .padding([4, 6])
         .style(styles::rounded_badge(
             colors::OVERLAY_BADGE.scale_alpha(0.7),

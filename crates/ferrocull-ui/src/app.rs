@@ -25,12 +25,12 @@ use ferrocull_core::{
 };
 use ferrocull_devices::{ScannedFile, Source};
 use iced::{
-    Element, Fill, Function, Length, Subscription, Task, Theme,
+    Color, Element, Fill, Function, Length, Subscription, Task, Theme,
     futures::SinkExt,
     keyboard::{self, Event as KeyboardEvent, Key, Modifiers},
     widget::{
-        Space, button, center, column, container, mouse_area, opaque, progress_bar, responsive,
-        row, scrollable, stack, text, tooltip,
+        Row, Space, button, center, column, container, mouse_area, opaque, progress_bar,
+        responsive, row, scrollable, stack, text, tooltip,
     },
 };
 use sipper::sipper;
@@ -1056,6 +1056,12 @@ pub fn run() -> iced::Result {
         .window(window_settings())
         .theme(theme)
         .subscription(subscription)
+        .font(crate::fonts::SANS_REGULAR_BYTES)
+        .font(crate::fonts::SANS_SEMIBOLD_BYTES)
+        .font(crate::fonts::MONO_REGULAR_BYTES)
+        .font(crate::fonts::MONO_SEMIBOLD_BYTES)
+        .font(iced_fonts::BOOTSTRAP_FONT_BYTES)
+        .default_font(crate::fonts::SANS)
         .run()
 }
 
@@ -1464,7 +1470,7 @@ fn ingest_failures_overlay(state: &Ferrocull) -> Element<'_, Message> {
 
 /// A key-cap pill carrying mono key text for the shortcut overlay.
 fn keycap(label: &'static str) -> Element<'static, Message> {
-    container(text(label).size(11).font(iced::Font::MONOSPACE))
+    container(text(label).size(11).font(crate::fonts::MONO))
         .padding([1, 5])
         .style(styles::keycap)
         .into()
@@ -1896,7 +1902,7 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
     )
     .map(Message::Filters);
 
-    let settings_btn = button(text("\u{2699}").size(16))
+    let settings_btn = button(crate::icons::settings().size(16))
         .padding(spacing::XS)
         .style(styles::icon_button)
         .on_press(Message::Settings(settings_msg::Message::Open));
@@ -2127,54 +2133,79 @@ fn progress_indicator<'a>(
     .into()
 }
 
-fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
-    use crate::theme::colors;
+/// An icon and its count, at the status bar's label scale.
+fn tally_pair(icon: iced::widget::Text<'_>, count: usize, ink: Color) -> Row<'_, Message> {
+    row![
+        icon.size(10).color(ink),
+        text(count.to_string()).size(12).color(ink),
+    ]
+    // Tighter than the layout scale: the glyph and its number read as one mark.
+    .spacing(3)
+    .align_y(iced::Alignment::Center)
+}
+
+/// The status bar's left readout: how much of the scan is on screen, the
+/// always-on session tally of rated and rejected, and the undo depth while
+/// there is something to undo. The tally counts come from the counters
+/// `MediaView` maintains at every rating mutation.
+fn status_readout(state: &Ferrocull) -> Element<'_, Message> {
     let palette = crate::theme::palette();
+    let ink = palette.background.base.text;
 
     let selected_count = state.selected.len();
-
     let visible_count = state.media.visible_len();
     let total_count = state.media.len();
 
-    // Always-on session tally: rated (★) and rejected (✗), derived from the
-    // counters MediaView maintains at every rating mutation.
-    let tally = format!(
-        "  \u{b7}  \u{2605}{}  \u{b7}  \u{2717}{}",
-        state.media.rated_count(),
-        state.media.rejected_count()
-    );
-
-    let left_text = if total_count == 0 {
+    let headline = if total_count == 0 {
         text("No files scanned")
             .size(12)
             .color(palette.background.strong.text)
     } else if visible_count < total_count {
         text(format!(
-            "Showing {visible_count} of {total_count} — Tagged: {selected_count}{tally}"
+            "Showing {visible_count} of {total_count} — Tagged: {selected_count}"
         ))
         .size(12)
-        .color(palette.background.base.text)
+        .color(ink)
     } else {
-        text(format!("Tagged: {selected_count} of {total_count}{tally}"))
+        text(format!("Tagged: {selected_count} of {total_count}"))
             .size(12)
-            .color(palette.background.base.text)
+            .color(ink)
     };
 
-    // Quiet undo-depth hint: present only while there is something to undo.
-    let undo_depth = state.undo_stack.undo_len();
-    let left: Element<'_, Message> = if undo_depth > 0 {
-        row![
-            left_text,
-            text(format!("\u{21a9} {undo_depth}"))
-                .size(11)
-                .color(palette.background.base.text),
-        ]
+    let mut readout = row![headline]
         .spacing(spacing::SM)
-        .align_y(iced::Alignment::Center)
-        .into()
-    } else {
-        left_text.into()
-    };
+        .align_y(iced::Alignment::Center);
+
+    if total_count > 0 {
+        readout = readout
+            .push(text("\u{b7}").size(12).color(ink))
+            .push(tally_pair(
+                crate::icons::star_filled(),
+                state.media.rated_count(),
+                ink,
+            ))
+            .push(text("\u{b7}").size(12).color(ink))
+            .push(tally_pair(
+                crate::icons::reject(),
+                state.media.rejected_count(),
+                ink,
+            ));
+    }
+
+    let undo_depth = state.undo_stack.undo_len();
+    if undo_depth > 0 {
+        readout = readout.push(tally_pair(crate::icons::undo(), undo_depth, ink));
+    }
+
+    readout.into()
+}
+
+fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
+    use crate::theme::colors;
+    let palette = crate::theme::palette();
+
+    let selected_count = state.selected.len();
+    let left = status_readout(state);
 
     let mut progress_items: Vec<Element<'_, Message>> = Vec::new();
 
