@@ -64,39 +64,55 @@ pub(crate) fn filter_mode_controls(mode: FilterMode) -> Element<'static, Message
     .into()
 }
 
-/// Labeled checkbox shared by every boolean axis in the bar.
-fn bool_toggle(value: bool, label: &'static str, msg: Message) -> Element<'static, Message> {
-    checkbox(value)
-        .label(label)
-        .text_size(11)
-        .on_toggle(move |_| msg)
-        .into()
+/// Labeled checkbox shared by every boolean axis in the bar. `on_toggle` of
+/// `None` renders it disabled, for an axis that qualifies another one and can
+/// mean nothing while that one is off.
+fn bool_toggle(
+    value: bool,
+    label: &'static str,
+    on_toggle: Option<Message>,
+) -> Element<'static, Message> {
+    let mut toggle = checkbox(value).label(label).text_size(11);
+    if let Some(msg) = on_toggle {
+        toggle = toggle.on_toggle(move |_| msg);
+    }
+    toggle.into()
 }
 
 /// Independent, stackable "not-yet-ingested only" toggle. Rendered as a boolean
 /// toggle (like the grouping toggles), distinct from the single-select type
 /// pills, since it composes with the type axis rather than replacing it.
 pub(crate) fn new_toggle(new_only: bool) -> Element<'static, Message> {
-    bool_toggle(new_only, "New", Message::NewOnlyToggled)
+    bool_toggle(new_only, "New", Some(Message::NewOnlyToggled))
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "one flag per checkbox in the row, each an independent view axis"
+)]
 pub(crate) fn grouping_controls(
     group_raw_jpeg: bool,
     group_bursts: bool,
+    expand_bursts: bool,
     hide_rejected: bool,
 ) -> Element<'static, Message> {
     // The reject mark can't ride inside the checkbox's label string (it is an
     // icon-font glyph), so the icon sits as a sibling of a "Hide" label.
     let hide_rejected_toggle = row![
-        bool_toggle(hide_rejected, "Hide", Message::HideRejectedToggled),
+        bool_toggle(hide_rejected, "Hide", Some(Message::HideRejectedToggled)),
         crate::icons::reject().size(10).color(colors::DANGER),
     ]
     .spacing(3)
     .align_y(iced::Alignment::Center);
 
     row![
-        bool_toggle(group_raw_jpeg, "R+J", Message::GroupRawJpegToggled),
-        bool_toggle(group_bursts, "Bursts", Message::GroupBurstsToggled),
+        bool_toggle(group_raw_jpeg, "R+J", Some(Message::GroupRawJpegToggled)),
+        bool_toggle(group_bursts, "Bursts", Some(Message::GroupBurstsToggled)),
+        bool_toggle(
+            expand_bursts,
+            "Expand",
+            group_bursts.then_some(Message::ExpandBurstsToggled)
+        ),
         hide_rejected_toggle,
     ]
     .spacing(spacing::MD)

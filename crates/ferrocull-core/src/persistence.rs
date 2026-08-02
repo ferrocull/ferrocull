@@ -120,6 +120,10 @@ pub struct ViewPrefs {
     pub hide_rejected: bool,
     pub group_raw_jpeg: bool,
     pub group_bursts: bool,
+    /// Whether a burst shows its members by default. Qualifies `group_bursts`
+    /// and means nothing while that is off. Per-burst folds made by hand are
+    /// session-only and never persisted.
+    pub expand_bursts: bool,
     pub date_tree_ascending: bool,
 }
 
@@ -133,6 +137,7 @@ impl Default for ViewPrefs {
             hide_rejected: false,
             group_raw_jpeg: true,
             group_bursts: true,
+            expand_bursts: false,
             date_tree_ascending: true,
         }
     }

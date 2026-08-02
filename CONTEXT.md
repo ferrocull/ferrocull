@@ -37,7 +37,7 @@ The specific `.xmp` [[sidecar]] carrying the metadata Ferrocull reads and writes
 _Avoid_: XMP file, Metadata file.
 
 **Burst**:
-A run of **3 or more** consecutive media files whose capture times are each within 1 second of the previous one; two shots within a second do not form a burst. A collapsed burst behaves as one virtual photo across the whole display sequence, [[preview]] included, shown as its [[representative]], and rating/labelling/tagging any member applies to all members. `B` or the burst badge collapses and expands it, from the grid and the preview alike, onto one shared expansion state.
+A run of **3 or more** consecutive media files whose capture times are each within 1 second of the previous one; two shots within a second do not form a burst. A collapsed burst behaves as one virtual photo across the whole display sequence, [[preview]] included, shown as its [[representative]], and rating/labelling/tagging any member applies to all members. `B` or the burst badge collapses and expands it, from the grid and the preview alike, onto one shared expansion state, whose default is the durable "Expand" preference in the filter bar rather than always-collapsed.
 _Avoid_: Sequence, Series.
 
 **Representative**:

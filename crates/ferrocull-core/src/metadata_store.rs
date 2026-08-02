@@ -401,6 +401,7 @@ mod tests {
                 hide_rejected: true,
                 group_raw_jpeg: false,
                 group_bursts: false,
+                expand_bursts: true,
                 date_tree_ascending: false,
             },
             panel_widths: PanelWidths {

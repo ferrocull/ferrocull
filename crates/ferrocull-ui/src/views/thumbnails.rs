@@ -19,7 +19,7 @@ use iced::{
 
 use super::rating::{StarEvent, star_rating_row};
 use crate::{
-    media_view::TagState,
+    media_view::{BurstStatus, TagState},
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
     views::{burst, status},
@@ -409,13 +409,6 @@ fn format_date_header(date: NaiveDate, today: NaiveDate) -> Cow<'static, str> {
     }
 }
 
-/// Burst badge data resolved per rendered cell (count via `burst_map` length).
-#[derive(Clone, Copy)]
-struct BurstBadgeInfo {
-    count: usize,
-    burst_key: DateTime<Utc>,
-}
-
 /// Visual interaction state for a thumbnail cell.
 #[derive(Clone, Copy)]
 struct CellState {
@@ -431,10 +424,9 @@ struct CellState {
 ///
 /// `sorted_view` holds pre-filtered, pre-sorted indices; cells borrow straight
 /// from `items` so no per-render clone of the item store is needed. `tag_state`
-/// answers what a cell's tag mark should say — the caller owns burst grouping
-/// and pair hiding, so this view never re-derives them, and the query runs for
-/// visible cells only. The badge count is resolved from `burst_map`'s
-/// member-list length. Click always emits
+/// and `burst_status` answer what a cell's tag mark and burst badge should say:
+/// the caller owns burst grouping and pair hiding, so this view never re-derives
+/// them, and both queries run for visible cells only. Click always emits
 /// `Event::CellClicked(path)`; the caller decides focus vs. selection based on
 /// modifier state. `window_scale` pins cell widths to whole physical pixels
 /// (see [`grid_metrics`]). `scroll_y`/`viewport_height` are the tracked scroll
@@ -448,9 +440,8 @@ pub(crate) fn thumbnail_grid<'a>(
     items: &'a [Item],
     sorted_view: &'a BTreeMap<SortKey, usize>,
     tag_state: impl Fn(usize) -> TagState + 'a,
+    burst_status: impl Fn(usize) -> Option<BurstStatus> + 'a,
     loaded_thumbs: &'a HashMap<PathBuf, image::Handle>,
-    burst_of: &'a HashMap<usize, DateTime<Utc>>,
-    burst_map: &'a HashMap<DateTime<Utc>, Vec<usize>>,
     today: NaiveDate,
     window_scale: f32,
     sort_order: SortOrder,
@@ -506,10 +497,7 @@ pub(crate) fn thumbnail_grid<'a>(
                 is_focused: focused_index == Some(idx),
             };
             let show_pair = group_raw_jpeg && item.jpeg_pair.is_some();
-            let burst = burst_of.get(&idx).map(|&burst_key| BurstBadgeInfo {
-                count: burst_map[&burst_key].len(),
-                burst_key,
-            });
+            let burst = burst_status(idx);
 
             let path = item.path.clone();
             let cell = thumbnail_card(
@@ -708,7 +696,7 @@ fn thumbnail_card(
     item: &Item,
     state: CellState,
     show_pair: bool,
-    burst: Option<BurstBadgeInfo>,
+    burst: Option<BurstStatus>,
     hovered_star: Option<i8>,
 ) -> Element<'static, CellEvent> {
     let palette = crate::theme::palette();
@@ -764,7 +752,7 @@ fn cell_overlays(
     item: &Item,
     state: CellState,
     show_pair: bool,
-    burst: Option<BurstBadgeInfo>,
+    burst: Option<BurstStatus>,
     hovered_star: Option<i8>,
 ) -> Stack<'static, CellEvent> {
     let mut stack = Stack::new().width(Fill).height(Fill).push(base);
@@ -784,8 +772,8 @@ fn cell_overlays(
         stack = stack.push(pair_badge());
     }
 
-    if let Some(burst) = burst {
-        stack = stack.push(burst_badge(burst.count, burst.burst_key));
+    if let Some(status) = burst {
+        stack = stack.push(burst_badge(status));
     }
 
     if let Some(label) = item.color_label {
@@ -902,12 +890,12 @@ fn rated_badge<Message: 'static>(rating: i8) -> Element<'static, Message> {
         .into()
 }
 
-/// Burst count badge positioned in top-right corner.
-fn burst_badge(count: usize, burst_key: DateTime<Utc>) -> Element<'static, CellEvent> {
+/// Burst badge positioned in top-right corner.
+fn burst_badge(status: BurstStatus) -> Element<'static, CellEvent> {
     let clickable_badge = burst::badge(
-        burst::count_label(count),
+        burst::cell_label(status),
         burst::Size::Cell,
-        CellEvent::BurstToggle(burst_key),
+        CellEvent::BurstToggle(status.key()),
     );
 
     container(clickable_badge)

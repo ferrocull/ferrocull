@@ -293,6 +293,26 @@ impl Ferrocull {
         iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y })
     }
 
+    /// Pin the grid's anchor to `idx`'s row and bring that row to the viewport
+    /// top.
+    ///
+    /// The counterpart to [`Self::scroll_focus_into_view`] for a rebuild that
+    /// changes how tall the content is. That one nudges by the smallest amount
+    /// against the content height reported for the *previous* layout, which a
+    /// bulk expand leaves far short; this one pins an ordinal, so the viewport
+    /// report that follows the reflow re-anchors the same card once the true
+    /// height is known.
+    pub(super) fn anchor_grid_to(&mut self, idx: usize) -> Task<Message> {
+        let Some(width) = self.grid_area_width else {
+            return Task::none();
+        };
+        self.grid_anchor = self
+            .ordinal_position(idx)
+            .expect("no ordinal for focused index");
+        self.grid_wheel_lines = 0.0;
+        self.reanchor_grid(width)
+    }
+
     /// Reset the grid to the top and drop the pinned anchor. Called whenever the
     /// view model changes (sort, filter, grouping, ascending, ...): the anchor
     /// is a display ordinal into the *old* order, so re-pinning it after the

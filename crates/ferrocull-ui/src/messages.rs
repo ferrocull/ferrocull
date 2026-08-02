@@ -181,6 +181,7 @@ pub(crate) mod filters {
         NewOnlyToggled,
         GroupRawJpegToggled,
         GroupBurstsToggled,
+        ExpandBurstsToggled,
         HideRejectedToggled,
         RatingFilterToggled(i8),
         ColorLabelFilterToggled(Option<ColorLabel>),
