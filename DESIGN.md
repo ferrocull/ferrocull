@@ -30,23 +30,23 @@ colors:
   label-gray: "#ADA69C"
 typography:
   headline:
-    fontFamily: "system sans-serif (iced default)"
+    fontFamily: "IBM Plex Sans"
     fontSize: "24px"
     fontWeight: 400
   title:
-    fontFamily: "system sans-serif (iced default)"
+    fontFamily: "IBM Plex Sans"
     fontSize: "14px"
     fontWeight: 600
   body:
-    fontFamily: "system sans-serif (iced default)"
+    fontFamily: "IBM Plex Sans"
     fontSize: "12px"
     fontWeight: 400
   label:
-    fontFamily: "system sans-serif (iced default)"
+    fontFamily: "IBM Plex Sans"
     fontSize: "10px"
     fontWeight: 400
   mono:
-    fontFamily: "monospace (iced Font::MONOSPACE)"
+    fontFamily: "IBM Plex Mono"
     fontSize: "12px"
     fontWeight: 400
 rounded:
@@ -125,10 +125,12 @@ The seven XMP labels, in order: Red #D94F4F · Gold (XMP "Yellow") #E5C04D · Gr
 
 ## 3. Typography
 
-**UI Font:** system sans-serif (iced's default font)
-**Mono Font:** system monospace (iced `Font::MONOSPACE`) — rename patterns, filename previews, anything the user must read character-by-character
+**UI Font:** IBM Plex Sans, bundled static Regular (400) and SemiBold (600), the app's default font
+**Mono Font:** IBM Plex Mono, bundled static Regular (400) and SemiBold (600): rename patterns, filename previews, shortcut key caps, anything the user must read character-by-character
 
-**Character:** One quiet sans at small, dense sizes. No display font, no pairing games — the type is labeling, not performing.
+**Character:** One quiet sans at small, dense sizes. No display font, no pairing games — the type is labeling, not performing. Plex's slightly squared, engineering-rooted voice stays workmanlike and unshowy.
+
+Why Plex, and why statics (decided in [the typography wayfinder](https://github.com/ferrocull/ferrocull/issues/34)): the renderer decides. iced 0.14 forwards no OpenType features to the shaper, so only a font's *default* behavior is reachable. Plex Sans ships tabular figures by default (counts, ratings, and the status bar never jitter), and Plex Mono's dotted zero and distinct `1`/`l`/`I` are defaults rather than opt-in features. Sans and Mono are one designed superfamily with identical vertical metrics, so mixed sans/mono lines (status bar, rename preview) share one optical size. Variable fonts register only their default weight in this stack and silently fall back to a system font at any other, so the SemiBold statics are load-bearing, not a packaging choice. The OFL-1.1 license text ships alongside the font files.
 
 ### Hierarchy
 - **Headline** (400, 24px): Rare; dialog/settings headers and empty-state titles only.
@@ -139,6 +141,31 @@ The seven XMP labels, in order: Red #D94F4F · Gold (XMP "Yellow") #E5C04D · Gr
 
 ### Named Rules
 **The Density Rule.** 12px is the default voice. Sizes above 16px must justify themselves; this is a pro tool viewed at desktop DPI, not a marketing page.
+
+### Iconography
+
+**Set:** Bootstrap Icons (MIT), embedded as an icon font and drawn on a 16px grid, so glyphs are natively crisp at the 10–16px sizes this UI uses. The MIT notice ships in the third-party notices.
+
+- **Icons are text.** Glyphs render through the same text pipeline as every label: sizing is the text size, and tinting is text color styling. State color follows the Safelight Rule exactly as it would on a word.
+- **Roles, not glyphs.** Call sites go through the intent-named vocabulary (`icons.rs`: `reject()`, `star_filled()`, `chevron_expanded()`, ...). The glyph behind a role lives in one place, so a remap or a set swap touches one file, and one role always renders one glyph everywhere.
+- **Size to the neighboring text.** Badges 9–10px, inline controls and marks 10–12px, close/zoom affordances 14px, the settings gear 16px.
+- **Never inside strings.** An icon-font glyph cannot ride in a format string; icon widgets sit beside text in a row. Unicode symbols in UI strings are reserved for glyphs the bundled text font covers (`·`, `—`, `…`).
+
+| Role | Glyph |
+|---|---|
+| Disclosure expanded / collapsed | `chevron-down` / `chevron-right` |
+| Sort ascending / descending | `arrow-up` / `arrow-down` |
+| Rating star filled / outline | `star-fill` / `star` |
+| Unrated (rating filter pill) | `slash-circle` |
+| Close and Reject | `x-lg` (shared deliberately; a close affordance and a reject mark never share a context) |
+| Tag check | `check-lg` |
+| Ingested | `download` |
+| Preview zoom | `zoom-in` |
+| Settings | `gear` |
+| Undo | `arrow-counterclockwise` |
+| Burst | `stack` |
+
+Binary-size stance: the alpha ships the full font files (four Plex statics plus the icon TTF, ~1.2 MB total). Subsetting is a deferred optimization, and it must start from the `iced_fonts`-vendored TTF: upstream Bootstrap Icons distributes WOFF2 only, which this rendering stack cannot read.
 
 ## 4. Elevation
 
@@ -178,7 +205,7 @@ Quiet until needed: transparent or tonal at rest, amber on interaction or select
 - **Mono content:** rename-pattern inputs and previews render monospace.
 
 ### Selection & Focus (signature)
-The focused thumbnail carries a blue-family border (Focus Blue: #5A9BD9 dark / #3D6FA6 light); on a rejected card in the light theme the border switches to the dark-theme blue (#5A9BD9), since the darkened light blue reads only 2.91:1 on the Rejected Wash (the brighter blue reads 5.16:1). Tagged/selected rows and rail items carry amber washes (muted amber at 0.28–0.38 alpha) with amber text (dark amber ink in the light theme). Tagged thumbnails pair an amber wash with an amber check badge — the badge is the guaranteed mark over any photo. Rejected thumbnails sit on the dark-red Rejected Wash with a red badge. Burst membership shows as a deep warm-taupe pill badge. Already-ingested frames carry a taupe ⤓ badge (#A89682 on the warm-black badge fill, 5.94:1) — deliberately not amber, since "already copied" is completed history and the Safelight Rule reserves amber for active state. The full-screen views (preview, compare) carry rejected/tagged/ingested as the same top-left badges and never as washes: at full-screen scale a wash shades the photograph being judged. These state layers are the interface's real vocabulary — they must stay instantly distinguishable at a glance and at speed.
+The focused thumbnail carries a blue-family border (Focus Blue: #5A9BD9 dark / #3D6FA6 light); on a rejected card in the light theme the border switches to the dark-theme blue (#5A9BD9), since the darkened light blue reads only 2.91:1 on the Rejected Wash (the brighter blue reads 5.16:1). Tagged/selected rows and rail items carry amber washes (muted amber at 0.28–0.38 alpha) with amber text (dark amber ink in the light theme). Tagged thumbnails pair an amber wash with an amber check badge — the badge is the guaranteed mark over any photo. Rejected thumbnails sit on the dark-red Rejected Wash with a red badge. Burst membership shows as a deep warm-taupe pill badge. Already-ingested frames carry a taupe download-arrow badge (#A89682 on the warm-black badge fill, 5.94:1) — deliberately not amber, since "already copied" is completed history and the Safelight Rule reserves amber for active state. The full-screen views (preview, compare) carry rejected/tagged/ingested as the same top-left badges and never as washes: at full-screen scale a wash shades the photograph being judged. These state layers are the interface's real vocabulary — they must stay instantly distinguishable at a glance and at speed.
 
 ### Thumbnail Overlays
 Warm-black semi-transparent badges (4px radius) for info bars, pair badges, and rating marks; a 0.55-alpha warm-black wash marks already-ingested items, paired with the ingested badge — the wash is the fast-scan cue, the badge the guaranteed mark over any photo. Overlays never use opaque or bright fills.
