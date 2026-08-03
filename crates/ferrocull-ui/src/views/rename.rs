@@ -126,7 +126,7 @@ fn pattern_field(
     let mut section = column![header, merged].spacing(spacing::XS);
 
     if let Err(e) = parsed {
-        section = section.push(text(e.to_string()).size(10).color(colors::DANGER));
+        section = section.push(text(e.to_string()).size(11).color(colors::DANGER));
     }
     section.into()
 }

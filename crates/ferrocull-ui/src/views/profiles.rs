@@ -41,12 +41,12 @@ pub(crate) fn profiles_panel(
                     text(name.clone()).size(11)
                 };
 
-                let load_btn = button(text("Load").size(10))
+                let load_btn = button(text("Load").size(11))
                     .on_press(Message::ProfileSelected(name.clone()))
                     .padding([2, 6])
                     .style(styles::primary_button);
 
-                let delete_btn = button(text("X").size(10))
+                let delete_btn = button(text("X").size(11))
                     .on_press(Message::DeleteRequested(name.clone()))
                     .padding([2, 6])
                     .style(button::danger);

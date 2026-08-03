@@ -165,7 +165,7 @@ pub(crate) fn image_pane(
         palette.background.strong.color
     };
 
-    let label = button(text(label).size(10).color(if is_active {
+    let label = button(text(label).size(11).color(if is_active {
         colors::ACCENT
     } else {
         palette.background.strong.text

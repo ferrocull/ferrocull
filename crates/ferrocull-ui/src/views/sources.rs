@@ -55,14 +55,14 @@ pub(crate) fn sources_panel(
     let actions = row![
         button(
             text("Add Directory...")
-                .size(10)
+                .size(11)
                 .color(palette.background.base.text)
         )
         .on_press(Message::AddDirectoryClicked)
         .padding([spacing::XS, spacing::SM])
         .style(styles::secondary_button),
         Space::new().width(Fill),
-        button(text("Refresh").size(10).color(palette.background.weak.text))
+        button(text("Refresh").size(11).color(palette.background.weak.text))
             .on_press(Message::RefreshSources)
             .padding([spacing::XS, spacing::SM])
             .style(styles::ghost_button),
@@ -122,7 +122,7 @@ fn source_row(
 
     if let Some(act) = action {
         header = header.push(
-            button(text(act.label).size(10).color(palette.background.base.text))
+            button(text(act.label).size(11).color(palette.background.base.text))
                 .on_press(act.message)
                 .padding([spacing::XS, spacing::SM])
                 .style(act.style),
@@ -133,7 +133,7 @@ fn source_row(
     // instead of being boxed into the column right of the checkbox and icon.
     let mut path_row = row![
         text(subtitle)
-            .size(10)
+            .size(11)
             .color(palette.background.strong.text),
     ]
     .spacing(spacing::SM)
@@ -142,7 +142,7 @@ fn source_row(
     if let Some((total, used)) = storage {
         path_row = path_row.push(Space::new().width(Fill)).push(
             text(format_storage(used, total))
-                .size(10)
+                .size(11)
                 .color(palette.background.strong.text),
         );
     }

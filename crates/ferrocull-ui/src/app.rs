@@ -1536,7 +1536,7 @@ fn shortcuts_overlay() -> Element<'static, Message> {
                 "digits rate — in Photo Mechanic they set color class; \
                  Ctrl+0–7 set color labels here",
             )
-            .size(10)
+            .size(11)
             .color(palette.background.weak.text)
             .into(),
         ],
@@ -1842,7 +1842,7 @@ fn panel_edge_handle(state: &Ferrocull, panel: Panel, expanded: bool) -> Element
             .into()
     };
 
-    tooltip(handle, text(label).size(10), tooltip::Position::Right)
+    tooltip(handle, text(label).size(11), tooltip::Position::Right)
         .gap(4)
         .snap_within_viewport(true)
         .into()

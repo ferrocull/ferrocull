@@ -26,7 +26,7 @@ pub(crate) fn backup_panel(destinations: &[PathBuf]) -> Element<'static, Message
             .map(|(idx, path)| {
                 row![
                     text(path.display().to_string()).size(11).width(Fill),
-                    button(text("X").size(10))
+                    button(text("X").size(11))
                         .on_press(Message::RemoveBackup(idx))
                         .padding([2, 6])
                         .style(button::danger),

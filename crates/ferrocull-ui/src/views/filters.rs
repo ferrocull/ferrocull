@@ -109,9 +109,9 @@ pub(crate) fn rating_filter(selected: &BTreeSet<i8>) -> Element<'_, Message> {
     let rating_buttons = row((0..=5i8).map(|rating| {
         let is_selected = selected.contains(&rating);
         let label: Element<'static, Message> = if rating == 0 {
-            crate::icons::unrated().size(10).into()
+            crate::icons::unrated().size(11).into()
         } else {
-            text(rating.to_string()).size(10).into()
+            text(rating.to_string()).size(11).into()
         };
         button(label)
             .padding([3, 7])

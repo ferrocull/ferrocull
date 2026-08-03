@@ -29,11 +29,11 @@ pub(crate) fn hooks_panel(hooks: &[Hook]) -> Element<'static, Message> {
                 let name_label = text(hook.name.clone()).size(11).width(Length::Fixed(80.0));
 
                 let command_input = text_input("command", &hook.command)
-                    .size(10)
+                    .size(11)
                     .width(Fill)
                     .on_input(move |cmd| Message::HookCommandEdited(idx, cmd));
 
-                let remove_btn = button(text("X").size(10))
+                let remove_btn = button(text("X").size(11))
                     .on_press(Message::HookRemoved(idx))
                     .padding([2, 6])
                     .style(button::danger);
