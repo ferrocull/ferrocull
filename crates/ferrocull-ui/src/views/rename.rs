@@ -48,7 +48,7 @@ fn sample_context(today: NaiveDate) -> RenderContext {
 fn eyebrow(label: &'static str) -> Element<'static, Message> {
     text(label)
         .size(10)
-        .color(colors::TEXT_MUTED)
+        .color(crate::theme::palette().background.strong.text)
         .font(crate::fonts::SANS_SEMIBOLD)
         .into()
 }
@@ -151,7 +151,7 @@ fn preview_row(
             text(source)
                 .size(10)
                 .font(crate::fonts::MONO)
-                .color(colors::TEXT_MUTED),
+                .color(crate::theme::palette().background.strong.text),
         ]
         .spacing(spacing::XS),
         rendered,
@@ -184,10 +184,12 @@ pub(crate) fn rename_panel(
         Message::VideoPatternChanged,
     );
 
+    // Read token by token while composing a pattern, not glanced at like a
+    // label, so it carries the body size rather than the label size.
     let token_reference = text(TOKEN_REFERENCE)
-        .size(10)
+        .size(12)
         .font(crate::fonts::MONO)
-        .color(colors::TEXT_MUTED);
+        .color(crate::theme::palette().background.strong.text);
 
     let photo_ctx = sample_context(today);
     let mut video_ctx = sample_context(today);
