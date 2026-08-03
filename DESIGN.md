@@ -43,7 +43,7 @@ typography:
     fontWeight: 400
   label:
     fontFamily: "IBM Plex Sans"
-    fontSize: "10px"
+    fontSize: "11px"
     fontWeight: 400
   mono:
     fontFamily: "IBM Plex Mono"
@@ -92,7 +92,7 @@ The system explicitly rejects cluttered, dialog-heavy legacy chrome, trendy web-
 - Dark-first, warm-neutral surfaces; the image is the brightest element on screen
 - One amber accent ("Safelight Amber") for selection, focus, and primary actions — never decoration
 - Quiet-until-needed components: transparent at rest, amber on interaction
-- Dense, keyboard-first layouts; small type sizes (10–14px) are the working range
+- Dense, keyboard-first layouts; small type sizes (11–14px) are the working range
 - Flat panels with 1px borders; shadows reserved for elements that genuinely float
 
 ## 2. Colors
@@ -136,10 +136,10 @@ Why Plex, and why statics (decided in [the typography wayfinder](https://github.
 - **Headline** (400, 24px): Rare; dialog/settings headers and empty-state titles only.
 - **Title** (600, 14–16px): Section headers, panel titles.
 - **Body** (400, 12–13px): The working size for controls, lists, and settings prose.
-- **Label** (400, 10–11px): The two steps carry different work. 11px is for words read in a panel: control and button labels, tooltips, paths and readouts, status-bar detail. 10px is reserved for marks over a photograph, where the text is glanced at and space is scarce: badges, thumbnail info bars, overlay metadata. A word in a panel never drops to 10px.
+- **Label** (400, 11px): The smallest text in the interface. Control and button labels, tooltips, paths and readouts, status-bar detail, and the marks over a photograph: badges, thumbnail info bars, overlay metadata. Explanatory prose under a control is not a label; it takes the body size, because it is read as a sentence.
 
 ### Named Rules
-**The Density Rule.** 12px is the default voice. Sizes above 16px must justify themselves; this is a pro tool viewed at desktop DPI, not a marketing page. 10px is the floor, and it binds text only: below it a word stops being readable at that DPI, while an icon mark is read as a shape and may still sit at 9px in a badge.
+**The Density Rule.** 12px is the default voice. Sizes above 16px must justify themselves; this is a pro tool viewed at desktop DPI, not a marketing page. 11px is the floor, and it binds text only: below it a word stops being readable at that DPI. Icons are not bound by it, since a mark is read as a shape; they size a step under the text beside them, which puts them at 9–10px next to label text.
 
 ### Iconography
 
