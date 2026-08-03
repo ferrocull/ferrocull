@@ -39,10 +39,14 @@ pub(crate) fn top_bar(
 
     let filename_text = text(filename).size(13).color(palette.background.base.text);
 
-    let close_btn = button(text("✕").size(14).color(palette.background.base.text))
-        .padding([6, 12])
-        .style(styles::ghost_button)
-        .on_press(Message::Preview(preview::Message::Close));
+    let close_btn = button(
+        crate::icons::close()
+            .size(14)
+            .color(palette.background.base.text),
+    )
+    .padding([6, 12])
+    .style(styles::ghost_button)
+    .on_press(Message::Preview(preview::Message::Close));
 
     container(
         row![
@@ -107,15 +111,23 @@ pub(crate) fn burst_badge(status: BurstStatus) -> Element<'static, Message> {
 pub(crate) fn bottom_bar(item_controls: Element<'static, Message>) -> Element<'static, Message> {
     let palette = crate::theme::palette();
 
-    let nav_prev = button(text("‹").size(24).color(palette.background.base.text))
-        .padding([10, 20])
-        .style(styles::ghost_button)
-        .on_press(Message::Preview(preview::Message::Prev));
+    let nav_prev = button(
+        crate::icons::nav_previous()
+            .size(14)
+            .color(palette.background.base.text),
+    )
+    .padding([10, 20])
+    .style(styles::ghost_button)
+    .on_press(Message::Preview(preview::Message::Prev));
 
-    let nav_next = button(text("›").size(24).color(palette.background.base.text))
-        .padding([10, 20])
-        .style(styles::ghost_button)
-        .on_press(Message::Preview(preview::Message::Next));
+    let nav_next = button(
+        crate::icons::nav_next()
+            .size(14)
+            .color(palette.background.base.text),
+    )
+    .padding([10, 20])
+    .style(styles::ghost_button)
+    .on_press(Message::Preview(preview::Message::Next));
 
     container(
         row![

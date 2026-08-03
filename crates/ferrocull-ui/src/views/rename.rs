@@ -1,7 +1,7 @@
 use chrono::{NaiveDate, NaiveTime};
 use ferrocull_core::{Pattern, RenderContext};
 use iced::{
-    Element, Fill, Font,
+    Element, Fill,
     alignment::Horizontal,
     widget::{button, column, container, pick_list, row, stack, text, text_input},
 };
@@ -47,12 +47,9 @@ fn sample_context(today: NaiveDate) -> RenderContext {
 
 fn eyebrow(label: &'static str) -> Element<'static, Message> {
     text(label)
-        .size(9)
-        .color(colors::TEXT_MUTED)
-        .font(Font {
-            weight: iced::font::Weight::Semibold,
-            ..Font::DEFAULT
-        })
+        .size(11)
+        .color(crate::theme::text_muted())
+        .font(crate::fonts::SANS_SEMIBOLD)
         .into()
 }
 
@@ -102,20 +99,20 @@ fn pattern_field(
     let picker = pick_list(preset_options(saved_patterns), None::<String>, on_input)
         .placeholder("")
         .handle(pick_list::Handle::None)
-        .font(Font::MONOSPACE)
+        .font(crate::fonts::MONO)
         .text_size(12)
         .padding(6)
         .style(styles::pattern_picker)
         .width(Fill);
 
-    let chevron = container(text("▾").size(12))
+    let chevron = container(crate::icons::dropdown_handle().size(10))
         .width(PICKER_STRIP_WIDTH)
         .center_x(PICKER_STRIP_WIDTH)
         .padding([6, 0]);
 
     let input = text_input(BUILTIN_PRESETS[0], value)
         .on_input(on_input)
-        .font(Font::MONOSPACE)
+        .font(crate::fonts::MONO)
         .style(styles::pattern_input)
         .padding(6)
         .size(12);
@@ -129,7 +126,7 @@ fn pattern_field(
     let mut section = column![header, merged].spacing(spacing::XS);
 
     if let Err(e) = parsed {
-        section = section.push(text(e.to_string()).size(10).color(colors::DANGER));
+        section = section.push(text(e.to_string()).size(11).color(colors::DANGER));
     }
     section.into()
 }
@@ -143,7 +140,7 @@ fn preview_row(
     let rendered: Element<'static, Message> = match parsed {
         Ok(pattern) => text(pattern.render(ctx))
             .size(11)
-            .font(Font::MONOSPACE)
+            .font(crate::fonts::MONO)
             .color(colors::ACCENT)
             .into(),
         Err(e) => text(e.to_string()).size(11).color(colors::DANGER).into(),
@@ -152,9 +149,9 @@ fn preview_row(
         row![
             eyebrow(label),
             text(source)
-                .size(9)
-                .font(Font::MONOSPACE)
-                .color(colors::TEXT_MUTED),
+                .size(11)
+                .font(crate::fonts::MONO)
+                .color(crate::theme::text_muted()),
         ]
         .spacing(spacing::XS),
         rendered,
@@ -187,10 +184,12 @@ pub(crate) fn rename_panel(
         Message::VideoPatternChanged,
     );
 
+    // Read token by token while composing a pattern, not glanced at like a
+    // label, so it carries the body size rather than the label size.
     let token_reference = text(TOKEN_REFERENCE)
-        .size(10)
-        .font(Font::MONOSPACE)
-        .color(colors::TEXT_MUTED);
+        .size(12)
+        .font(crate::fonts::MONO)
+        .color(crate::theme::text_muted());
 
     let photo_ctx = sample_context(today);
     let mut video_ctx = sample_context(today);

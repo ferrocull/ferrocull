@@ -8,7 +8,7 @@ use iced::{
     widget::{Space, button, checkbox, column, container, progress_bar, row, text},
 };
 
-use crate::{messages::sources::Message, styles, theme::spacing};
+use crate::{icons, messages::sources::Message, styles, theme::spacing};
 
 pub(crate) fn sources_panel(
     sources: &[Source],
@@ -55,14 +55,14 @@ pub(crate) fn sources_panel(
     let actions = row![
         button(
             text("Add Directory...")
-                .size(10)
+                .size(11)
                 .color(palette.background.base.text)
         )
         .on_press(Message::AddDirectoryClicked)
         .padding([spacing::XS, spacing::SM])
         .style(styles::secondary_button),
         Space::new().width(Fill),
-        button(text("Refresh").size(10).color(palette.background.weak.text))
+        button(text("Refresh").size(11).color(palette.background.weak.text))
             .on_press(Message::RefreshSources)
             .padding([spacing::XS, spacing::SM])
             .style(styles::ghost_button),
@@ -89,7 +89,7 @@ fn source_row(
 ) -> Element<'static, Message> {
     let (icon, name, subtitle, storage) = match source {
         Source::Storage(s) => (
-            "📁",
+            icons::storage_source(),
             s.name.clone(),
             s.mount_point.as_ref().map_or_else(
                 || s.device_path.display().to_string(),
@@ -97,9 +97,9 @@ fn source_row(
             ),
             s.total_bytes.zip(s.used_bytes),
         ),
-        Source::Camera(c) => ("📷", c.name.clone(), c.port.clone(), None),
+        Source::Camera(c) => (icons::camera_source(), c.name.clone(), c.port.clone(), None),
         Source::Directory(p) => (
-            "📂",
+            icons::directory_source(),
             p.file_name().map_or_else(
                 || "Directory".to_owned(),
                 |n| n.to_string_lossy().into_owned(),
@@ -116,13 +116,13 @@ fn source_row(
     }
 
     header = header
-        .push(text(icon).size(14))
+        .push(icon.size(14))
         .push(text(name).size(12).color(palette.background.base.text))
         .push(Space::new().width(Fill));
 
     if let Some(act) = action {
         header = header.push(
-            button(text(act.label).size(10).color(palette.background.base.text))
+            button(text(act.label).size(11).color(palette.background.base.text))
                 .on_press(act.message)
                 .padding([spacing::XS, spacing::SM])
                 .style(act.style),
@@ -133,7 +133,7 @@ fn source_row(
     // instead of being boxed into the column right of the checkbox and icon.
     let mut path_row = row![
         text(subtitle)
-            .size(10)
+            .size(11)
             .color(palette.background.strong.text),
     ]
     .spacing(spacing::SM)
@@ -142,7 +142,7 @@ fn source_row(
     if let Some((total, used)) = storage {
         path_row = path_row.push(Space::new().width(Fill)).push(
             text(format_storage(used, total))
-                .size(10)
+                .size(11)
                 .color(palette.background.strong.text),
         );
     }

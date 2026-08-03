@@ -43,7 +43,7 @@ typography:
     fontWeight: 400
   label:
     fontFamily: "IBM Plex Sans"
-    fontSize: "10px"
+    fontSize: "11px"
     fontWeight: 400
   mono:
     fontFamily: "IBM Plex Mono"
@@ -92,7 +92,7 @@ The system explicitly rejects cluttered, dialog-heavy legacy chrome, trendy web-
 - Dark-first, warm-neutral surfaces; the image is the brightest element on screen
 - One amber accent ("Safelight Amber") for selection, focus, and primary actions — never decoration
 - Quiet-until-needed components: transparent at rest, amber on interaction
-- Dense, keyboard-first layouts; small type sizes (9–14px) are the working range
+- Dense, keyboard-first layouts; small type sizes (11–14px) are the working range
 - Flat panels with 1px borders; shadows reserved for elements that genuinely float
 
 ## 2. Colors
@@ -107,7 +107,7 @@ A warm-neutral base with one amber voice and a fixed semantic vocabulary; the se
 - **Dark Bg** (#181716): Warm near-black body surface of the dark theme; the grid and preview canvas.
 - **Dark Ink** (#F0EBE5): Warm white text on dark surfaces.
 - **Light Bg** (#FAF8F5) / **Light Ink** (#2A2622): The light-theme pair, same warmth, resolved from OS preference or explicit user choice.
-- **Taupe Muted** (#8C7B6A): Secondary text. The warm-gray workhorse. The burst badge pill uses a deeper step (#6B5D4E, hover #746353) so its warm-white count stays legible.
+- **Taupe Muted** (#8C7B6A): The warm-gray family anchor. The UI draws from its steps rather than the anchor itself, which reads only 4.09:1 on the dark panel and dims further on warm-white. Secondary text takes the step that reads on the surface it sits on: the lighter #A89682 in the dark theme, the deeper #6B5D4E in the light one, so the warmth survives the theme flip while the type stays legible. The burst badge pill takes that same deeper step (#6B5D4E, hover #746353) so its warm-white count stays legible, and the ingested badge ink the lighter one. A unit test pins both text steps at 4.5:1 against each theme's generated panel background.
 - Panel and border steps come from iced's generated extended palette (weakest/weak/neutral/strong steps off the base background) — sidebars sit on the `weakest` step with 1px `weaker` borders.
 
 ### Semantic
@@ -136,11 +136,10 @@ Why Plex, and why statics (decided in [the typography wayfinder](https://github.
 - **Headline** (400, 24px): Rare; dialog/settings headers and empty-state titles only.
 - **Title** (600, 14–16px): Section headers, panel titles.
 - **Body** (400, 12–13px): The working size for controls, lists, and settings prose.
-- **Label** (400, 10–11px): Badges, thumbnail info bars, status-bar detail.
-- **Caption** (400, 9px): Finest print — overlay metadata where space is scarce.
+- **Label** (400, 11px): The smallest text in the interface. Control and button labels, tooltips, paths and readouts, status-bar detail, and the marks over a photograph: badges, thumbnail info bars, overlay metadata. Explanatory prose under a control is not a label; it takes the body size, because it is read as a sentence.
 
 ### Named Rules
-**The Density Rule.** 12px is the default voice. Sizes above 16px must justify themselves; this is a pro tool viewed at desktop DPI, not a marketing page.
+**The Density Rule.** 12px is the default voice. Sizes above 16px must justify themselves; this is a pro tool viewed at desktop DPI, not a marketing page. 11px is the floor, and it binds text only: below it a word stops being readable at that DPI. Icons are not bound by it, since a mark is read as a shape; they size a step under the text beside them, which puts them at 9–10px next to label text.
 
 ### Iconography
 
@@ -154,9 +153,12 @@ Why Plex, and why statics (decided in [the typography wayfinder](https://github.
 | Role | Glyph |
 |---|---|
 | Disclosure expanded / collapsed | `chevron-down` / `chevron-right` |
+| Nav previous / next | `chevron-left` / `chevron-right` |
+| Dropdown handle | `chevron-down` (shared deliberately; a menu strip and a disclosure indicator never share a control) |
 | Sort ascending / descending | `arrow-up` / `arrow-down` |
 | Rating star filled / outline | `star-fill` / `star` |
 | Unrated (rating filter pill) | `slash-circle` |
+| Scroll locked / unlocked (compare panes) | `lock` / `unlock` |
 | Close and Reject | `x-lg` (shared deliberately; a close affordance and a reject mark never share a context) |
 | Tag check | `check-lg` |
 | Ingested | `download` |
@@ -164,6 +166,7 @@ Why Plex, and why statics (decided in [the typography wayfinder](https://github.
 | Settings | `gear` |
 | Undo | `arrow-counterclockwise` |
 | Burst | `stack` |
+| Storage source / Camera source / Directory source | `sd-card` / `camera` / `folder` |
 
 Binary-size stance: the alpha ships the full font files (four Plex statics plus the icon TTF, ~1.2 MB total). Subsetting is a deferred optimization, and it must start from the `iced_fonts`-vendored TTF: upstream Bootstrap Icons distributes WOFF2 only, which this rendering stack cannot read.
 

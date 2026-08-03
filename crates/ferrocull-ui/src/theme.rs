@@ -134,7 +134,10 @@ pub(crate) mod colors {
 
     pub(crate) const RATING_STAR: Color = rgb(0xE5, 0xA8, 0x53); // Rating stars/badge — WARNING's hue, its own role
 
-    pub(crate) const TEXT_MUTED: Color = rgb(0x8C, 0x7B, 0x6A); // Warm taupe, for secondary text
+    // Secondary text, one warm taupe stepped per theme so each clears the
+    // 4.5:1 contrast floor against its own panel.
+    pub(crate) const TEXT_MUTED_DARK: Color = rgb(0xA8, 0x96, 0x82);
+    pub(crate) const TEXT_MUTED_LIGHT: Color = rgb(0x6B, 0x5D, 0x4E);
 
     // Indexed to match ColorLabel discriminants 1-7
     pub(crate) const COLOR_LABEL_1: Color = rgb(0xD9, 0x4F, 0x4F); // Warm red
@@ -182,6 +185,17 @@ pub(crate) fn focus_color_for(is_rejected: bool) -> Color {
         colors::FOCUS_DARK
     } else {
         colors::FOCUS_LIGHT
+    }
+}
+
+/// Secondary text ink: the warm taupe of the chrome, in the step that reads on
+/// the current theme's panels.
+#[must_use]
+pub(crate) fn text_muted() -> Color {
+    if cached().is_dark {
+        colors::TEXT_MUTED_DARK
+    } else {
+        colors::TEXT_MUTED_LIGHT
     }
 }
 
@@ -240,7 +254,7 @@ mod tests {
     use ferrocull_core::ColorLabel;
     use iced::Color;
 
-    use super::{COLOR_LABELS, colors};
+    use super::{COLOR_LABELS, colors, dark_theme, light_theme};
 
     /// WCAG relative luminance.
     fn luminance(c: Color) -> f32 {
@@ -287,6 +301,24 @@ mod tests {
             hue += 360.0;
         }
         (hue, sat)
+    }
+
+    /// Secondary text carries the chrome's warm taupe, which sits close enough
+    /// to both panel surfaces to fail quietly. Each theme's step must clear
+    /// 4.5:1 against the `weakest` background the sidebars are drawn on.
+    #[test]
+    fn muted_text_clears_the_contrast_floor() {
+        for (theme_name, theme, ink) in [
+            ("dark", dark_theme(), colors::TEXT_MUTED_DARK),
+            ("light", light_theme(), colors::TEXT_MUTED_LIGHT),
+        ] {
+            let panel = theme.extended_palette().background.weakest.color;
+            let ratio = contrast(ink, panel);
+            assert!(
+                ratio >= 4.5,
+                "{theme_name} secondary text reads {ratio:.2}:1 on its panel"
+            );
+        }
     }
 
     /// Guards against the color-label palette drifting out of correspondence

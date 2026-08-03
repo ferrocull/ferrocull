@@ -133,10 +133,10 @@ pub(crate) fn storage_pane(
         .into()
 }
 
-/// Small uppercase section label.
+/// Uppercase section label.
 fn heading(label: &str) -> Element<'static, Message> {
     text(label.to_owned())
-        .size(11)
+        .size(13)
         .color(crate::theme::palette().background.base.text)
         .into()
 }
@@ -144,7 +144,7 @@ fn heading(label: &str) -> Element<'static, Message> {
 /// Muted explanatory line under a control.
 fn hint(message: &str) -> Element<'static, Message> {
     text(message.to_owned())
-        .size(11)
+        .size(12)
         .color(crate::theme::palette().background.weak.text)
         .into()
 }

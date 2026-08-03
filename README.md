@@ -129,4 +129,4 @@ Photo Mechanic is a trademark of Camera Bits, Inc. Ferrocull is an independent p
 
 ## License
 
-[Apache-2.0](./LICENSE)
+[Apache-2.0](./LICENSE). The bundled fonts carry their own licenses, listed in [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
