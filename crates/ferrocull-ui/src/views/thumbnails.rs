@@ -824,7 +824,7 @@ fn bottom_info_overlay(
         StarEvent::Rated(r) => CellEvent::Rated(r),
         StarEvent::Hover(s) => CellEvent::StarHover(s),
     });
-    let name = text(filename).size(9).color(colors::BADGE_TEXT);
+    let name = text(filename).size(10).color(colors::BADGE_TEXT);
 
     let info_column = column![stars, name]
         .spacing(1)
@@ -855,7 +855,7 @@ fn placeholder<Message: 'static>() -> Element<'static, Message> {
 
 /// "R+J" badge positioned in bottom-right corner for RAW+JPEG pairs.
 fn pair_badge<Message: 'static>() -> Element<'static, Message> {
-    let badge = container(text("R+J").size(9))
+    let badge = container(text("R+J").size(10))
         .padding([2, 4])
         .style(styles::overlay_badge);
 
