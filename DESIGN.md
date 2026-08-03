@@ -92,7 +92,7 @@ The system explicitly rejects cluttered, dialog-heavy legacy chrome, trendy web-
 - Dark-first, warm-neutral surfaces; the image is the brightest element on screen
 - One amber accent ("Safelight Amber") for selection, focus, and primary actions — never decoration
 - Quiet-until-needed components: transparent at rest, amber on interaction
-- Dense, keyboard-first layouts; small type sizes (9–14px) are the working range
+- Dense, keyboard-first layouts; small type sizes (10–14px) are the working range
 - Flat panels with 1px borders; shadows reserved for elements that genuinely float
 
 ## 2. Colors
@@ -136,11 +136,10 @@ Why Plex, and why statics (decided in [the typography wayfinder](https://github.
 - **Headline** (400, 24px): Rare; dialog/settings headers and empty-state titles only.
 - **Title** (600, 14–16px): Section headers, panel titles.
 - **Body** (400, 12–13px): The working size for controls, lists, and settings prose.
-- **Label** (400, 10–11px): Badges, thumbnail info bars, status-bar detail.
-- **Caption** (400, 9px): Finest print — overlay metadata where space is scarce.
+- **Label** (400, 10–11px): Badges, thumbnail info bars, status-bar detail, and the finest print anywhere, down to overlay metadata where space is scarce.
 
 ### Named Rules
-**The Density Rule.** 12px is the default voice. Sizes above 16px must justify themselves; this is a pro tool viewed at desktop DPI, not a marketing page.
+**The Density Rule.** 12px is the default voice. Sizes above 16px must justify themselves; this is a pro tool viewed at desktop DPI, not a marketing page. 10px is the floor, and it binds text only: below it a word stops being readable at that DPI, while an icon mark is read as a shape and may still sit at 9px in a badge.
 
 ### Iconography
 
