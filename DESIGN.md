@@ -136,7 +136,7 @@ Why Plex, and why statics (decided in [the typography wayfinder](https://github.
 - **Headline** (400, 24px): Rare; dialog/settings headers and empty-state titles only.
 - **Title** (600, 14–16px): Section headers, panel titles.
 - **Body** (400, 12–13px): The working size for controls, lists, and settings prose.
-- **Label** (400, 10–11px): Badges, thumbnail info bars, status-bar detail, and the finest print anywhere, down to overlay metadata where space is scarce.
+- **Label** (400, 10–11px): The two steps carry different work. 11px is for words read in a panel: control and button labels, tooltips, paths and readouts, status-bar detail. 10px is reserved for marks over a photograph, where the text is glanced at and space is scarce: badges, thumbnail info bars, overlay metadata. A word in a panel never drops to 10px.
 
 ### Named Rules
 **The Density Rule.** 12px is the default voice. Sizes above 16px must justify themselves; this is a pro tool viewed at desktop DPI, not a marketing page. 10px is the floor, and it binds text only: below it a word stops being readable at that DPI, while an icon mark is read as a shape and may still sit at 9px in a badge.
