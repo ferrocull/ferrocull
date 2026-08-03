@@ -107,7 +107,7 @@ A warm-neutral base with one amber voice and a fixed semantic vocabulary; the se
 - **Dark Bg** (#181716): Warm near-black body surface of the dark theme; the grid and preview canvas.
 - **Dark Ink** (#F0EBE5): Warm white text on dark surfaces.
 - **Light Bg** (#FAF8F5) / **Light Ink** (#2A2622): The light-theme pair, same warmth, resolved from OS preference or explicit user choice.
-- **Taupe Muted** (#8C7B6A): Secondary text. The warm-gray workhorse. The burst badge pill uses a deeper step (#6B5D4E, hover #746353) so its warm-white count stays legible.
+- **Taupe Muted** (#8C7B6A): The warm-gray family anchor. The UI draws from its steps rather than the anchor itself, which reads only 4.14:1 on panel surfaces: the burst badge pill takes a deeper step (#6B5D4E, hover #746353) so its warm-white count stays legible, and the ingested badge ink takes a lighter one (#A89682). Secondary text is not a fixed taupe at all; it comes from the generated palette's `strong` step, so it darkens for the light theme instead of washing out.
 - Panel and border steps come from iced's generated extended palette (weakest/weak/neutral/strong steps off the base background) — sidebars sit on the `weakest` step with 1px `weaker` borders.
 
 ### Semantic
