@@ -48,7 +48,7 @@ fn sample_context(today: NaiveDate) -> RenderContext {
 fn eyebrow(label: &'static str) -> Element<'static, Message> {
     text(label)
         .size(10)
-        .color(crate::theme::palette().background.strong.text)
+        .color(crate::theme::text_muted())
         .font(crate::fonts::SANS_SEMIBOLD)
         .into()
 }
@@ -151,7 +151,7 @@ fn preview_row(
             text(source)
                 .size(10)
                 .font(crate::fonts::MONO)
-                .color(crate::theme::palette().background.strong.text),
+                .color(crate::theme::text_muted()),
         ]
         .spacing(spacing::XS),
         rendered,
@@ -189,7 +189,7 @@ pub(crate) fn rename_panel(
     let token_reference = text(TOKEN_REFERENCE)
         .size(12)
         .font(crate::fonts::MONO)
-        .color(crate::theme::palette().background.strong.text);
+        .color(crate::theme::text_muted());
 
     let photo_ctx = sample_context(today);
     let mut video_ctx = sample_context(today);
