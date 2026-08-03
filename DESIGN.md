@@ -154,9 +154,12 @@ Why Plex, and why statics (decided in [the typography wayfinder](https://github.
 | Role | Glyph |
 |---|---|
 | Disclosure expanded / collapsed | `chevron-down` / `chevron-right` |
+| Nav previous / next | `chevron-left` / `chevron-right` |
+| Dropdown handle | `chevron-down` (shared deliberately; a menu strip and a disclosure indicator never share a control) |
 | Sort ascending / descending | `arrow-up` / `arrow-down` |
 | Rating star filled / outline | `star-fill` / `star` |
 | Unrated (rating filter pill) | `slash-circle` |
+| Scroll locked / unlocked (compare panes) | `lock` / `unlock` |
 | Close and Reject | `x-lg` (shared deliberately; a close affordance and a reject mark never share a context) |
 | Tag check | `check-lg` |
 | Ingested | `download` |
@@ -164,6 +167,7 @@ Why Plex, and why statics (decided in [the typography wayfinder](https://github.
 | Settings | `gear` |
 | Undo | `arrow-counterclockwise` |
 | Burst | `stack` |
+| Storage source / Camera source / Directory source | `sd-card` / `camera` / `folder` |
 
 Binary-size stance: the alpha ships the full font files (four Plex statics plus the icon TTF, ~1.2 MB total). Subsetting is a deferred optimization, and it must start from the `iced_fonts`-vendored TTF: upstream Bootstrap Icons distributes WOFF2 only, which this rendering stack cannot read.
 
