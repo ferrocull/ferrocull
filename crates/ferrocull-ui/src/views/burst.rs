@@ -9,17 +9,30 @@ use iced::{
 
 use crate::{media_view::BurstStatus, styles, theme::spacing};
 
-/// What the badge says on a grid cell: the run's total, carried by every
-/// member so a burst reads the same folded or open.
-pub(crate) fn count_label(count: usize) -> String {
-    count.to_string()
+/// What the badge says on a grid cell: the total when folded, position over
+/// total when open.
+///
+/// The grid spells a position `2/5` where the info strip spells it `2 of 5`.
+/// The strip renders capture settings in photographic notation and the badge
+/// sits immediately left of a shutter speed, so `2/5   1/250` would put two
+/// unrelated fractions one gap apart; a grid cell has no such neighbour and is
+/// space-starved at a thumbnail's corner. It is a close call rather than an
+/// obvious split: the pill's fill, glyph, and text size already separate the
+/// layers, so the strip's ambiguity would be a glance-level one.
+pub(crate) fn cell_label(status: BurstStatus) -> String {
+    match status {
+        BurstStatus::Collapsed { count, .. } => count.to_string(),
+        BurstStatus::Expanded {
+            position, count, ..
+        } => format!("{position}/{count}"),
+    }
 }
 
 /// What the badge says in a single-frame view, which shows one member at a
 /// time: how many frames a folded burst holds, or which of them is on screen.
-pub(crate) fn status_label(status: BurstStatus) -> String {
+pub(crate) fn strip_label(status: BurstStatus) -> String {
     match status {
-        BurstStatus::Collapsed { count, .. } => count_label(count),
+        BurstStatus::Collapsed { count, .. } => count.to_string(),
         BurstStatus::Expanded {
             position, count, ..
         } => format!("{position} of {count}"),
@@ -70,7 +83,7 @@ pub(crate) fn badge<Message: Clone + 'static>(
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
 
-    use super::{BurstStatus, count_label, status_label};
+    use super::{BurstStatus, cell_label, strip_label};
 
     fn key() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2024, 5, 1, 10, 14, 22)
@@ -78,28 +91,38 @@ mod tests {
             .expect("unambiguous test timestamp")
     }
 
+    fn collapsed() -> BurstStatus {
+        BurstStatus::Collapsed {
+            key: key(),
+            count: 5,
+        }
+    }
+
+    fn expanded() -> BurstStatus {
+        BurstStatus::Expanded {
+            key: key(),
+            position: 2,
+            count: 5,
+        }
+    }
+
     #[test]
     fn a_folded_burst_badge_counts_the_frames_behind_it() {
         assert_eq!(
-            status_label(BurstStatus::Collapsed {
-                key: key(),
-                count: 5,
-            }),
-            count_label(5),
+            strip_label(collapsed()),
+            cell_label(collapsed()),
             "a folded burst reads the same in either view"
         );
-        assert_eq!(count_label(5), "5");
+        assert_eq!(cell_label(collapsed()), "5");
     }
 
     #[test]
     fn an_open_burst_badge_says_which_frame_is_on_screen() {
-        assert_eq!(
-            status_label(BurstStatus::Expanded {
-                key: key(),
-                position: 2,
-                count: 5,
-            }),
-            "2 of 5"
-        );
+        assert_eq!(strip_label(expanded()), "2 of 5");
+    }
+
+    #[test]
+    fn a_grid_cell_spells_the_position_as_a_fraction() {
+        assert_eq!(cell_label(expanded()), "2/5");
     }
 }

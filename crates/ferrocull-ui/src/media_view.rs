@@ -29,8 +29,9 @@ use ferrocull_core::{
 ///
 /// `ascending` is intentionally absent — the view is stored in ascending
 /// sort-key order and direction is applied at read time, so it never affects
-/// the derived indices. Burst expansion is likewise absent — `MediaView` owns
-/// it, since only the burst re-keying logic can keep it consistent.
+/// the derived indices. Per-burst expansion is likewise absent, since only
+/// `MediaView`'s burst re-keying logic can keep it consistent; only the durable
+/// default (`expand_bursts`) travels here.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent view-filter axes, mirroring the durable ViewPrefs"
@@ -43,6 +44,8 @@ pub(crate) struct ViewParams<'a> {
     pub(crate) hide_rejected: bool,
     pub(crate) group_raw_jpeg: bool,
     pub(crate) group_bursts: bool,
+    /// Whether a burst shows its members unless the photographer says otherwise.
+    pub(crate) expand_bursts: bool,
     pub(crate) selected_sources: &'a BTreeSet<PathBuf>,
     pub(crate) selected_dates: Option<DateSelection>,
     pub(crate) selected_ratings: &'a BTreeSet<i8>,
@@ -133,9 +136,15 @@ pub(crate) struct MediaView {
     burst_map: HashMap<DateTime<Utc>, Vec<usize>>,
     /// Item index → its burst key, for every burst member.
     burst_of: HashMap<usize, DateTime<Utc>>,
-    /// Bursts the user has expanded (shown un-collapsed), keyed by burst key.
-    /// Owned here so burst re-keying can migrate expansion atomically.
-    expanded_bursts: BTreeSet<DateTime<Utc>>,
+    /// Whether bursts expand by default, mirrored from
+    /// [`ViewParams::expand_bursts`].
+    expand_bursts: bool,
+    /// Bursts the photographer has folded or unfolded *against*
+    /// [`Self::expand_bursts`], keyed by burst key: a burst is expanded when
+    /// exactly one of the two holds, so `B` folds an open burst and opens a
+    /// folded one at either setting. Owned here so burst re-keying can migrate
+    /// expansion atomically.
+    burst_exceptions: BTreeSet<DateTime<Utc>>,
     /// JPEG-side path of every known RAW+JPEG pair → the index of the RAW that
     /// hides it (its group representative). Rebuilt from scratch on
     /// [`Self::rebuild`].
@@ -249,11 +258,11 @@ impl MediaView {
         if !group_bursts {
             return None;
         }
-        let key = self.burst_of.get(&idx)?;
-        if self.expanded_bursts.contains(key) {
+        let key = *self.burst_of.get(&idx)?;
+        if self.is_burst_expanded(key) {
             return None;
         }
-        Some(&self.burst_map[key])
+        Some(&self.burst_map[&key])
     }
 
     /// How `idx`'s burst membership should read to the photographer, or `None`
@@ -269,7 +278,7 @@ impl MediaView {
         let key = *self.burst_of.get(&idx)?;
         let members = &self.burst_map[&key];
         let count = members.len();
-        if !self.expanded_bursts.contains(&key) {
+        if !self.is_burst_expanded(key) {
             return Some(BurstStatus::Collapsed { key, count });
         }
 
@@ -308,6 +317,22 @@ impl MediaView {
             return None;
         }
         Some(self.burst_map[&key][0])
+    }
+
+    /// Where a cursor sitting on `idx` must move now that some set of bursts has
+    /// folded: onto the representative of `idx`'s own burst.
+    ///
+    /// The bulk counterpart to [`Self::burst_repair_target`], for a fold that
+    /// names no single burst, as flipping the expand preference folds every
+    /// burst at once. `None` means the cursor stays put: `idx` is on screen, or
+    /// it belongs to no burst and so nothing stands in for it.
+    #[must_use]
+    pub(crate) fn folded_burst_representative(&self, idx: usize) -> Option<usize> {
+        if self.is_visible(idx) {
+            return None;
+        }
+        let key = self.burst_of.get(&idx)?;
+        Some(self.burst_map[key][0])
     }
 
     /// The deduplicated logical unit an action fans out over: `idx` plus its
@@ -549,6 +574,8 @@ impl MediaView {
             "insert() requires a fresh path; the caller must dedup"
         );
 
+        self.adopt_expand_preference(params.expand_bursts);
+
         let idx = self.items.len();
         let jpeg_pair = item.jpeg_pair.clone();
         let path = item.path.clone();
@@ -587,6 +614,7 @@ impl MediaView {
     /// Selection/focus are not touched here — call [`Self::prune_hidden`]
     /// afterwards to reconcile them against the new visible set.
     pub(crate) fn rebuild(&mut self, params: &ViewParams) {
+        self.adopt_expand_preference(params.expand_bursts);
         self.version += 1;
         self.sorted_view.clear();
         self.sort_key_by_idx.clear();
@@ -623,11 +651,10 @@ impl MediaView {
             for burst in self.group_bursts_in(&ordered) {
                 self.register_burst(burst);
             }
-            // Drop expanded keys that no longer name a live burst.
-            self.expanded_bursts
+            self.burst_exceptions
                 .retain(|key| self.burst_map.contains_key(key));
         } else {
-            self.expanded_bursts.clear();
+            self.burst_exceptions.clear();
         }
 
         for &idx in &passing {
@@ -637,16 +664,34 @@ impl MediaView {
         }
     }
 
-    /// Whether burst `key` is currently expanded.
+    /// Adopt the durable expand-by-default preference. A change of preference
+    /// retires every per-burst exception, since an exception only has meaning
+    /// as a departure from the default it was made against, so what the
+    /// checkbox says is what the grid shows.
+    ///
+    /// Called from every entry point that carries [`ViewParams`] and can create
+    /// a burst, [`Self::insert`] included: a scan streams frames in without a
+    /// rebuild, and the bursts forming as it runs must honour the preference.
+    /// Changing the preference always rebuilds, so `insert` only ever sees the
+    /// value already adopted and never retires an exception mid-scan.
+    fn adopt_expand_preference(&mut self, expand_bursts: bool) {
+        if self.expand_bursts != expand_bursts {
+            self.expand_bursts = expand_bursts;
+            self.burst_exceptions.clear();
+        }
+    }
+
+    /// Whether burst `key` is currently expanded: the default, inverted for a
+    /// burst the photographer has since folded or unfolded by hand.
     #[must_use]
     pub(crate) fn is_burst_expanded(&self, key: DateTime<Utc>) -> bool {
-        self.expanded_bursts.contains(&key)
+        self.expand_bursts != self.burst_exceptions.contains(&key)
     }
 
     /// Toggle whether a burst is expanded, updating only its members'
     /// visibility. A no-op when `key` no longer names a live burst.
     pub(crate) fn toggle_burst_expansion(&mut self, key: DateTime<Utc>, params: &ViewParams) {
-        let expanded = !self.expanded_bursts.contains(&key);
+        let expanded = !self.is_burst_expanded(key);
         self.set_burst_expansion(key, expanded, params);
     }
 
@@ -663,10 +708,10 @@ impl MediaView {
         if !self.burst_map.contains_key(&key) {
             return false;
         }
-        if expanded {
-            self.expanded_bursts.insert(key);
+        if expanded == self.expand_bursts {
+            self.burst_exceptions.remove(&key);
         } else {
-            self.expanded_bursts.remove(&key);
+            self.burst_exceptions.insert(key);
         }
         self.version += 1;
         for m in self.burst_map[&key].clone() {
@@ -769,7 +814,7 @@ impl MediaView {
             .iter()
             .filter_map(|i| self.burst_of.get(i).copied())
             .collect();
-        let region_was_expanded = old_keys.iter().any(|k| self.expanded_bursts.contains(k));
+        let region_had_exception = old_keys.iter().any(|k| self.burst_exceptions.contains(k));
 
         let new_bursts = self.group_bursts_in(region);
         let mut new_key_of: HashMap<usize, DateTime<Utc>> = HashMap::new();
@@ -805,15 +850,16 @@ impl MediaView {
             self.burst_map.insert(key, burst);
         }
 
-        // Migrate expansion: drop keys that vanished; carry a still-open cluster
-        // onto its new key(s).
+        // Migrate expansion: drop keys that vanished; carry a cluster that
+        // departed from the default onto its new key(s), so a hand-folded or
+        // hand-opened run survives an edit that re-keys it.
         for key in &old_keys {
             if !new_keys.contains(key) {
-                self.expanded_bursts.remove(key);
+                self.burst_exceptions.remove(key);
             }
         }
-        if region_was_expanded {
-            self.expanded_bursts.extend(new_keys.iter().copied());
+        if region_had_exception {
+            self.burst_exceptions.extend(new_keys.iter().copied());
         }
 
         // Flip only the members whose visibility actually changed.
@@ -924,13 +970,13 @@ impl MediaView {
         if !params.group_bursts {
             return true;
         }
-        let Some(key) = self.burst_of.get(&idx) else {
+        let Some(&key) = self.burst_of.get(&idx) else {
             return true;
         };
-        if self.expanded_bursts.contains(key) {
+        if self.is_burst_expanded(key) {
             return true;
         }
-        self.burst_map[key].first() == Some(&idx)
+        self.burst_map[&key].first() == Some(&idx)
     }
 }
 
@@ -1013,12 +1059,17 @@ mod tests {
     }
 
     /// Owns the `BTreeSet`s so a `ViewParams` can borrow them.
+    #[expect(
+        clippy::struct_excessive_bools,
+        reason = "independent view-filter axes, mirroring ViewParams"
+    )]
     struct Params {
         sources: std::collections::BTreeSet<PathBuf>,
         ratings: std::collections::BTreeSet<i8>,
         colors: std::collections::BTreeSet<Option<ferrocull_core::ColorLabel>>,
         sort_order: SortOrder,
         group_bursts: bool,
+        expand_bursts: bool,
         group_raw_jpeg: bool,
         filter_mode: FilterMode,
         new_only: bool,
@@ -1034,6 +1085,7 @@ mod tests {
                 colors: std::collections::BTreeSet::new(),
                 sort_order: SortOrder::Time,
                 group_bursts: true,
+                expand_bursts: false,
                 group_raw_jpeg: true,
                 filter_mode: FilterMode::All,
                 new_only: false,
@@ -1048,6 +1100,7 @@ mod tests {
                 hide_rejected: false,
                 group_raw_jpeg: self.group_raw_jpeg,
                 group_bursts: self.group_bursts,
+                expand_bursts: self.expand_bursts,
                 selected_sources: &self.sources,
                 selected_dates: None,
                 selected_ratings: &self.ratings,
@@ -1088,9 +1141,10 @@ mod tests {
         assert_eq!(a.burst_order, b.burst_order, "burst_order differs");
         assert_eq!(a.burst_of, b.burst_of, "burst_of differs");
         assert_eq!(a.burst_map, b.burst_map, "burst_map differs");
+        assert_eq!(a.expand_bursts, b.expand_bursts, "expand_bursts differs");
         assert_eq!(
-            a.expanded_bursts, b.expanded_bursts,
-            "expanded_bursts differs"
+            a.burst_exceptions, b.burst_exceptions,
+            "burst_exceptions differs"
         );
         assert_eq!(
             a.hidden_jpeg_paths, b.hidden_jpeg_paths,
@@ -1296,7 +1350,7 @@ mod tests {
         }
         let old_key = *view.burst_map.keys().next().unwrap();
         view.toggle_burst_expansion(old_key, &params.view());
-        assert!(view.expanded_bursts.contains(&old_key));
+        assert!(view.is_burst_expanded(old_key));
         assert_eq!(visible_names(&view).len(), 3, "expanded → all shown");
 
         // Earlier frame within 1s of b → joins as new first, re-keying the burst.
@@ -1304,13 +1358,10 @@ mod tests {
         let new_key = base_time() + chrono::Duration::seconds(9);
         assert_ne!(new_key, old_key);
         assert!(
-            view.expanded_bursts.contains(&new_key),
+            view.is_burst_expanded(new_key),
             "expansion carried to the new key"
         );
-        assert!(
-            !view.expanded_bursts.contains(&old_key),
-            "stale key dropped"
-        );
+        assert!(!view.burst_map.contains_key(&old_key), "stale key dropped");
         assert_eq!(visible_names(&view).len(), 4, "still expanded → 4 shown");
     }
 
@@ -1375,7 +1426,7 @@ mod tests {
         view.mutate_item(1, &params.view(), |item| item.rating = 4);
 
         assert!(
-            view.expanded_bursts.contains(&key),
+            view.is_burst_expanded(key),
             "expansion survives rating a member"
         );
         assert_eq!(visible_names(&view).len(), 3, "still all shown");
@@ -1830,6 +1881,253 @@ mod tests {
                 count: 3,
             }),
             "the last shot leads the burst when the newest frame comes first"
+        );
+    }
+
+    /// Two bursts of three, far enough apart to stay separate, for the cases
+    /// where folding one must leave the other alone.
+    fn two_bursts() -> Vec<Item> {
+        vec![
+            item_at("a.raw", 10, 0),
+            item_at("a2.raw", 10, 300_000_000),
+            item_at("a3.raw", 10, 600_000_000),
+            item_at("b.raw", 40, 0),
+            item_at("b2.raw", 40, 300_000_000),
+            item_at("b3.raw", 40, 600_000_000),
+        ]
+    }
+
+    /// The view's burst keys in capture order.
+    fn burst_keys(view: &MediaView) -> Vec<DateTime<Utc>> {
+        let mut keys: Vec<DateTime<Utc>> = view.burst_map.keys().copied().collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn the_expand_preference_opens_every_burst() {
+        let mut params = Params::new();
+        params.expand_bursts = true;
+        let view = build_incremental(&two_bursts(), &params);
+        assert!(
+            burst_keys(&view).iter().all(|&k| view.is_burst_expanded(k)),
+            "every burst honours the preference"
+        );
+        assert_eq!(visible_names(&view).len(), 6, "all six frames on screen");
+    }
+
+    #[test]
+    fn a_hand_folded_burst_leaves_its_neighbours_open() {
+        let mut params = Params::new();
+        params.expand_bursts = true;
+        let mut view = build_incremental(&two_bursts(), &params);
+        let [first, second]: [DateTime<Utc>; 2] = burst_keys(&view).try_into().unwrap();
+
+        view.toggle_burst_expansion(first, &params.view());
+
+        assert!(!view.is_burst_expanded(first), "the acted-on burst folded");
+        assert!(view.is_burst_expanded(second), "its neighbour stayed open");
+        assert_eq!(
+            visible_names(&view),
+            ["a.raw", "b.raw", "b2.raw", "b3.raw"],
+            "one folded run, one open"
+        );
+    }
+
+    #[test]
+    fn one_fold_action_reads_the_same_at_either_preference() {
+        // The two settings store this fold as opposite states, so the assertion
+        // is on what the photographer sees rather than on what was written.
+        for expand in [false, true] {
+            let mut params = Params::new();
+            params.expand_bursts = expand;
+            let mut view = build_incremental(&two_bursts(), &params);
+            let [first, second]: [DateTime<Utc>; 2] = burst_keys(&view).try_into().unwrap();
+
+            view.set_burst_expansion(first, false, &params.view());
+
+            assert!(!view.is_burst_expanded(first), "folded at either default");
+            assert_eq!(
+                view.is_burst_expanded(second),
+                expand,
+                "the fold speaks for its own burst only"
+            );
+            assert_eq!(
+                visible_names(&view)[0],
+                "a.raw",
+                "the folded run shows its representative alone"
+            );
+        }
+    }
+
+    #[test]
+    fn the_burst_toggle_flips_whichever_way_the_burst_is_currently_set() {
+        for expand in [false, true] {
+            let mut params = Params::new();
+            params.expand_bursts = expand;
+            let mut view = build_incremental(&two_bursts(), &params);
+            let first = burst_keys(&view)[0];
+
+            view.toggle_burst_expansion(first, &params.view());
+            assert_eq!(view.is_burst_expanded(first), !expand, "one press flips it");
+            view.toggle_burst_expansion(first, &params.view());
+            assert_eq!(view.is_burst_expanded(first), expand, "the next flips back");
+        }
+    }
+
+    #[test]
+    fn flipping_the_preference_clears_hand_made_exceptions() {
+        for expand in [false, true] {
+            let mut params = Params::new();
+            params.expand_bursts = expand;
+            let mut view = build_incremental(&two_bursts(), &params);
+            let first = burst_keys(&view)[0];
+            view.toggle_burst_expansion(first, &params.view());
+
+            let flipped = !expand;
+            params.expand_bursts = flipped;
+            view.rebuild(&params.view());
+
+            assert!(
+                burst_keys(&view)
+                    .iter()
+                    .all(|&k| view.is_burst_expanded(k) == flipped),
+                "every burst reads the new preference, exceptions retired"
+            );
+        }
+    }
+
+    #[test]
+    fn a_burst_forming_after_the_preference_was_set_honours_it() {
+        let mut params = Params::new();
+        params.expand_bursts = true;
+        let mut view = build_incremental(&[item_at("lone.raw", 0, 0)], &params);
+        for it in [
+            item_at("a.raw", 10, 0),
+            item_at("a2.raw", 10, 300_000_000),
+            item_at("a3.raw", 10, 600_000_000),
+        ] {
+            view.insert(it, &params.view());
+        }
+
+        assert_eq!(
+            visible_names(&view),
+            ["lone.raw", "a.raw", "a2.raw", "a3.raw"],
+            "a burst that forms mid-scan opens as the preference asks"
+        );
+    }
+
+    #[test]
+    fn a_re_keyed_burst_honours_the_preference() {
+        let mut params = Params::new();
+        params.expand_bursts = true;
+        let mut view = build_incremental(
+            &[
+                item_at("b.raw", 10, 100_000_000),
+                item_at("c.raw", 10, 400_000_000),
+                item_at("d.raw", 10, 700_000_000),
+            ],
+            &params,
+        );
+        // An earlier frame joins as the new first member, re-keying the burst.
+        view.insert(item_at("a.raw", 9, 800_000_000), &params.view());
+
+        let key = burst_keys(&view)[0];
+        assert!(view.is_burst_expanded(key), "the re-keyed burst stays open");
+        assert_eq!(visible_names(&view).len(), 4);
+    }
+
+    #[test]
+    fn the_preference_does_nothing_while_burst_grouping_is_off() {
+        let mut params = Params::new();
+        params.group_bursts = false;
+        let collapsed_default = build_incremental(&two_bursts(), &params);
+        params.expand_bursts = true;
+        let expanded_default = build_incremental(&two_bursts(), &params);
+
+        assert_eq!(
+            visible_names(&collapsed_default),
+            visible_names(&expanded_default),
+            "with grouping off there are no bursts for the preference to open"
+        );
+        assert_eq!(visible_names(&expanded_default).len(), 6);
+    }
+
+    #[test]
+    fn the_preference_reaches_the_same_state_as_hand_expanding() {
+        let by_hand_params = Params::new();
+        let mut by_hand = build_incremental(&two_bursts(), &by_hand_params);
+        for key in burst_keys(&by_hand) {
+            by_hand.toggle_burst_expansion(key, &by_hand_params.view());
+        }
+
+        let mut preferred = Params::new();
+        preferred.expand_bursts = true;
+        let by_preference = build_incremental(&two_bursts(), &preferred);
+
+        // Hand-expanding records an exception per burst where the preference
+        // records none, so compare what the photographer sees, not the storage.
+        assert_eq!(visible_names(&by_hand), visible_names(&by_preference));
+        for idx in 0..by_hand.len() {
+            assert_eq!(
+                by_hand.burst_status(idx, true, SortOrder::Time),
+                by_preference.burst_status(idx, true, SortOrder::Time),
+                "the two routes to an open burst are indistinguishable"
+            );
+        }
+    }
+
+    #[test]
+    fn folding_every_burst_sends_a_hidden_frame_to_its_representative() {
+        let mut params = Params::new();
+        params.expand_bursts = true;
+        let mut view = build_incremental(&two_bursts(), &params);
+        let idx = |name: &str| {
+            view.index_of(&PathBuf::from(format!("/src/{name}")))
+                .unwrap()
+        };
+        let (hidden, representative, lone) = (idx("b3.raw"), idx("b.raw"), idx("a.raw"));
+
+        params.expand_bursts = false;
+        view.rebuild(&params.view());
+
+        assert_eq!(
+            view.folded_burst_representative(hidden),
+            Some(representative),
+            "a frame the bulk fold hid follows its run"
+        );
+        assert_eq!(
+            view.folded_burst_representative(representative),
+            None,
+            "a frame still on screen stays put"
+        );
+        assert_eq!(
+            view.folded_burst_representative(lone),
+            None,
+            "the other burst's face is on screen too"
+        );
+    }
+
+    #[test]
+    fn a_hidden_frame_outside_any_burst_has_no_representative() {
+        let params = Params::new();
+        let mut items = two_bursts();
+        items.push(Item {
+            rating: -1,
+            ..item_at("rejected.raw", 100, 0)
+        });
+        let mut view = build_incremental(&items, &params);
+        let rejected = view.index_of(Path::new("/src/rejected.raw")).unwrap();
+
+        let mut hidden = params.view();
+        hidden.hide_rejected = true;
+        view.rebuild(&hidden);
+
+        assert!(!view.is_visible(rejected));
+        assert_eq!(
+            view.folded_burst_representative(rejected),
+            None,
+            "a filtered-out frame belongs to no run, so nothing stands in for it"
         );
     }
 

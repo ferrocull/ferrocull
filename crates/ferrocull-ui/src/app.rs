@@ -201,6 +201,7 @@ impl ViewConfig {
             hide_rejected: self.view.hide_rejected,
             group_raw_jpeg: self.view.group_raw_jpeg,
             group_bursts: self.view.group_bursts,
+            expand_bursts: self.view.expand_bursts,
             selected_sources: &self.selected_sources,
             selected_dates: self.selected_dates,
             selected_ratings: &self.selected_ratings,
@@ -1895,6 +1896,7 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
         views::filters::grouping_controls(
             state.config.view.group_raw_jpeg,
             state.config.view.group_bursts,
+            state.config.view.expand_bursts,
             state.config.view.hide_rejected,
         ),
         views::filters::rating_filter(&state.config.selected_ratings),
@@ -1972,9 +1974,14 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         state.media.items(),
         state.media.sorted_view(),
         |idx| state.tag_state(idx),
+        |idx| {
+            state.media.burst_status(
+                idx,
+                state.config.view.ascending,
+                state.config.view.sort_order,
+            )
+        },
         &state.loaded_thumbs,
-        state.media.burst_of(),
-        state.media.burst_map(),
         state.today,
         state.window_scale,
         state.config.view.sort_order,

@@ -101,7 +101,7 @@ pub(crate) fn image_area(
 /// screen, folding the same burst when pressed.
 pub(crate) fn burst_badge(status: BurstStatus) -> Element<'static, Message> {
     views::burst::badge(
-        views::burst::status_label(status),
+        views::burst::strip_label(status),
         views::burst::Size::Strip,
         Message::Preview(preview::Message::ToggleBurst),
     )

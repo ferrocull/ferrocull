@@ -34,7 +34,9 @@ impl Ferrocull {
 pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Message> {
     // Every arm that reorders or refilters the view resets the grid to the top:
     // the pinned anchor is a display ordinal into the old order, so keeping it
-    // would scroll to an arbitrary row after the reflow.
+    // would scroll to an arbitrary row after the reflow. The two burst arms are
+    // exempt: they only change what is hidden, leaving the display sequence in
+    // the same order, so the photographer keeps their place.
     match msg {
         filters::Message::SortChanged(order) => return state.handle_sort_changed(order),
         filters::Message::AscendingToggled => {
@@ -55,9 +57,16 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
             state.persist_settings();
         }
         filters::Message::GroupBurstsToggled => {
-            // `rebuild` clears burst expansion when grouping is off.
+            // `rebuild` retires the per-burst exceptions when grouping is off,
+            // so grouping comes back at whatever the expand preference says.
             state.config.view.group_bursts = !state.config.view.group_bursts;
             state.persist_settings();
+            return state.rebuild_keeping_place();
+        }
+        filters::Message::ExpandBurstsToggled => {
+            state.config.view.expand_bursts = !state.config.view.expand_bursts;
+            state.persist_settings();
+            return state.rebuild_keeping_place();
         }
         filters::Message::HideRejectedToggled => {
             state.config.view.hide_rejected = !state.config.view.hide_rejected;
@@ -115,5 +124,27 @@ impl Ferrocull {
     pub(super) fn rebuild_view(&mut self) {
         self.media.rebuild(&self.config.params());
         self.reconcile_selection();
+    }
+
+    /// Rebuild for a change that hides and reveals frames without reordering
+    /// them, keeping the photographer where they were culling.
+    ///
+    /// The repair reads the pre-rebuild focus and runs before the prune, which
+    /// would otherwise drop the focus and report it as hidden for a fold the
+    /// photographer asked for. With nothing focused there is no anchor to keep,
+    /// so the grid resets.
+    fn rebuild_keeping_place(&mut self) -> Task<Message> {
+        let focused_before = self.focused_index;
+        self.media.rebuild(&self.config.params());
+        if let Some(idx) = focused_before
+            && let Some(representative) = self.media.folded_burst_representative(idx)
+        {
+            self.focused_index = Some(representative);
+        }
+        self.reconcile_selection();
+        match self.focused_index {
+            Some(idx) => self.anchor_grid_to(idx),
+            None => self.reset_grid_scroll(),
+        }
     }
 }
