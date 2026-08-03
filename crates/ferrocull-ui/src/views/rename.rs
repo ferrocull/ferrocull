@@ -47,7 +47,7 @@ fn sample_context(today: NaiveDate) -> RenderContext {
 
 fn eyebrow(label: &'static str) -> Element<'static, Message> {
     text(label)
-        .size(10)
+        .size(11)
         .color(crate::theme::text_muted())
         .font(crate::fonts::SANS_SEMIBOLD)
         .into()
@@ -149,7 +149,7 @@ fn preview_row(
         row![
             eyebrow(label),
             text(source)
-                .size(10)
+                .size(11)
                 .font(crate::fonts::MONO)
                 .color(crate::theme::text_muted()),
         ]
