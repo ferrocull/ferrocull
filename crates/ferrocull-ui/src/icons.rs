@@ -102,3 +102,15 @@ pub(crate) fn undo<'a>() -> Text<'a> {
 pub(crate) fn burst<'a>() -> Text<'a> {
     bootstrap::stack()
 }
+
+pub(crate) fn storage_source<'a>() -> Text<'a> {
+    bootstrap::sd_card()
+}
+
+pub(crate) fn camera_source<'a>() -> Text<'a> {
+    bootstrap::camera()
+}
+
+pub(crate) fn directory_source<'a>() -> Text<'a> {
+    bootstrap::folder()
+}

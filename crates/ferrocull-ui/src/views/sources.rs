@@ -8,7 +8,7 @@ use iced::{
     widget::{Space, button, checkbox, column, container, progress_bar, row, text},
 };
 
-use crate::{messages::sources::Message, styles, theme::spacing};
+use crate::{icons, messages::sources::Message, styles, theme::spacing};
 
 pub(crate) fn sources_panel(
     sources: &[Source],
@@ -89,7 +89,7 @@ fn source_row(
 ) -> Element<'static, Message> {
     let (icon, name, subtitle, storage) = match source {
         Source::Storage(s) => (
-            "📁",
+            icons::storage_source(),
             s.name.clone(),
             s.mount_point.as_ref().map_or_else(
                 || s.device_path.display().to_string(),
@@ -97,9 +97,9 @@ fn source_row(
             ),
             s.total_bytes.zip(s.used_bytes),
         ),
-        Source::Camera(c) => ("📷", c.name.clone(), c.port.clone(), None),
+        Source::Camera(c) => (icons::camera_source(), c.name.clone(), c.port.clone(), None),
         Source::Directory(p) => (
-            "📂",
+            icons::directory_source(),
             p.file_name().map_or_else(
                 || "Directory".to_owned(),
                 |n| n.to_string_lossy().into_owned(),
@@ -116,7 +116,7 @@ fn source_row(
     }
 
     header = header
-        .push(text(icon).size(14))
+        .push(icon.size(14))
         .push(text(name).size(12).color(palette.background.base.text))
         .push(Space::new().width(Fill));
 
