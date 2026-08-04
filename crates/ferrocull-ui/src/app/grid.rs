@@ -106,6 +106,9 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
             state.tag_members(&members, false, state.focused_index, |n| {
                 count_echo(false, n)
             });
+            // Frames still streaming in from an active scan belong to the set
+            // being cleared; their stored tags must not outlive it.
+            state.untag_arrivals = state.scan_in_flight();
         }
         grid::Message::RejectFile(path) => state.handle_reject_file(&path),
         grid::Message::BurstToggled(key) => {
@@ -717,16 +720,7 @@ impl Ferrocull {
                     .collect();
                 self.set_rating_values(&assignments);
                 // The forward action untagged these; undo re-tags, redo untags.
-                match dir {
-                    undo::Direction::Undo => {
-                        self.selected.extend(selection_removed.iter().copied());
-                    }
-                    undo::Direction::Redo => {
-                        for member in selection_removed {
-                            self.selected.remove(member);
-                        }
-                    }
-                }
+                self.apply_tags(selection_removed, matches!(dir, undo::Direction::Undo));
                 let (from, to) = target_transition(changes, entry.target, dir);
                 self.echo(format!(
                     "{}: {} → {} — {name}",
@@ -749,15 +743,9 @@ impl Ferrocull {
                     label_desc(to)
                 ));
             }
-            undo::Action::Tag { changes } => {
-                for &(member, before, after) in changes {
-                    if dir.pick(before, after) {
-                        self.selected.insert(member);
-                    } else {
-                        self.selected.remove(&member);
-                    }
-                }
-                let n = changes.len();
+            undo::Action::Tag { members, tagged } => {
+                self.apply_tags(members, dir.pick(!*tagged, *tagged));
+                let n = members.len();
                 self.echo(format!(
                     "{}: tag change — {n} file{}",
                     dir.verb(),
@@ -868,31 +856,66 @@ impl Ferrocull {
             return;
         }
         let n = changed.len();
-        let target = target.unwrap_or(changed[0].0);
+        let target = target.unwrap_or(changed[0]);
         self.undo_stack.record(undo::Entry {
             target,
-            action: undo::Action::Tag { changes: changed },
+            action: undo::Action::Tag {
+                members: changed,
+                tagged: tag,
+            },
         });
         self.echo(message(n));
     }
 
-    /// Set the tag state of every member, returning the `(idx, before, after)`
-    /// state of each member whose state actually changed (the undo payload).
-    fn set_tags(&mut self, members: &[usize], tag: bool) -> Vec<(usize, bool, bool)> {
-        members
+    /// Set the tag state of every member and persist it, returning the members
+    /// whose state actually changed (the undo payload).
+    fn set_tags(&mut self, members: &[usize], tag: bool) -> Vec<usize> {
+        // `insert`/`remove` report whether the state changed, which also drops
+        // the duplicate members a burst-spanning range hands in.
+        let changed: Vec<usize> = members
             .iter()
-            .filter_map(|&member| {
-                let was_tagged = self.selected.contains(&member);
-                if was_tagged == tag {
-                    return None;
-                }
+            .copied()
+            .filter(|&member| {
                 if tag {
-                    self.selected.insert(member);
+                    self.selected.insert(member)
                 } else {
-                    self.selected.remove(&member);
+                    self.selected.remove(&member)
                 }
-                Some((member, was_tagged, tag))
             })
+            .collect();
+        self.persist_tags(&changed, tag);
+        changed
+    }
+
+    /// Set every member's tag state to `tag` and persist it, recording no undo
+    /// entry: undo/redo replay already holds the state each member lands on,
+    /// and an ingested frame leaves the working set for good.
+    pub(super) fn apply_tags(&mut self, members: &[usize], tag: bool) {
+        for &member in members {
+            if tag {
+                self.selected.insert(member);
+            } else {
+                self.selected.remove(&member);
+            }
+        }
+        self.persist_tags(members, tag);
+    }
+
+    /// Persist the tag state of `members`. A no-op for an empty slice, so a
+    /// replay that touched no tags costs no database commit.
+    fn persist_tags(&mut self, members: &[usize], tag: bool) {
+        if members.is_empty() {
+            return;
+        }
+        let fingerprints = self.fingerprints_of(members.iter().copied());
+        self.metadata.set_tagged(&fingerprints, tag);
+    }
+
+    /// The ingest fingerprints of `members`, the key their culling state is
+    /// stored under.
+    fn fingerprints_of(&self, members: impl Iterator<Item = usize>) -> Vec<String> {
+        members
+            .map(|member| self.media.item(member).fingerprint())
             .collect()
     }
 
@@ -928,14 +951,11 @@ impl Ferrocull {
         let assignments: Vec<(usize, i8)> = group.iter().map(|&member| (member, rating)).collect();
         self.set_rating_values(&assignments);
         // Rejecting takes a file out of the working set; un-rejecting does not put it back.
-        let mut selection_removed = Vec::new();
-        if rating == -1 {
-            for &member in &group {
-                if self.selected.remove(&member) {
-                    selection_removed.push(member);
-                }
-            }
-        }
+        let selection_removed: Vec<usize> = if rating == -1 {
+            self.set_tags(&group, false)
+        } else {
+            Vec::new()
+        };
         self.undo_stack.record(undo::Entry {
             target: idx,
             action: undo::Action::Rating {
@@ -994,8 +1014,8 @@ impl Ferrocull {
     /// echo (metadata writes are synchronous and crash on failure).
     fn set_rating_values(&mut self, assignments: &[(usize, i8)]) {
         for &(member, rating) in assignments {
-            for source_id in self.apply_to_group(&[member], |item| item.rating = rating) {
-                self.metadata.set_rating(&source_id, rating);
+            for fingerprint in self.apply_to_group(&[member], |item| item.rating = rating) {
+                self.metadata.set_rating(&fingerprint, rating);
             }
         }
     }
@@ -1005,14 +1025,14 @@ impl Ferrocull {
     /// forward label handler and undo/redo replay.
     fn set_color_label_values(&mut self, assignments: &[(usize, Option<ColorLabel>)]) {
         for &(member, label) in assignments {
-            for source_id in self.apply_to_group(&[member], |item| item.color_label = label) {
-                self.metadata.set_color_label(&source_id, label);
+            for fingerprint in self.apply_to_group(&[member], |item| item.color_label = label) {
+                self.metadata.set_color_label(&fingerprint, label);
             }
         }
     }
 
     /// Apply `mutate` to every member of `group`, reconciling the view per
-    /// item. Returns the mutated `source_ids`, for persistence.
+    /// item. Returns the mutated frames' fingerprints, for persistence.
     fn apply_to_group<F>(&mut self, group: &[usize], mut mutate: F) -> Vec<String>
     where
         F: FnMut(&mut Item),
@@ -1022,7 +1042,7 @@ impl Ferrocull {
             .iter()
             .map(|&idx| {
                 self.media.mutate_item(idx, &params, &mut mutate);
-                self.media.item(idx).source_id.clone()
+                self.media.item(idx).fingerprint()
             })
             .collect()
     }

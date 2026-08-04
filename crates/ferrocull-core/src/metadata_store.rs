@@ -1,9 +1,9 @@
-//! The seam callers use for a media file's culling metadata (rating, color label).
+//! The seam callers use for a frame's culling state (rating, color label, tag).
 //!
 //! Owns the read precedence — the persistent database wins, an XMP sidecar is the
-//! fallback — and the culling write policy: rating and label edits persist to the
-//! database; the XMP sidecar is authored once at ingest ([ADR-0006]), not on every
-//! edit. Wraps [`MediaDatabase`] and the [`crate::xmp`] module.
+//! fallback — and the culling write policy: rating, label, and tag edits persist to
+//! the database; the XMP sidecar is authored once at ingest ([ADR-0006]), not on
+//! every edit. Wraps [`MediaDatabase`] and the [`crate::xmp`] module.
 //!
 //! [ADR-0006]: docs/adr/0006-xmp-at-ingest.md
 
@@ -11,7 +11,7 @@ use std::path::Path;
 
 use crate::{
     MediaFile,
-    media::ColorLabel,
+    media::{ColorLabel, CullingState},
     persistence::{AppSettings, MediaDatabase},
     profiles::{NamedProfile, Profile},
     xmp::Metadata,
@@ -32,32 +32,49 @@ impl Store {
         Self { db }
     }
 
-    /// Rating and color label for a file, preferring the database over `xmp_fallback`.
+    /// Culling state for a frame, preferring the database over `xmp_fallback`.
     ///
     /// `xmp_fallback` is the sidecar metadata parsed at scan time; the store never
-    /// re-reads it. Returns `(0, None)` when neither source has metadata.
+    /// re-reads it, and a sidecar speaks for rating and color label only, never
+    /// for the tag. It answers per field, so tagging a frame does not silence the
+    /// sidecar's rating. Returns the default state when neither source has
+    /// anything.
     #[must_use]
-    pub fn load(
-        &self,
-        source_id: &str,
-        xmp_fallback: Option<&Metadata>,
-    ) -> (i8, Option<ColorLabel>) {
-        self.db
-            .rating_and_color(source_id)
-            .expect("rating_and_color query failed")
-            .unwrap_or_else(|| xmp_fallback.map_or((0, None), |x| (x.rating, x.color_label)))
+    pub fn load(&self, fingerprint: &str, xmp_fallback: Option<&Metadata>) -> CullingState {
+        let stored = self
+            .db
+            .culling_state(fingerprint)
+            .expect("culling_state query failed");
+
+        CullingState {
+            rating: stored
+                .rating
+                .or_else(|| xmp_fallback.map(|x| x.rating))
+                .unwrap_or(0),
+            color_label: stored
+                .color_label
+                .unwrap_or_else(|| xmp_fallback.and_then(|x| x.color_label)),
+            tagged: stored.tagged,
+        }
     }
 
-    pub fn set_rating(&mut self, source_id: &str, rating: i8) {
+    pub fn set_rating(&mut self, fingerprint: &str, rating: i8) {
         self.db
-            .set_rating(source_id, rating)
+            .set_rating(fingerprint, rating)
             .expect("set_rating query failed");
     }
 
-    pub fn set_color_label(&mut self, source_id: &str, label: Option<ColorLabel>) {
+    pub fn set_color_label(&mut self, fingerprint: &str, label: Option<ColorLabel>) {
         self.db
-            .set_color_label(source_id, label)
+            .set_color_label(fingerprint, label)
             .expect("set_color_label query failed");
+    }
+
+    /// Persists the tagged flag for every frame in `fingerprints`.
+    pub fn set_tagged(&mut self, fingerprints: &[String], tagged: bool) {
+        self.db
+            .set_tagged(fingerprints, tagged)
+            .expect("set_tagged query failed");
     }
 
     #[must_use]
@@ -182,7 +199,11 @@ mod tests {
 
         assert_eq!(
             store.load("id", Some(&fallback)),
-            (5, Some(ColorLabel::Green))
+            CullingState {
+                rating: 5,
+                color_label: Some(ColorLabel::Green),
+                tagged: false,
+            }
         );
     }
 
@@ -204,13 +225,18 @@ mod tests {
 
         assert_eq!(
             store().load("id", Some(&parsed)),
-            (3, Some(ColorLabel::Blue))
+            CullingState {
+                rating: 3,
+                color_label: Some(ColorLabel::Blue),
+                tagged: false,
+            },
+            "a sidecar carries rating and label, never a tag"
         );
     }
 
     #[test]
     fn defaults_when_neither_source_has_metadata() {
-        assert_eq!(store().load("id", None), (0, None));
+        assert_eq!(store().load("id", None), CullingState::default());
     }
 
     #[test]
@@ -255,10 +281,175 @@ mod tests {
         store.set_rating("id", -1);
         store.set_color_label("id", Some(ColorLabel::Purple));
 
-        assert_eq!(store.load("id", None), (-1, Some(ColorLabel::Purple)));
+        assert_eq!(
+            store.load("id", None),
+            CullingState {
+                rating: -1,
+                color_label: Some(ColorLabel::Purple),
+                tagged: false,
+            }
+        );
 
         store.set_color_label("id", None);
-        assert_eq!(store.load("id", None), (-1, None));
+        assert_eq!(
+            store.load("id", None),
+            CullingState {
+                rating: -1,
+                color_label: None,
+                tagged: false,
+            }
+        );
+    }
+
+    #[test]
+    fn tags_roundtrip_alongside_rating_and_label() {
+        let mut store = store();
+        let ids = [String::from("a"), String::from("b")];
+
+        store.set_tagged(&ids, true);
+        store.set_rating("a", 4);
+        store.set_color_label("a", Some(ColorLabel::Red));
+
+        assert_eq!(
+            store.load("a", None),
+            CullingState {
+                rating: 4,
+                color_label: Some(ColorLabel::Red),
+                tagged: true,
+            },
+            "one point query hydrates all three fields"
+        );
+        assert!(store.load("b", None).tagged);
+
+        store.set_tagged(&ids[..1], false);
+        assert!(!store.load("a", None).tagged);
+        assert_eq!(
+            store.load("a", None).rating,
+            4,
+            "untagging leaves the rating alone"
+        );
+        assert!(store.load("b", None).tagged, "untagging is per fingerprint");
+    }
+
+    /// A scanned frame as the app models it, at `path` and `size`. Everything
+    /// else is fixed, so two calls differing only in path stand for the same
+    /// card mounted somewhere else.
+    fn frame(path: &str, size: u64) -> crate::media::Item {
+        use chrono::DateTime;
+
+        use crate::media::{CaptureSettings, CaptureTime};
+
+        crate::media::Item {
+            path: PathBuf::from(path),
+            size,
+            media_type: FileCategory::Raw,
+            capture_time: CaptureTime::new(
+                DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+                0,
+            ),
+            capture_settings: CaptureSettings::default(),
+            is_ingested: false,
+            jpeg_pair: None,
+            paired: Vec::new(),
+            sidecars: Vec::new(),
+            xmp_sidecar: None,
+            rating: 0,
+            color_label: None,
+        }
+    }
+
+    #[test]
+    fn culling_state_follows_the_frame_across_a_path_change() {
+        let first_mount = frame("/run/media/card/DCIM/100CANON/IMG_0001.CR2", 24_000_000);
+        let other_mount = frame("/run/media/card1/DCIM/100CANON/IMG_0001.CR2", 24_000_000);
+        let different_frame = frame("/run/media/card/DCIM/100CANON/IMG_0001.CR2", 31_500_000);
+
+        let mut store = store();
+        store.set_tagged(&[first_mount.fingerprint()], true);
+        store.set_rating(&first_mount.fingerprint(), 3);
+
+        assert_eq!(
+            store.load(&other_mount.fingerprint(), None),
+            CullingState {
+                rating: 3,
+                color_label: None,
+                tagged: true,
+            },
+            "the same card mounted elsewhere keeps its culling state"
+        );
+        assert_eq!(
+            store.load(&different_frame.fingerprint(), None),
+            CullingState::default(),
+            "a different frame reusing the camera name inherits nothing"
+        );
+    }
+
+    #[test]
+    fn tagging_leaves_the_sidecar_speaking_for_rating_and_label() {
+        let mut store = store();
+        let fallback = Metadata {
+            rating: 3,
+            color_label: Some(ColorLabel::Blue),
+            ..Metadata::default()
+        };
+
+        store.set_tagged(&[String::from("id")], true);
+
+        assert_eq!(
+            store.load("id", Some(&fallback)),
+            CullingState {
+                rating: 3,
+                color_label: Some(ColorLabel::Blue),
+                tagged: true,
+            },
+            "a tag says nothing about rating or label, so the sidecar still answers"
+        );
+
+        store.set_rating("id", 0);
+        store.set_color_label("id", None);
+
+        assert_eq!(
+            store.load("id", Some(&fallback)),
+            CullingState {
+                rating: 0,
+                color_label: None,
+                tagged: true,
+            },
+            "clearing them by hand overrides the sidecar"
+        );
+    }
+
+    /// Ingest completion records the ingest and clears the tag under one key,
+    /// the pairing that keeps a tag from outliving the frame's ingest.
+    #[test]
+    fn ingest_clears_the_tag_under_the_same_key() {
+        let ingested = frame("/run/media/card/DCIM/100CANON/IMG_0001.CR2", 24_000_000);
+        let fingerprint = ingested.fingerprint();
+
+        let mut store = store();
+        store.set_tagged(std::slice::from_ref(&fingerprint), true);
+
+        store.record_ingest(
+            &fingerprint,
+            "checksum",
+            Path::new("/dest/2024/IMG_0001.CR2"),
+        );
+        store.set_tagged(std::slice::from_ref(&fingerprint), false);
+
+        assert!(store.is_ingested(&fingerprint));
+        assert!(
+            !store.load(&fingerprint, None).tagged,
+            "an ingested frame leaves the working set for good"
+        );
+        assert!(
+            !store
+                .load(
+                    &frame("/other/mount/IMG_0001.CR2", 24_000_000).fingerprint(),
+                    None
+                )
+                .tagged,
+            "the clear follows the frame, not the path it was ingested from"
+        );
     }
 
     #[test]

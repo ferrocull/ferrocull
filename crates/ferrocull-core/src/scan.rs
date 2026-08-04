@@ -50,12 +50,9 @@ pub trait Input {
 pub enum Event<T> {
     /// Capture time (persisted from cache, EXIF, or mtime fallback), capture
     /// settings, and XMP sidecar are available; the input file is handed back
-    /// for item construction. `canonical_path` is the file's canonicalized path (or the
-    /// raw path when canonicalization fails), resolved here so the caller does
-    /// not repeat that I/O on its update loop.
+    /// for item construction.
     ExifLoaded {
         file: T,
-        canonical_path: PathBuf,
         capture_time: CaptureTime,
         capture_settings: CaptureSettings,
         xmp: Option<xmp::Metadata>,
@@ -165,24 +162,19 @@ where
         .xmp_sidecar()
         .and_then(|sidecar| xmp::read_sidecar(sidecar).ok());
 
-    // Canonicalize once here (metadata I/O, not a body read): the result
-    // feeds both the cache key and the event, so the caller needn't repeat
-    // it on its update loop. On failure, fall back to the raw path and
-    // bypass the cache.
-    let (canonical_path, key) = match path.canonicalize() {
-        Ok(canonical) => {
-            let key = match cache::cache_key_from_canonical(&canonical) {
-                Ok(k) => Some(k),
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "cache key derivation failed, bypassing cache");
-                    None
-                }
-            };
-            (canonical, key)
-        }
+    // Canonicalize once here (metadata I/O, not a body read) to derive the
+    // cache key. On failure, bypass the cache.
+    let key = match path.canonicalize() {
+        Ok(canonical) => match cache::cache_key_from_canonical(&canonical) {
+            Ok(k) => Some(k),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "cache key derivation failed, bypassing cache");
+                None
+            }
+        },
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "canonicalize failed, bypassing cache");
-            (path.clone(), None)
+            None
         }
     };
 
@@ -195,7 +187,6 @@ where
         tracing::debug!(path = %path.display(), "thumbnail cache hit");
         on_event(Event::ExifLoaded {
             file,
-            canonical_path,
             capture_time: entry.capture_time,
             capture_settings: entry.capture_settings,
             xmp,
@@ -230,7 +221,6 @@ where
 
     on_event(Event::ExifLoaded {
         file,
-        canonical_path,
         capture_time,
         capture_settings: exif.capture_settings.clone(),
         xmp,

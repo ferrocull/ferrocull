@@ -281,6 +281,11 @@ struct Ferrocull {
     scan_jobs_in_flight: usize,
     thumbnail_jobs_in_flight: usize,
     scanning: bool,
+    /// Untag All fired while a scan was still streaming frames in: arriving
+    /// frames clear their stored tag instead of restoring it, because they
+    /// belong to the working set the photographer just cleared. Reset as soon
+    /// as no scan is in flight.
+    untag_arrivals: bool,
     job_code: String,
     job_code_history: JobCodeHistory,
     backup_destinations: Vec<PathBuf>,
@@ -440,6 +445,7 @@ impl Default for Ferrocull {
             thumbnail_progress: None,
             scan_jobs_in_flight: 0,
             thumbnail_jobs_in_flight: 0,
+            untag_arrivals: false,
             scanning: false,
             job_code: String::new(),
             job_code_history,
@@ -1008,13 +1014,11 @@ fn spawn_thumbnail_sipper(
                 .map(|event| match event {
                     scan::Event::ExifLoaded {
                         file,
-                        canonical_path,
                         capture_time,
                         capture_settings,
                         xmp,
                     } => ScanEvent::ExifLoaded {
                         file: Box::new(file.0),
-                        canonical_path,
                         capture_time,
                         capture_settings,
                         xmp,
@@ -1136,6 +1140,11 @@ fn device_events() -> impl iced::futures::Stream<Item = Message> {
 
 fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
     let task = dispatch(state, message);
+    // Any message may be the one that ends the scan, so the untag-arrivals
+    // window closes here rather than at a single scan-completion site.
+    if !state.scan_in_flight() {
+        state.untag_arrivals = false;
+    }
     // Every message may have moved the scroll offset, resized the grid, or
     // changed the visible set, so reconcile which thumbnails should be loaded
     // after the state has settled. It is a cheap no-op when nothing relevant
@@ -1210,14 +1219,12 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
                 match event {
                     ScanEvent::ExifLoaded {
                         file,
-                        canonical_path,
                         capture_time,
                         capture_settings,
                         xmp,
                     } => {
                         state.handle_exif_loaded(
                             *file,
-                            &canonical_path,
                             capture_time,
                             capture_settings,
                             xmp.as_ref(),

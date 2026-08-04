@@ -1,4 +1,4 @@
-//! Persistent media database for ingest history, ratings, and color labels.
+//! Persistent media database for ingest history and per-frame culling state.
 
 use std::{
     fs, io,
@@ -160,6 +160,20 @@ impl Default for PanelWidths {
     }
 }
 
+/// One frame's stored culling row, as written.
+///
+/// Rating and color label are absent until the photographer sets them, which is
+/// what keeps an XMP sidecar speaking for a field nobody has touched. The store
+/// resolves the row into a [`CullingState`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CullingRow {
+    pub rating: Option<i8>,
+    /// `None`: never set, an XMP sidecar may still answer. `Some(None)`: the
+    /// photographer explicitly cleared the label.
+    pub color_label: Option<Option<ColorLabel>>,
+    pub tagged: bool,
+}
+
 /// Errors from database operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -228,16 +242,20 @@ impl MediaDatabase {
         )
         .map_err(db_err("create ingests table"))?;
 
+        // Rating and color label are nullable: a row written by tagging alone
+        // must not claim the photographer cleared them, or it would silence the
+        // XMP sidecar those fields still fall back to.
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS ratings (
-                source_id TEXT PRIMARY KEY,
-                rating INTEGER NOT NULL,
-                color_label INTEGER NOT NULL DEFAULT 0,
+            "CREATE TABLE IF NOT EXISTS culling_state (
+                fingerprint TEXT PRIMARY KEY,
+                rating INTEGER,
+                color_label INTEGER,
+                tagged INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             )",
             [],
         )
-        .map_err(db_err("create ratings table"))?;
+        .map_err(db_err("create culling_state table"))?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS profiles (
@@ -302,30 +320,25 @@ impl MediaDatabase {
             .map_err(db_err("query ingest status"))
     }
 
-    /// Sets the rating for a file. Valid range: `-1..=5` (`-1` rejected, `0` unrated, `1..=5` stars).
-    pub fn set_rating(&mut self, source_id: &str, rating: i8) -> Result<(), Error> {
+    /// Sets the rating for a frame. Valid range: `-1..=5` (`-1` rejected, `0` unrated, `1..=5` stars).
+    pub fn set_rating(&mut self, fingerprint: &str, rating: i8) -> Result<(), Error> {
         let now = Utc::now().to_rfc3339();
 
         self.conn
             .execute(
-                "INSERT INTO ratings (source_id, rating, color_label, updated_at)
-             VALUES (
-                 ?1,
-                 ?2,
-                 COALESCE((SELECT color_label FROM ratings WHERE source_id = ?1), 0),
-                 ?3
-             )
-             ON CONFLICT(source_id) DO UPDATE SET rating = excluded.rating, updated_at = excluded.updated_at",
-                params![source_id, rating, now],
+                "INSERT INTO culling_state (fingerprint, rating, color_label, tagged, updated_at)
+             VALUES (?1, ?2, NULL, 0, ?3)
+             ON CONFLICT(fingerprint) DO UPDATE SET rating = excluded.rating, updated_at = excluded.updated_at",
+                params![fingerprint, rating, now],
             )
             .map(drop)
             .map_err(db_err("set rating"))
     }
 
-    /// Sets the color label for a file.
+    /// Sets the color label for a frame.
     pub fn set_color_label(
         &mut self,
-        source_id: &str,
+        fingerprint: &str,
         label: Option<ColorLabel>,
     ) -> Result<(), Error> {
         let db_value = label.map_or(0u8, u8::from);
@@ -333,40 +346,63 @@ impl MediaDatabase {
 
         self.conn
             .execute(
-                "INSERT INTO ratings (source_id, rating, color_label, updated_at)
-             VALUES (
-                 ?1,
-                 COALESCE((SELECT rating FROM ratings WHERE source_id = ?1), 0),
-                 ?2,
-                 ?3
-             )
-             ON CONFLICT(source_id) DO UPDATE SET color_label = excluded.color_label, updated_at = excluded.updated_at",
-                params![source_id, db_value, now],
+                "INSERT INTO culling_state (fingerprint, rating, color_label, tagged, updated_at)
+             VALUES (?1, NULL, ?2, 0, ?3)
+             ON CONFLICT(fingerprint) DO UPDATE SET color_label = excluded.color_label, updated_at = excluded.updated_at",
+                params![fingerprint, db_value, now],
             )
             .map(drop)
             .map_err(db_err("set color label"))
     }
 
-    /// Gets rating and color label for a file. Returns `None` if no metadata row exists.
-    ///
-    /// `None` distinguishes "user never set metadata" from `Some((0, None))` which means
-    /// "user explicitly cleared rating and label".
-    pub fn rating_and_color(
-        &self,
-        source_id: &str,
-    ) -> Result<Option<(i8, Option<ColorLabel>)>, Error> {
+    /// Sets the tagged flag for every frame in `fingerprints`, in one
+    /// transaction so tagging a long range costs one commit rather than one per
+    /// frame.
+    pub fn set_tagged(&mut self, fingerprints: &[String], tagged: bool) -> Result<(), Error> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self.conn.transaction().map_err(db_err("begin tag write"))?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO culling_state (fingerprint, rating, color_label, tagged, updated_at)
+                 VALUES (?1, NULL, NULL, ?2, ?3)
+                 ON CONFLICT(fingerprint) DO UPDATE SET tagged = excluded.tagged, updated_at = excluded.updated_at",
+                )
+                .map_err(db_err("prepare tag write"))?;
+            for fingerprint in fingerprints {
+                stmt.execute(params![fingerprint, tagged, now])
+                    .map_err(db_err("set tagged"))?;
+            }
+        }
+        tx.commit().map_err(db_err("commit tag write"))
+    }
+
+    /// The stored culling state of a frame. An absent row reads as the default
+    /// row: nothing rated, nothing labelled, untagged.
+    pub fn culling_state(&self, fingerprint: &str) -> Result<CullingRow, Error> {
         self.conn
             .query_row(
-                "SELECT rating, color_label FROM ratings WHERE source_id = ?1",
-                params![source_id],
+                "SELECT rating, color_label, tagged FROM culling_state WHERE fingerprint = ?1",
+                params![fingerprint],
                 |row| {
-                    let rating: i8 = row.get(0)?;
-                    let color: u8 = row.get(1)?;
-                    Ok((rating, ColorLabel::try_from(color).ok()))
+                    // A stored `0` is the explicit "no label" written by
+                    // clearing; only `1..=7` name a color.
+                    Ok(CullingRow {
+                        rating: row.get(0)?,
+                        color_label: row.get::<_, Option<u8>>(1)?.map(|stored| match stored {
+                            0 => None,
+                            labelled => Some(
+                                ColorLabel::try_from(labelled)
+                                    .expect("color label value out of range in culling_state"),
+                            ),
+                        }),
+                        tagged: row.get(2)?,
+                    })
                 },
             )
             .optional()
-            .map_err(db_err("query metadata"))
+            .map(Option::unwrap_or_default)
+            .map_err(db_err("query culling state"))
     }
 
     /// All saved profiles, ordered by name.

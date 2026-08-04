@@ -229,7 +229,6 @@ impl Ferrocull {
     pub(super) fn handle_exif_loaded(
         &mut self,
         scanned: ScannedFile,
-        canonical_path: &Path,
         capture_time: CaptureTime,
         capture_settings: CaptureSettings,
         xmp_metadata: Option<&Metadata>,
@@ -251,37 +250,45 @@ impl Ferrocull {
             return;
         }
 
-        // Canonicalization already happened on the scan worker; reuse it here
-        // rather than repeating the I/O on the update loop.
-        let source_id = canonical_path.to_string_lossy().into_owned();
-
-        let basename = path
-            .file_name()
-            .expect("scanned file has a filename")
-            .to_string_lossy();
-        let fingerprint = ferrocull_core::ingest_fingerprint(&basename, scanned.size, capture_time);
-        let is_ingested = self.metadata.is_ingested(&fingerprint);
-
-        let (rating, color_label) = self.metadata.load(&source_id, xmp_metadata);
-
-        let item = Item {
+        // The fingerprint keying the stored culling state is derived from the
+        // item itself, so the item is built first and its culling fields
+        // filled in once the store has answered.
+        let mut item = Item {
             path,
-            source_id,
             size: scanned.size,
             media_type: scanned.media_type,
             capture_time,
             capture_settings,
-            is_ingested,
+            is_ingested: false,
             jpeg_pair,
             paired: scanned.paired,
             sidecars: scanned.sidecars,
             xmp_sidecar: scanned.xmp_sidecar,
-            rating,
-            color_label,
+            rating: 0,
+            color_label: None,
         };
+        let fingerprint = item.fingerprint();
+        let is_ingested = self.metadata.is_ingested(&fingerprint);
+        let culling = self.metadata.load(&fingerprint, xmp_metadata);
+        item.is_ingested = is_ingested;
+        item.rating = culling.rating;
+        item.color_label = culling.color_label;
 
         // Focus is deliberately not pruned here: a scan must never move the
         // cursor the photographer is culling from.
-        self.media.insert(item, &self.config.params());
+        let idx = self.media.insert(item, &self.config.params());
+        if culling.tagged {
+            if is_ingested || self.untag_arrivals {
+                // The stored tag is stale: either a crash landed between
+                // recording the frame's ingest and clearing its tag, or Untag
+                // All cleared the working set while this frame was still
+                // streaming in. Clear it rather than resurrect the frame into
+                // the working set and re-ingest it.
+                self.metadata
+                    .set_tagged(std::slice::from_ref(&fingerprint), false);
+            } else {
+                self.selected.insert(idx);
+            }
+        }
     }
 }

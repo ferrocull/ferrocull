@@ -553,13 +553,14 @@ impl MediaView {
     }
 
     /// Insert a freshly-scanned item, keeping every derived index correct
-    /// (including bursts and burst expansion) incrementally.
+    /// (including bursts and burst expansion) incrementally. Returns the index
+    /// the item now lives at.
     ///
     /// The caller guarantees the path is fresh. Focus is deliberately *not*
     /// pruned here: a scan streams items in and must never move the cursor the
     /// photographer is culling from. Filter/sort changes go through
     /// [`Self::rebuild`], which does prune.
-    pub(crate) fn insert(&mut self, item: Item, params: &ViewParams) {
+    pub(crate) fn insert(&mut self, item: Item, params: &ViewParams) -> usize {
         debug_assert!(
             !self.item_index.contains_key(&item.path),
             "insert() requires a fresh path; the caller must dedup"
@@ -598,6 +599,8 @@ impl MediaView {
         if passes(&self.items[idx], params, &self.hidden_jpeg_paths) {
             self.admit(idx, params);
         }
+
+        idx
     }
 
     /// Rebuild every derived index from scratch for the given view params.
@@ -988,7 +991,6 @@ mod tests {
         let second = base_time() + chrono::Duration::seconds(secs);
         Item {
             path: PathBuf::from(format!("/src/{name}")),
-            source_id: name.to_owned(),
             size: 0,
             media_type: FileCategory::Raw,
             capture_time: CaptureTime::new(second, subsec_nanos),

@@ -368,20 +368,29 @@ impl Ferrocull {
     pub(super) fn handle_ingest_complete(&mut self, result: &IngestResult) -> Task<Message> {
         self.ingest_progress = None;
         self.last_ingest_failures.clone_from(&result.failures);
-        for success in &result.successes {
-            let idx = self
-                .media
-                .index_of(&success.source)
-                .expect("an ingested file's path must resolve to a media item");
-            self.selected.remove(&idx);
-            self.media
-                .mutate_item(idx, &self.config.params(), |item| item.is_ingested = true);
-            let fingerprint = self.media.item(idx).fingerprint();
-
-            self.metadata
-                .record_ingest(&fingerprint, &success.checksum, &success.destination);
-        }
-        if !result.successes.is_empty() {
+        let ingested: Vec<usize> = result
+            .successes
+            .iter()
+            .map(|success| {
+                let idx = self
+                    .media
+                    .index_of(&success.source)
+                    .expect("an ingested file's path must resolve to a media item");
+                self.media
+                    .mutate_item(idx, &self.config.params(), |item| item.is_ingested = true);
+                self.metadata.record_ingest(
+                    &self.media.item(idx).fingerprint(),
+                    &success.checksum,
+                    &success.destination,
+                );
+                idx
+            })
+            .collect();
+        if !ingested.is_empty() {
+            // A tag lives until its frame is ingested, so clearing it is durable
+            // and keyed the same way the ingest itself was recorded. Frames
+            // whose ingest failed keep their tag and stay in the working set.
+            self.apply_tags(&ingested, false);
             self.status_message = None;
             // Recorded undo/redo entries reference pre-ingest tag state that no
             // longer holds — a stale undo would re-tag already-ingested files.
@@ -451,7 +460,6 @@ mod tests {
             .expect("unambiguous test timestamp");
         Item {
             path: PathBuf::from("/cards/A/IMG_1234.CR3"),
-            source_id: "IMG_1234.CR3".to_owned(),
             size: 0,
             media_type: FileCategory::Raw,
             capture_time: CaptureTime::new(second, 0),
