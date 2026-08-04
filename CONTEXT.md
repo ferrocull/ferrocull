@@ -17,11 +17,11 @@ The single media file currently under the keyboard cursor; at most one item is f
 _Avoid_: Active item, Current item.
 
 **Tag** (verb) / **Tagged** (state):
-The action of marking a file as part of the working set. A file is either tagged or not.
+The action of marking a file as part of the working set. A file is either tagged or not. A tag is durable: it persists until the file is [[ingest|ingested]].
 _Avoid_: Pick, Star (star means rating), Mark.
 
 **Selection**:
-The set of currently [[tag|tagged]] files across the loaded view, acted on by batch operations. Distinct from [[focus]]: focus is a single cursor position, selection is a set.
+The set of currently [[tag|tagged]] files across the loaded view, acted on by batch operations. Filters change what is visible, not what is tagged: a hidden file stays in the selection. Distinct from [[focus]]: focus is a single cursor position, selection is a set.
 _Avoid_: Pickset, Selected files.
 
 **Paired file**:
