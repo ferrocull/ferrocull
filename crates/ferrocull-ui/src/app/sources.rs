@@ -280,9 +280,8 @@ impl Ferrocull {
             color_label,
         };
 
-        // Selection/focus are deliberately not pruned here: a scan must never
-        // wipe a selection the user built (a hidden JPEG sibling, a
-        // collapsed-burst member).
+        // Focus is deliberately not pruned here: a scan must never move the
+        // cursor the photographer is culling from.
         self.media.insert(item, &self.config.params());
     }
 }
