@@ -642,7 +642,7 @@ impl Ferrocull {
             self.focused_index = Some(self.media.burst_map()[&key][0]);
         }
         let preview_repair = self.snap_preview_to_representative(key);
-        self.reconcile_selection();
+        self.reconcile_focus();
         let focus_after = self.focused_index;
         self.undo_stack.record(undo::Entry {
             target,
@@ -788,7 +788,7 @@ impl Ferrocull {
                 self.echo(format!("{}: burst — {name}", dir.verb()));
             }
         }
-        self.reconcile_selection();
+        self.reconcile_focus();
 
         // A replayed collapse can hide the previewed frame just as a live toggle
         // can, so the same repair applies.
@@ -950,8 +950,8 @@ impl Ferrocull {
             group_suffix(group.len())
         );
         self.echo(msg);
-        // Reconcile selection/focus in case the rating change hid an item.
-        self.reconcile_selection();
+        // Reconcile focus in case the rating change hid an item.
+        self.reconcile_focus();
     }
 
     /// Update color label for an item and its burst/pair members.
@@ -984,7 +984,7 @@ impl Ferrocull {
             group_suffix(group.len())
         );
         self.echo(msg);
-        self.reconcile_selection();
+        self.reconcile_focus();
     }
 
     /// Apply each `(member, rating)` assignment: mutate the member's group and

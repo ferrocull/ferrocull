@@ -386,9 +386,9 @@ impl Ferrocull {
             // Recorded undo/redo entries reference pre-ingest tag state that no
             // longer holds — a stale undo would re-tag already-ingested files.
             self.undo_stack = crate::undo::Stack::default();
-            // Reconcile selection/focus: a now-ingested file may leave a
-            // "new only" filter.
-            self.reconcile_selection();
+            // Reconcile focus: a now-ingested file may leave a "new only"
+            // filter.
+            self.reconcile_focus();
         }
 
         if result.successes.is_empty() || self.hooks.is_empty() {

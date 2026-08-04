@@ -2,32 +2,15 @@ use ferrocull_core::media::SortOrder;
 use iced::Task;
 
 use super::{Ferrocull, toggle_set};
-use crate::{
-    media_view::RebuildOutcome,
-    messages::{Message, filters},
-};
+use crate::messages::{Message, filters};
 
 impl Ferrocull {
-    /// Prune selection/focus to the current visible set and surface a status
-    /// message when the prune hid the focused item or dropped selected ones.
-    pub(super) fn reconcile_selection(&mut self) {
-        let outcome = self
-            .media
-            .prune_hidden(&mut self.selected, &mut self.focused_index);
-        self.report_focus_loss(outcome);
-    }
-
-    fn report_focus_loss(&mut self, outcome: RebuildOutcome) {
-        let message = match (outcome.focused_lost, outcome.selection_pruned) {
-            (false, 0) => return,
-            (true, 0) => "Focused item hidden".to_owned(),
-            (false, n) => format!("{n} selected item{} hidden", super::plural(n)),
-            (true, n) => format!(
-                "Focused item and {n} selected item{} hidden",
-                super::plural(n)
-            ),
-        };
-        self.error(message);
+    /// Move focus off an item the current visible set no longer shows, and say
+    /// so. Tags are untouched: a filter is a lens, not a scope.
+    pub(super) fn reconcile_focus(&mut self) {
+        if self.media.prune_hidden_focus(&mut self.focused_index) {
+            self.error("Focused item hidden".to_owned());
+        }
     }
 }
 
@@ -119,11 +102,11 @@ impl Ferrocull {
     }
 
     /// Rebuild the whole derived view from the current settings, then reconcile
-    /// selection/focus against the new visible set (surfacing a status message
-    /// if anything was hidden).
+    /// focus against the new visible set (surfacing a status message if the
+    /// focused item was hidden).
     pub(super) fn rebuild_view(&mut self) {
         self.media.rebuild(&self.config.params());
-        self.reconcile_selection();
+        self.reconcile_focus();
     }
 
     /// Rebuild for a change that hides and reveals frames without reordering
@@ -141,7 +124,7 @@ impl Ferrocull {
         {
             self.focused_index = Some(representative);
         }
-        self.reconcile_selection();
+        self.reconcile_focus();
         match self.focused_index {
             Some(idx) => self.anchor_grid_to(idx),
             None => self.reset_grid_scroll(),
