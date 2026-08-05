@@ -7,7 +7,7 @@ use ferrocull_core::{
 };
 use iced::{Task, widget::scrollable::AbsoluteOffset};
 
-use super::{Ferrocull, PreviewState, ViewMode};
+use super::{ArrivalsWindow, Ferrocull, PreviewState, ViewMode};
 use crate::{
     messages::{Message, grid},
     undo,
@@ -100,6 +100,9 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
                 .flat_map(|&idx| state.group_of(idx))
                 .collect();
             state.tag_members(&members, true, state.focused_index, |n| count_echo(true, n));
+            // Frames still streaming in from an active scan are part of the
+            // set being tagged wholesale; they arrive tagged.
+            state.arrivals_window = ArrivalsWindow::Tag.only_during_scan(state.scan_in_flight());
         }
         grid::Message::UntagAll => {
             let members: Vec<usize> = state.selected.iter().copied().collect();
@@ -108,7 +111,7 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
             });
             // Frames still streaming in from an active scan belong to the set
             // being cleared; their stored tags must not outlive it.
-            state.untag_arrivals = state.scan_in_flight();
+            state.arrivals_window = ArrivalsWindow::Untag.only_during_scan(state.scan_in_flight());
         }
         grid::Message::RejectFile(path) => state.handle_reject_file(&path),
         grid::Message::BurstToggled(key) => {
