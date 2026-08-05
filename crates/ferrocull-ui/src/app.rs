@@ -76,6 +76,43 @@ impl SectionState {
     }
 }
 
+/// What an "All" tag command pressed mid-scan does to the frames the same scan
+/// streams in afterwards. Both commands cover the whole scan, not just the
+/// frames loaded at press time, so the window stays open until the scan
+/// settles. Only one direction can be open: the most recent press decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ArrivalsWindow {
+    #[default]
+    Closed,
+    Tag,
+    Untag,
+}
+
+impl ArrivalsWindow {
+    /// Keeps this window open while a scan is in flight and closes it
+    /// otherwise: an "All" command pressed with no scan running has no
+    /// arrivals to cover.
+    fn only_during_scan(self, scan_in_flight: bool) -> Self {
+        if scan_in_flight { self } else { Self::Closed }
+    }
+
+    /// The tag state a frame arriving from a scan lands in, given the `stored`
+    /// tag held under its fingerprint.
+    fn tag_for_arrival(self, stored: bool, is_ingested: bool) -> bool {
+        match self {
+            // An open window carries the command over every frame the scan
+            // produces, ingested ones included, exactly as pressing the same
+            // command once the scan had settled would.
+            Self::Tag => true,
+            Self::Untag => false,
+            // A tag stored against an already-ingested frame is stale: a crash
+            // landed between recording the ingest and clearing the tag.
+            // Resurrecting it would re-ingest the frame.
+            Self::Closed => stored && !is_ingested,
+        }
+    }
+}
+
 const PANEL_MIN_WIDTH: f32 = 150.0;
 const PANEL_MAX_WIDTH: f32 = 600.0;
 
@@ -281,11 +318,10 @@ struct Ferrocull {
     scan_jobs_in_flight: usize,
     thumbnail_jobs_in_flight: usize,
     scanning: bool,
-    /// Untag All fired while a scan was still streaming frames in: arriving
-    /// frames clear their stored tag instead of restoring it, because they
-    /// belong to the working set the photographer just cleared. Reset as soon
-    /// as no scan is in flight.
-    untag_arrivals: bool,
+    /// What Tag All / Untag All fired mid-scan does to the frames still
+    /// streaming in, which belong to the set the photographer just tagged or
+    /// cleared wholesale. Closed as soon as no scan is in flight.
+    arrivals_window: ArrivalsWindow,
     job_code: String,
     job_code_history: JobCodeHistory,
     backup_destinations: Vec<PathBuf>,
@@ -445,7 +481,7 @@ impl Default for Ferrocull {
             thumbnail_progress: None,
             scan_jobs_in_flight: 0,
             thumbnail_jobs_in_flight: 0,
-            untag_arrivals: false,
+            arrivals_window: ArrivalsWindow::default(),
             scanning: false,
             job_code: String::new(),
             job_code_history,
@@ -1140,10 +1176,10 @@ fn device_events() -> impl iced::futures::Stream<Item = Message> {
 
 fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {
     let task = dispatch(state, message);
-    // Any message may be the one that ends the scan, so the untag-arrivals
-    // window closes here rather than at a single scan-completion site.
+    // Any message may be the one that ends the scan, so the arrivals window
+    // closes here rather than at a single scan-completion site.
     if !state.scan_in_flight() {
-        state.untag_arrivals = false;
+        state.arrivals_window = ArrivalsWindow::Closed;
     }
     // Every message may have moved the scroll offset, resized the grid, or
     // changed the visible set, so reconcile which thumbnails should be loaded
@@ -2301,4 +2337,46 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
     .padding([spacing::MD, spacing::LG])
     .style(styles::status_bar)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArrivalsWindow;
+
+    #[test]
+    fn an_all_command_with_no_scan_in_flight_opens_no_window() {
+        for direction in [ArrivalsWindow::Tag, ArrivalsWindow::Untag] {
+            assert_eq!(direction.only_during_scan(false), ArrivalsWindow::Closed);
+        }
+    }
+
+    #[test]
+    fn an_all_command_during_a_scan_opens_its_own_direction() {
+        for direction in [ArrivalsWindow::Tag, ArrivalsWindow::Untag] {
+            assert_eq!(direction.only_during_scan(true), direction);
+        }
+    }
+
+    #[test]
+    fn a_closed_window_restores_the_stored_tag() {
+        assert!(ArrivalsWindow::Closed.tag_for_arrival(true, false));
+        assert!(!ArrivalsWindow::Closed.tag_for_arrival(false, false));
+    }
+
+    #[test]
+    fn a_closed_window_drops_the_stale_tag_of_an_ingested_frame() {
+        assert!(!ArrivalsWindow::Closed.tag_for_arrival(true, true));
+    }
+
+    /// Both windows cover every frame the scan produces, whatever the frame
+    /// arrived holding: that is what "All" promised at press time.
+    #[test]
+    fn an_open_window_overrides_the_stored_tag() {
+        for is_ingested in [false, true] {
+            for stored in [false, true] {
+                assert!(ArrivalsWindow::Tag.tag_for_arrival(stored, is_ingested));
+                assert!(!ArrivalsWindow::Untag.tag_for_arrival(stored, is_ingested));
+            }
+        }
+    }
 }

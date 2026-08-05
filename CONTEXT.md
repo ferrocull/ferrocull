@@ -24,6 +24,10 @@ _Avoid_: Pick, Star (star means rating), Mark.
 The set of currently [[tag|tagged]] files across the loaded view, acted on by batch operations. Filters change what is visible, not what is tagged: a hidden file stays in the selection. Distinct from [[focus]]: focus is a single cursor position, selection is a set.
 _Avoid_: Pickset, Selected files.
 
+**Arrivals window**:
+The period after Tag All or Untag All pressed while a scan is still streaming frames in, during which every frame the scan produces is [[tag|tagged]] (or untagged) as it arrives. Both commands mean "the whole scan", not "the frames loaded at press time", and the active filter does not narrow that. The window closes when the scan settles, and only one direction is open at a time: the most recent press wins. Arrivals record no undo entry, so an undo restores the press-time members only.
+_Avoid_: Pending tag, Deferred tag.
+
 **Paired file**:
 A sibling media file with the same basename as another (the canonical case is RAW+JPEG shot by the same camera press). Both files are first-class media; the pair is a display grouping, not a metadata one.
 _Avoid_: Sibling, RAW+JPEG (when speaking generically).

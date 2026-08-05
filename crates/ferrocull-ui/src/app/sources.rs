@@ -277,18 +277,17 @@ impl Ferrocull {
         // Focus is deliberately not pruned here: a scan must never move the
         // cursor the photographer is culling from.
         let idx = self.media.insert(item, &self.config.params());
-        if culling.tagged {
-            if is_ingested || self.untag_arrivals {
-                // The stored tag is stale: either a crash landed between
-                // recording the frame's ingest and clearing its tag, or Untag
-                // All cleared the working set while this frame was still
-                // streaming in. Clear it rather than resurrect the frame into
-                // the working set and re-ingest it.
-                self.metadata
-                    .set_tagged(std::slice::from_ref(&fingerprint), false);
-            } else {
-                self.selected.insert(idx);
-            }
+        let tagged = self
+            .arrivals_window
+            .tag_for_arrival(culling.tagged, is_ingested);
+        if tagged {
+            self.selected.insert(idx);
+        }
+        // An arrival an open window pulled into or out of the working set is a
+        // durable tag change, and so is a stale tag dropped on the way in.
+        if tagged != culling.tagged {
+            self.metadata
+                .set_tagged(std::slice::from_ref(&fingerprint), tagged);
         }
     }
 }
