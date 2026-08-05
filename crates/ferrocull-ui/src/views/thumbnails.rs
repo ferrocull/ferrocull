@@ -1319,7 +1319,6 @@ mod tests {
         // zone; equal instants share a date. So the runs hold timezone-agnostic.
         let item_on_day = |day: u32| Item {
             path: format!("/x/{day}").into(),
-            source_id: String::new(),
             size: 0,
             media_type: FileCategory::Raw,
             capture_time: CaptureTime::new(

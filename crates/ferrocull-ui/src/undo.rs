@@ -57,8 +57,11 @@ pub(crate) enum Action {
         changes: Vec<(usize, Option<ColorLabel>, Option<ColorLabel>)>,
     },
     Tag {
-        /// `(item, before, after)` tag state of every item the action changed.
-        changes: Vec<(usize, bool, bool)>,
+        /// Items whose tag state the action flipped; every one landed on
+        /// `tagged` (from `!tagged`), so one flag replays the whole entry in
+        /// either direction.
+        members: Vec<usize>,
+        tagged: bool,
     },
     /// A burst collapse/expand toggle. The explicit expansion state and focus to
     /// restore in each direction are stored, so replay sets state absolutely
@@ -144,7 +147,8 @@ mod tests {
         Entry {
             target,
             action: Action::Tag {
-                changes: vec![(target, false, true)],
+                members: vec![target],
+                tagged: true,
             },
         }
     }

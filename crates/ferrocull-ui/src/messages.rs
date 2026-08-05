@@ -298,7 +298,6 @@ pub(crate) enum ScanEvent {
     /// (`clippy::large_enum_variant`): batches are mostly thumbnail events.
     ExifLoaded {
         file: Box<ScannedFile>,
-        canonical_path: PathBuf,
         capture_time: CaptureTime,
         capture_settings: CaptureSettings,
         xmp: Option<Metadata>,

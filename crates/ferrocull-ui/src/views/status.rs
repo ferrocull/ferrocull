@@ -165,7 +165,6 @@ mod tests {
         let second = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
         Item {
             path: PathBuf::from("/cards/A/DSC_0001.NEF"),
-            source_id: "DSC_0001.NEF".to_owned(),
             size: 0,
             media_type: FileCategory::Raw,
             capture_time: CaptureTime::new(second, 0),

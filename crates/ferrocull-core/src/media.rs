@@ -167,13 +167,23 @@ impl PartialOrd for CaptureTime {
     }
 }
 
+/// What the photographer has decided about a frame, as stored.
+///
+/// Keyed by the ingest fingerprint ([`Item::fingerprint`]), so it follows the
+/// frame across remounts instead of tracking where the file currently sits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CullingState {
+    /// Rating in `[-1, 5]`: `-1` rejected, `0` unrated, `1..=5` stars.
+    pub rating: i8,
+    pub color_label: Option<ColorLabel>,
+    /// Whether the frame is in the working set awaiting ingest. Only ingesting
+    /// the frame clears it.
+    pub tagged: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Item {
     pub path: PathBuf,
-    /// Location identity keying per-file metadata (ratings, color labels, XMP):
-    /// the canonical path string. Ingest identity is separate — see
-    /// [`Item::fingerprint`].
-    pub source_id: String,
     /// Primary file size in bytes, captured at scan. A component of the ingest
     /// fingerprint; see [`Item::fingerprint`].
     pub size: u64,
@@ -198,8 +208,9 @@ pub struct Item {
 }
 
 impl Item {
-    /// Location-independent ingest fingerprint for this frame. Delegates to the
-    /// shared [`crate::ingest_fingerprint`] over the frame's basename, size, and
+    /// Location-independent identity for this frame, keying both its ingest
+    /// history and its stored culling state. Delegates to the shared
+    /// [`crate::ingest_fingerprint`] over the frame's basename, size, and
     /// capture time, so scan-time lookup and post-ingest recording compute
     /// identity the same way.
     #[must_use]
@@ -389,7 +400,6 @@ mod tests {
         let second = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
         Item {
             path: PathBuf::from("/src/frame"),
-            source_id: "frame".to_owned(),
             size: 0,
             media_type,
             capture_time: CaptureTime::new(second, 0),
