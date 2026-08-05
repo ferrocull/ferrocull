@@ -2,10 +2,15 @@ use std::{
     collections::HashSet,
     fs, io,
     path::{Component, Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc,
+    },
 };
 
 use crate::{
-    FileCategory, MediaFile,
+    FileCategory, MediaFile, READ_CONCURRENCY, backup,
     copy::{self, copy_with_checksum, hash_file},
     metadata_store,
     xmp::write_sidecar,
@@ -25,23 +30,25 @@ pub enum Error {
     },
 }
 
-/// An ingest job containing source files and destination directory.
+/// An ingest job containing source files, destination directories, and backup
+/// destinations.
 #[derive(Debug, Clone)]
 pub struct Job {
     pub files: Vec<MediaFile>,
     pub dest_base: PathBuf,
     pub videos_dest: PathBuf,
+    pub backup_destinations: Vec<backup::Destination>,
     pub delete_after_ingest: bool,
 }
 
-/// Progress update for the ingest operation.
-#[derive(Debug, Clone, Copy)]
-pub struct Progress<'a> {
-    pub current_file_index: usize,
-    pub total_files: usize,
-    pub file_bytes_copied: u64,
-    pub file_total_bytes: u64,
-    pub current_file: &'a Path,
+/// Aggregate progress counters bumped by the ingest workers. The caller polls
+/// them while [`execute_ingest`] runs on another thread.
+#[derive(Debug, Default)]
+pub struct Tracker {
+    pub files_completed: AtomicUsize,
+    /// Bytes of primary media copied. Paired files, sidecars, and XMP writes
+    /// advance only `files_completed`.
+    pub bytes_copied: AtomicU64,
 }
 
 /// Result of copying a single file.
@@ -52,8 +59,10 @@ pub struct Success {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub checksum: String,
-    pub media_type: FileCategory,
     pub source_deleted: bool,
+    /// Backup destinations (including their extras and XMP) that failed. The
+    /// primary copy is intact; the source was kept if deletion was requested.
+    pub backup_failures: Vec<(PathBuf, Error)>,
 }
 
 #[derive(Debug)]
@@ -126,22 +135,65 @@ fn delete_source_files(
     true
 }
 
+/// Remove a copied destination file while unwinding a failed ingest, logging
+/// a failure to do so: a leftover copy blocks a later retry with
+/// `DestinationExists`.
+fn roll_back_copy(path: &Path) {
+    if let Err(e) = fs::remove_file(path) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "failed to remove destination file while rolling back a failed ingest"
+        );
+    }
+}
+
 fn same_contents(left: &Path, right: &Path) -> Result<bool, io::Error> {
     Ok(hash_file(left)? == hash_file(right)?)
 }
 
-/// Copy paired and sidecar files alongside the primary destination.
-///
-/// Returns `(copied_or_matched, all_verified)`: paths safe to delete after ingest
-/// (copied successfully, or existed at destination with identical contents) and
-/// whether every extra was either successfully copied or verified.
+/// Copy `src` to `dest`, accepting an existing destination whose contents
+/// already match the source.
+fn copy_or_match(src: &Path, dest: &Path) -> Result<(), copy::Error> {
+    match copy_with_checksum(src, dest, &[], |_| {}) {
+        Ok(_) => Ok(()),
+        Err(copy::Error::DestinationExists { path }) => match same_contents(src, dest) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(copy::Error::DestinationExists { path }),
+            Err(e) => Err(copy::Error::Io {
+                src: src.to_path_buf(),
+                dest: dest.to_path_buf(),
+                source: e,
+            }),
+        },
+        Err(e) => Err(e),
+    }
+}
+
+/// Outcome of copying a file's paired and sidecar extras.
+struct Extras {
+    /// Source paths safe to delete: copied successfully, or existed at the
+    /// primary destination with identical contents.
+    copied_or_matched: HashSet<PathBuf>,
+    /// Every extra reached the primary destination (copied or verified).
+    all_verified: bool,
+    backup_failures: Vec<(PathBuf, Error)>,
+}
+
+/// Copy paired and sidecar files alongside the primary destination, teeing
+/// each to the backup destinations.
 fn copy_extras(
     media_file: &MediaFile,
+    relative: &Path,
     extras_dir: &Path,
+    backups: &[backup::Destination],
     primary_sources: &HashSet<PathBuf>,
-) -> (HashSet<PathBuf>, bool) {
-    let mut copied_or_matched = HashSet::new();
-    let mut all_verified = true;
+) -> Extras {
+    let mut extras = Extras {
+        copied_or_matched: HashSet::new(),
+        all_verified: true,
+        backup_failures: Vec::new(),
+    };
 
     for extra in media_file.paired_files.iter().chain(&media_file.sidecars) {
         if primary_sources.contains(extra) {
@@ -149,18 +201,32 @@ fn copy_extras(
         }
 
         let name = extra.file_name().expect("path has no filename");
-
         let extra_dest = extras_dir.join(name);
-        match copy_with_checksum(extra, &extra_dest, |_| {}) {
-            Ok(_) => {
-                copied_or_matched.insert(extra.clone());
+        let backup_dests: Vec<PathBuf> = backups
+            .iter()
+            .map(|d| d.resolve_path(&relative.with_file_name(name), Some(media_file.media_type)))
+            .collect();
+
+        match copy_with_checksum(extra, &extra_dest, &backup_dests, |_| {}) {
+            Ok(tee) => {
+                extras.copied_or_matched.insert(extra.clone());
+                extras
+                    .backup_failures
+                    .extend(tee.backup_failures.into_iter().map(|(p, e)| (p, e.into())));
             }
             Err(copy::Error::DestinationExists { .. }) => match same_contents(extra, &extra_dest) {
                 Ok(true) => {
-                    copied_or_matched.insert(extra.clone());
+                    extras.copied_or_matched.insert(extra.clone());
+                    // The tee failed before writing any backup, so the extra
+                    // still has to reach each backup destination on its own.
+                    for backup_dest in backup_dests {
+                        if let Err(e) = copy_or_match(extra, &backup_dest) {
+                            extras.backup_failures.push((backup_dest, e.into()));
+                        }
+                    }
                 }
                 Ok(false) => {
-                    all_verified = false;
+                    extras.all_verified = false;
                     tracing::warn!(
                         src = %extra.display(),
                         dest = %extra_dest.display(),
@@ -168,7 +234,7 @@ fn copy_extras(
                     );
                 }
                 Err(e) => {
-                    all_verified = false;
+                    extras.all_verified = false;
                     tracing::warn!(
                         src = %extra.display(),
                         dest = %extra_dest.display(),
@@ -178,7 +244,7 @@ fn copy_extras(
                 }
             },
             Err(e) => {
-                all_verified = false;
+                extras.all_verified = false;
                 tracing::warn!(
                     src = %extra.display(),
                     dest = %extra_dest.display(),
@@ -189,17 +255,16 @@ fn copy_extras(
         }
     }
 
-    (copied_or_matched, all_verified)
+    extras
 }
 
-fn resolve_destination_path(
-    base: &Path,
-    rendered: Option<&str>,
-    source: &Path,
-) -> Result<PathBuf, Error> {
+/// Resolve the destination path relative to the base directory: the rendered
+/// pattern when present (rejecting absolute or parent-escaping components),
+/// otherwise the source filename.
+fn resolve_relative_path(rendered: Option<&str>, source: &Path) -> Result<PathBuf, Error> {
     let filename = source.file_name().expect("path has no filename");
     let Some(rendered) = rendered else {
-        return Ok(base.join(filename));
+        return Ok(PathBuf::from(filename));
     };
 
     let mut relative = PathBuf::new();
@@ -223,104 +288,181 @@ fn resolve_destination_path(
         });
     }
 
-    Ok(base.join(relative))
+    Ok(relative)
+}
+
+/// Ingest one file: tee the primary copy to all backup destinations, write
+/// XMP sidecars, copy extras, and (when requested and fully verified,
+/// backups included) delete the source.
+fn ingest_file(
+    media_file: &MediaFile,
+    job: &Job,
+    primary_sources: &HashSet<PathBuf>,
+    tracker: &Tracker,
+) -> FileResult {
+    let source = media_file.path.clone();
+
+    let base = if media_file.media_type == FileCategory::Video {
+        &job.videos_dest
+    } else {
+        &job.dest_base
+    };
+    let relative = match resolve_relative_path(media_file.rendered_dest.as_deref(), &source) {
+        Ok(relative) => relative,
+        Err(error) => {
+            return Err(Failure {
+                source,
+                destination: PathBuf::new(),
+                error,
+            });
+        }
+    };
+    let dest = base.join(&relative);
+    let backup_dests: Vec<PathBuf> = job
+        .backup_destinations
+        .iter()
+        .map(|d| d.resolve_path(&relative, Some(media_file.media_type)))
+        .collect();
+
+    let tee = match copy_with_checksum(&media_file.path, &dest, &backup_dests, |bytes| {
+        tracker.bytes_copied.fetch_add(bytes, Ordering::Relaxed);
+    }) {
+        Ok(tee) => tee,
+        Err(error) => {
+            return Err(Failure {
+                source,
+                destination: dest,
+                error: error.into(),
+            });
+        }
+    };
+    let mut backup_failures: Vec<(PathBuf, Error)> = tee
+        .backup_failures
+        .into_iter()
+        .map(|(path, e)| (path, e.into()))
+        .collect();
+
+    if let Err(xmp_error) = write_xmp_sidecar(media_file, &dest) {
+        // Roll the copies back: a leftover destination would block a retry
+        // with `DestinationExists`.
+        roll_back_copy(&dest);
+        for backup_dest in &backup_dests {
+            if !backup_failures.iter().any(|(path, _)| path == backup_dest) {
+                roll_back_copy(backup_dest);
+            }
+        }
+        return Err(Failure {
+            source,
+            destination: dest.clone(),
+            error: Error::Xmp {
+                dest,
+                source: xmp_error,
+            },
+        });
+    }
+    for backup_dest in &backup_dests {
+        if backup_failures.iter().any(|(path, _)| path == backup_dest) {
+            continue;
+        }
+        if let Err(e) = write_xmp_sidecar(media_file, backup_dest) {
+            backup_failures.push((
+                backup_dest.clone(),
+                Error::Xmp {
+                    dest: backup_dest.clone(),
+                    source: e,
+                },
+            ));
+        }
+    }
+
+    let extras = copy_extras(
+        media_file,
+        &relative,
+        dest.parent().expect("dest is a file within a directory"),
+        &job.backup_destinations,
+        primary_sources,
+    );
+    backup_failures.extend(extras.backup_failures);
+
+    for (path, error) in &backup_failures {
+        tracing::warn!(
+            src = %source.display(),
+            backup = %path.display(),
+            error = %error,
+            "backup copy failed"
+        );
+    }
+
+    if job.delete_after_ingest && !extras.all_verified {
+        tracing::warn!(
+            path = %source.display(),
+            "keeping source files because some paired/sidecar copies were not verified"
+        );
+    }
+    if job.delete_after_ingest && !backup_failures.is_empty() {
+        tracing::warn!(
+            path = %source.display(),
+            "keeping source files because some backup copies failed"
+        );
+    }
+
+    let source_deleted = job.delete_after_ingest
+        && extras.all_verified
+        && backup_failures.is_empty()
+        && delete_source_files(media_file, primary_sources, &extras.copied_or_matched);
+
+    Ok(Success {
+        source,
+        destination: dest,
+        checksum: tee.checksum,
+        source_deleted,
+        backup_failures,
+    })
 }
 
 /// Executes an ingest job, copying all files to the destination.
 ///
-/// Videos are routed to `videos_dest`, everything else to `dest_base`.
+/// Videos are routed to `videos_dest`, everything else to `dest_base`. Each
+/// file is streamed once, teeing the copy to every backup destination.
+/// A small worker pool processes files concurrently, bumping `tracker` as
+/// bytes and files complete.
 ///
-/// If `delete_after_ingest` is true, deletes source files after successful
-/// copy and checksum verification. Deletion failures are logged but do not
+/// If `delete_after_ingest` is true, deletes source files after the primary
+/// and every backup copy verified. Deletion failures are logged but do not
 /// affect the overall success status.
 ///
-/// Returns a result for each file in the job.
-pub fn execute_ingest(job: &Job, mut progress_fn: impl FnMut(Progress<'_>)) -> Vec<FileResult> {
-    let total_files = job.files.len();
+/// Returns a result for each file, in job order.
+pub fn execute_ingest(job: &Job, tracker: &Tracker) -> Vec<FileResult> {
     let primary_sources: HashSet<PathBuf> = job.files.iter().map(|f| f.path.clone()).collect();
+    let queue = Mutex::new(job.files.iter().enumerate());
+    let (tx, rx) = mpsc::channel::<(usize, FileResult)>();
 
-    job.files
-        .iter()
-        .enumerate()
-        .map(|(index, media_file)| {
-            let source = media_file.path.clone();
-
-            let base = if media_file.media_type == FileCategory::Video {
-                &job.videos_dest
-            } else {
-                &job.dest_base
-            };
-            let dest = match resolve_destination_path(
-                base,
-                media_file.rendered_dest.as_deref(),
-                &source,
-            ) {
-                Ok(dest) => dest,
-                Err(error) => {
-                    return Err(Failure {
-                        source,
-                        destination: PathBuf::new(),
-                        error,
-                    });
+    std::thread::scope(|scope| {
+        for _ in 0..READ_CONCURRENCY.min(job.files.len()) {
+            let tx = tx.clone();
+            let queue = &queue;
+            let primary_sources = &primary_sources;
+            scope.spawn(move || {
+                // Keep the lock inside the closure: a `queue.lock()...next()`
+                // scrutinee holds the guard across the whole loop body, which
+                // serializes the workers.
+                let next_file = || queue.lock().expect("ingest queue lock poisoned").next();
+                while let Some((index, media_file)) = next_file() {
+                    let result = ingest_file(media_file, job, primary_sources, tracker);
+                    tracker.files_completed.fetch_add(1, Ordering::Relaxed);
+                    tx.send((index, result)).expect("result receiver dropped");
                 }
-            };
-
-            let result = copy_with_checksum(&media_file.path, &dest, |progress| {
-                progress_fn(Progress {
-                    current_file_index: index,
-                    total_files,
-                    file_bytes_copied: progress.bytes_copied,
-                    file_total_bytes: progress.total_bytes,
-                    current_file: &media_file.path,
-                });
             });
+        }
+    });
+    drop(tx);
 
-            match result {
-                Ok(checksum) => {
-                    // Must run before any source deletion: a failed write returns
-                    // early, so delete_source_files never runs.
-                    if let Err(xmp_error) = write_xmp_sidecar(media_file, &dest) {
-                        return Err(Failure {
-                            source,
-                            destination: dest.clone(),
-                            error: Error::Xmp {
-                                dest,
-                                source: xmp_error,
-                            },
-                        });
-                    }
-
-                    let (copied_or_matched, all_verified) = copy_extras(
-                        media_file,
-                        dest.parent().expect("dest is a file within a directory"),
-                        &primary_sources,
-                    );
-
-                    if job.delete_after_ingest && !all_verified {
-                        tracing::warn!(
-                            path = %source.display(),
-                            "keeping source files because some paired/sidecar copies were not verified"
-                        );
-                    }
-
-                    let source_deleted = job.delete_after_ingest
-                        && all_verified
-                        && delete_source_files(media_file, &primary_sources, &copied_or_matched);
-
-                    Ok(Success {
-                        source,
-                        destination: dest,
-                        checksum,
-                        media_type: media_file.media_type,
-                        source_deleted,
-                    })
-                }
-                Err(error) => Err(Failure {
-                    source,
-                    destination: dest,
-                    error: error.into(),
-                }),
-            }
-        })
+    let mut results: Vec<Option<FileResult>> = job.files.iter().map(|_| None).collect();
+    for (index, result) in rx {
+        results[index] = Some(result);
+    }
+    results
+        .into_iter()
+        .map(|slot| slot.expect("worker sent no result for file index"))
         .collect()
 }

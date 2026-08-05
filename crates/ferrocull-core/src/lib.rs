@@ -17,6 +17,12 @@ pub mod xmp;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+
+/// Threads reading media file bodies from the source device concurrently.
+/// Scans and ingest copies are I/O-bound, and storage throughput collapses
+/// when many reads interleave, so a few near-sequential streams beat a full
+/// fan-out. Interleaving costs most on SD cards.
+pub(crate) const READ_CONCURRENCY: usize = 2;
 pub use ferrocull_media::{FileCategory, categorize_extension, is_media_file};
 pub use fingerprint::ingest_fingerprint;
 pub use history::JobCodeHistory;

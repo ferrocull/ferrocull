@@ -135,6 +135,9 @@ struct ThumbnailProgress {
 struct IngestProgress {
     total_files: usize,
     files_completed: usize,
+    /// Primary media bytes only; extras and XMP writes advance the file count.
+    total_bytes: u64,
+    bytes_copied: u64,
 }
 
 /// State for full-screen preview mode. Created on enter, dropped on exit.
@@ -1295,9 +1298,10 @@ fn dispatch(state: &mut Ferrocull, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::IngestProgressUpdate(n) => {
+        Message::IngestProgressUpdate(snapshot) => {
             if let Some(ref mut dl) = state.ingest_progress {
-                dl.files_completed = n;
+                dl.files_completed = snapshot.files_completed;
+                dl.bytes_copied = snapshot.bytes_copied;
             }
             Task::none()
         }
@@ -2159,23 +2163,21 @@ fn config_panel(state: &Ferrocull) -> Element<'_, Message> {
 }
 
 /// Renders a labeled progress bar for the status bar.
+/// `fraction` drives the bar fill independently of the `completed`/`total`
+/// counts in the label, so byte-accurate progress can back a file-count label.
 fn progress_indicator<'a>(
     label: Option<&str>,
     completed: usize,
     total: usize,
+    fraction: f32,
 ) -> Element<'a, Message> {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "progress percentage needs float"
-    )]
-    let pct = completed as f32 / total as f32;
     let label_text = label.map_or_else(
         || format!("{completed}/{total}"),
         |l| format!("{l}: {completed}/{total}"),
     );
     row![
         text(label_text).size(11),
-        container(progress_bar(0.0..=1.0, pct).style(styles::storage_progress))
+        container(progress_bar(0.0..=1.0, fraction).style(styles::storage_progress))
             .width(Length::Fixed(120.0)),
     ]
     .spacing(spacing::SM)
@@ -2268,15 +2270,30 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
         );
     }
 
+    #[expect(clippy::cast_precision_loss, reason = "progress fraction needs float")]
     if let Some(ref thumb) = state.thumbnail_progress {
-        progress_items.push(progress_indicator(None, thumb.completed, thumb.total));
+        progress_items.push(progress_indicator(
+            None,
+            thumb.completed,
+            thumb.total,
+            thumb.completed as f32 / thumb.total as f32,
+        ));
     }
 
+    #[expect(clippy::cast_precision_loss, reason = "progress fraction needs float")]
     if let Some(ref ingest) = state.ingest_progress {
+        // Zero total bytes means every selected item scanned with no size;
+        // fall back to the file count so the bar still moves.
+        let fraction = if ingest.total_bytes == 0 {
+            ingest.files_completed as f32 / ingest.total_files as f32
+        } else {
+            ingest.bytes_copied as f32 / ingest.total_bytes as f32
+        };
         progress_items.push(progress_indicator(
             Some("Ingest"),
             ingest.files_completed,
             ingest.total_files,
+            fraction,
         ));
     }
 

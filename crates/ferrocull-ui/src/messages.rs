@@ -319,6 +319,17 @@ pub(crate) struct SuccessInfo {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub checksum: String,
+    /// At least one backup destination failed for this file; the primary copy
+    /// is intact and the source was kept if deletion was requested.
+    pub backup_failed: bool,
+}
+
+/// Aggregate ingest progress, polled from the worker counters while the
+/// ingest runs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IngestSnapshot {
+    pub files_completed: usize,
+    pub bytes_copied: u64,
 }
 
 /// One failed file from an ingest run, kept for the details popup and retry.
@@ -380,7 +391,7 @@ pub(crate) enum Message {
     ScanComplete(Vec<ScannedFile>),
     ThumbnailsComplete,
     ThumbnailLoaded(PathBuf, iced::widget::image::Handle),
-    IngestProgressUpdate(usize),
+    IngestProgressUpdate(IngestSnapshot),
     IngestComplete(IngestResult),
     PreviewLoaded(u64, PathBuf, Result<Vec<u8>, String>),
     PreviewAllocated(

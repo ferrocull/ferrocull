@@ -1,11 +1,12 @@
 use std::{
     cell::Cell,
     path::{Path, PathBuf},
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
 };
 
 use ferrocull_core::{
-    FileCategory, MediaFile, Pattern, RenderContext,
-    backup::{self, execute_backup},
+    FileCategory, MediaFile, Pattern, RenderContext, backup,
     hooks::{Context, Spec, run_hooks},
     ingest::{self, FileResult, execute_ingest},
     media::Item,
@@ -14,7 +15,9 @@ use iced::Task;
 use sipper::sipper;
 
 use super::{Ferrocull, Modal, pick_folder};
-use crate::messages::{FailureInfo, IngestResult, Message, SuccessInfo, destination};
+use crate::messages::{
+    FailureInfo, IngestResult, IngestSnapshot, Message, SuccessInfo, destination,
+};
 
 pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<Message> {
     match msg {
@@ -109,63 +112,6 @@ pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<M
     Task::none()
 }
 
-fn run_backups(
-    results: &[FileResult],
-    backup_dests: &[PathBuf],
-    photos_dest: &Path,
-    videos_dest: &Path,
-) {
-    let destinations: Vec<backup::Destination> = backup_dests
-        .iter()
-        .map(|p| backup::Destination {
-            path: p.clone(),
-            photo_subpath: None,
-            video_subpath: None,
-        })
-        .collect();
-
-    for result in results {
-        let Ok(success) = result else { continue };
-
-        let relative_path = success
-            .destination
-            .strip_prefix(photos_dest)
-            .or_else(|_| success.destination.strip_prefix(videos_dest))
-            .expect("destination starts with photos or videos base")
-            .to_path_buf();
-
-        let job = backup::Job {
-            source_file: success.destination.clone(),
-            relative_path,
-            media_type: Some(success.media_type),
-            destinations: &destinations,
-        };
-
-        let backup_results = execute_backup(&job, |_| {});
-
-        for backup_result in backup_results {
-            match backup_result {
-                Ok((dest_path, checksum)) => {
-                    if checksum == success.checksum {
-                        tracing::info!(backup = %dest_path.display(), "backup complete");
-                    } else {
-                        tracing::warn!(
-                            source = %success.destination.display(),
-                            backup = %dest_path.display(),
-                            expected = %success.checksum,
-                            actual = %checksum,
-                            "backup checksum mismatch"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(%e, "backup failed");
-                }
-            }
-        }
-    }
-}
-
 fn results_to_ingest_result(results: Vec<FileResult>) -> IngestResult {
     let mut successes = Vec::new();
     let mut failures = Vec::new();
@@ -175,6 +121,7 @@ fn results_to_ingest_result(results: Vec<FileResult>) -> IngestResult {
                 source: s.source,
                 destination: s.destination,
                 checksum: s.checksum,
+                backup_failed: !s.backup_failures.is_empty(),
             }),
             Err(f) => failures.push(FailureInfo {
                 source: f.source,
@@ -316,12 +263,20 @@ impl Ferrocull {
 
         self.status_message = None;
         let total_files = selected.len();
-        let photos_dest = PathBuf::from(&self.photos_dest);
-        let videos_dest = PathBuf::from(&self.videos_dest);
+        let total_bytes: u64 = indices.iter().map(|&idx| self.media.item(idx).size).sum();
         let job = ingest::Job {
             files: selected,
-            dest_base: photos_dest.clone(),
-            videos_dest: videos_dest.clone(),
+            dest_base: PathBuf::from(&self.photos_dest),
+            videos_dest: PathBuf::from(&self.videos_dest),
+            backup_destinations: self
+                .backup_destinations
+                .iter()
+                .map(|path| backup::Destination {
+                    path: path.clone(),
+                    photo_subpath: None,
+                    video_subpath: None,
+                })
+                .collect(),
             delete_after_ingest: self.delete_after_ingest,
         };
 
@@ -330,31 +285,29 @@ impl Ferrocull {
         self.ingest_progress = Some(super::IngestProgress {
             total_files,
             files_completed: 0,
+            total_bytes,
+            bytes_copied: 0,
         });
 
-        let backup_dests = self.backup_destinations.clone();
         let ingest_sipper = sipper(move |mut sender| async move {
-            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+            let tracker = Arc::new(ingest::Tracker::default());
+            let worker_tracker = Arc::clone(&tracker);
+            let mut handle =
+                tokio::task::spawn_blocking(move || execute_ingest(&job, &worker_tracker));
 
-            let handle = tokio::task::spawn_blocking(move || {
-                let results = execute_ingest(&job, |progress| {
-                    if progress.file_bytes_copied == progress.file_total_bytes {
-                        let _ = progress_tx.send(progress.current_file_index + 1);
-                    }
-                });
-
-                if !backup_dests.is_empty() {
-                    run_backups(&results, &backup_dests, &photos_dest, &videos_dest);
+            let snapshot = |counters: &ingest::Tracker| IngestSnapshot {
+                files_completed: counters.files_completed.load(Ordering::Relaxed),
+                bytes_copied: counters.bytes_copied.load(Ordering::Relaxed),
+            };
+            let mut ticks = tokio::time::interval(Duration::from_millis(100));
+            let results = loop {
+                tokio::select! {
+                    joined = &mut handle => break joined.expect("ingest task panicked"),
+                    _ = ticks.tick() => sender.send(snapshot(&tracker)).await,
                 }
+            };
+            sender.send(snapshot(&tracker)).await;
 
-                results
-            });
-
-            while let Some(progress) = progress_rx.recv().await {
-                sender.send(progress).await;
-            }
-
-            let results = handle.await.expect("ingest task panicked");
             results_to_ingest_result(results)
         });
 
@@ -398,6 +351,16 @@ impl Ferrocull {
             // Reconcile focus: a now-ingested file may leave a "new only"
             // filter.
             self.reconcile_focus();
+        }
+
+        let backup_failed = result.successes.iter().filter(|s| s.backup_failed).count();
+        if backup_failed > 0 {
+            let n = backup_failed;
+            self.error(if self.delete_after_ingest {
+                format!("Backup failed for {n} file(s); sources kept on the card")
+            } else {
+                format!("Backup failed for {n} file(s)")
+            });
         }
 
         if result.successes.is_empty() || self.hooks.is_empty() {
