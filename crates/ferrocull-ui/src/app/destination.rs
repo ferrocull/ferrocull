@@ -120,7 +120,9 @@ fn results_to_ingest_result(results: Vec<FileResult>) -> IngestResult {
             // A file whose backup copies failed is not done: keeping it in
             // the failure list keeps it tagged, in the working set, and
             // reachable by "Retry failed", which repairs the missing backups
-            // by matching the intact primary copy.
+            // by matching the intact primary copy. The retry reuses the
+            // rendering so it finds that copy even under a per-run token
+            // like {sequence}.
             Ok(s) if !s.backup_failures.is_empty() => failures.push(FailureInfo {
                 source: s.source,
                 error: s
@@ -129,15 +131,20 @@ fn results_to_ingest_result(results: Vec<FileResult>) -> IngestResult {
                     .map(|(_, e)| format!("backup failed: {e}"))
                     .collect::<Vec<_>>()
                     .join("; "),
+                rendered_dest: s.rendered_dest,
             }),
             Ok(s) => successes.push(SuccessInfo {
                 source: s.source,
                 destination: s.destination,
                 checksum: s.checksum,
             }),
+            // A real failure left nothing at the destination worth matching,
+            // so its retry renders fresh; reusing the old rendering would
+            // also pin an invalid pattern the user has since fixed.
             Err(f) => failures.push(FailureInfo {
                 source: f.source,
                 error: f.error.to_string(),
+                rendered_dest: None,
             }),
         }
     }
@@ -147,16 +154,16 @@ fn results_to_ingest_result(results: Vec<FileResult>) -> IngestResult {
     }
 }
 
-fn item_to_media_file(
+/// Render the item's destination with the pattern matching its media type,
+/// consuming the next per-run sequence number.
+fn render_destination(
     item: &Item,
     photo_pattern: &Pattern,
     video_pattern: &Pattern,
     sequence: &Cell<u32>,
     job_code: &str,
-) -> MediaFile {
-    let media_type = item.media_type;
-
-    let pattern = if media_type == FileCategory::Video {
+) -> String {
+    let pattern = if item.media_type == FileCategory::Video {
         video_pattern
     } else {
         photo_pattern
@@ -190,12 +197,29 @@ fn item_to_media_file(
         focal_length: item.capture_settings.focal_length,
         job_code: (!job_code.is_empty()).then(|| job_code.to_owned()),
     };
-    let rendered_dest = Some(pattern.render(&ctx));
+    pattern.render(&ctx)
+}
+
+fn item_to_media_file(
+    item: &Item,
+    photo_pattern: &Pattern,
+    video_pattern: &Pattern,
+    sequence: &Cell<u32>,
+    job_code: &str,
+    reused_rendering: Option<&str>,
+) -> MediaFile {
+    // A rendering reused from a failed run replaces the pattern render
+    // entirely, leaving the per-run sequence counter untouched: a phantom
+    // increment would skew the numbers of freshly rendered siblings.
+    let rendered_dest = Some(reused_rendering.map_or_else(
+        || render_destination(item, photo_pattern, video_pattern, sequence, job_code),
+        str::to_owned,
+    ));
 
     MediaFile {
         path: item.path.clone(),
         datetime: item.capture_time.second,
-        media_type,
+        media_type: item.media_type,
         paired_files: item.paired.clone(),
         sidecars: item.sidecars.clone(),
         xmp_sidecar: item.xmp_sidecar.clone(),
@@ -208,8 +232,9 @@ fn item_to_media_file(
 impl Ferrocull {
     /// Handle ingest start: ingest the current selection.
     fn handle_start_ingest(&mut self) -> Task<Message> {
-        let indices: Vec<usize> = self.selected.iter().copied().collect();
-        self.start_ingest_for(&indices)
+        let files: Vec<(usize, Option<String>)> =
+            self.selected.iter().map(|&idx| (idx, None)).collect();
+        self.start_ingest_for(&files)
     }
 
     /// Re-run ingest for exactly the files that failed last time.
@@ -217,28 +242,34 @@ impl Ferrocull {
         let total = self.last_ingest_failures.len();
         // filter_map, not map+expect: a rescan between failure and retry can
         // legitimately drop failed sources from the loaded set.
-        let indices: Vec<usize> = self
+        let files: Vec<(usize, Option<String>)> = self
             .last_ingest_failures
             .iter()
-            .filter_map(|failure| self.media.index_of(&failure.source))
+            .filter_map(|failure| {
+                self.media
+                    .index_of(&failure.source)
+                    .map(|idx| (idx, failure.rendered_dest.clone()))
+            })
             .collect();
-        if indices.is_empty() {
+        if files.is_empty() {
             self.error(format!(
                 "{total} failed file(s) are no longer loaded — rescan the source and ingest again"
             ));
             return Task::none();
         }
-        if indices.len() < total {
+        if files.len() < total {
             self.echo(format!(
                 "Retrying {} of {total} failed files — the rest are no longer loaded",
-                indices.len()
+                files.len()
             ));
         }
-        self.start_ingest_for(&indices)
+        self.start_ingest_for(&files)
     }
 
-    /// Ingest the given items: create sipper for progress tracking.
-    fn start_ingest_for(&mut self, indices: &[usize]) -> Task<Message> {
+    /// Ingest the given items: create sipper for progress tracking. Each item
+    /// may carry a rendering from a previous run to reuse in place of the
+    /// pattern, so a retry targets the destination the failed run used.
+    fn start_ingest_for(&mut self, files: &[(usize, Option<String>)]) -> Task<Message> {
         let photo_pattern = match Pattern::parse(&self.photo_pattern) {
             Ok(pattern) => pattern,
             Err(e) => {
@@ -255,16 +286,16 @@ impl Ferrocull {
         };
         let sequence = Cell::new(0u32);
 
-        let selected: Vec<MediaFile> = indices
+        let selected: Vec<MediaFile> = files
             .iter()
-            .map(|&idx| self.media.item(idx))
-            .map(|item| {
+            .map(|(idx, rendered_override)| {
                 item_to_media_file(
-                    item,
+                    self.media.item(*idx),
                     &photo_pattern,
                     &video_pattern,
                     &sequence,
                     &self.job_code,
+                    rendered_override.as_deref(),
                 )
             })
             .collect();
@@ -275,7 +306,10 @@ impl Ferrocull {
 
         self.status_message = None;
         let total_files = selected.len();
-        let total_bytes: u64 = indices.iter().map(|&idx| self.media.item(idx).size).sum();
+        let total_bytes: u64 = files
+            .iter()
+            .map(|&(idx, _)| self.media.item(idx).size)
+            .sum();
         let job = ingest::Job {
             files: selected,
             dest_base: PathBuf::from(&self.photos_dest),
@@ -440,6 +474,7 @@ mod tests {
             &pattern,
             &Cell::new(0),
             "",
+            None,
         )
         .rendered_dest
         .expect("every rendered file carries a destination")

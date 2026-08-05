@@ -334,6 +334,9 @@ pub(crate) struct IngestSnapshot {
 pub(crate) struct FailureInfo {
     pub source: PathBuf,
     pub error: String,
+    /// Rendering the retry must reuse so it targets the primary copy left
+    /// behind by the failed run; `None` re-renders with current settings.
+    pub rendered_dest: Option<String>,
 }
 
 /// Config panel section identifiers.

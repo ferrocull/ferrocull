@@ -58,6 +58,10 @@ pub type FileResult = Result<Success, Failure>;
 pub struct Success {
     pub source: PathBuf,
     pub destination: PathBuf,
+    /// The pattern rendering this file was ingested under, echoed from the
+    /// job. A retry that reuses it targets the same destination even when
+    /// the pattern would render differently (e.g. a per-run sequence).
+    pub rendered_dest: Option<String>,
     pub checksum: String,
     pub source_deleted: bool,
     /// Backup destinations (including their extras and XMP) that failed. The
@@ -496,6 +500,7 @@ fn ingest_file(
     Ok(Success {
         source,
         destination: dest,
+        rendered_dest: media_file.rendered_dest.clone(),
         checksum,
         source_deleted,
         backup_failures,
