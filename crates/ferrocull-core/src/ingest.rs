@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    FileCategory, MediaFile, READ_CONCURRENCY, backup,
+    FileCategory, MediaFile, READ_CONCURRENCY,
     copy::{self, copy_with_checksum, hash_file},
     metadata_store,
     xmp::write_sidecar,
@@ -37,7 +37,7 @@ pub struct Job {
     pub files: Vec<MediaFile>,
     pub dest_base: PathBuf,
     pub videos_dest: PathBuf,
-    pub backup_destinations: Vec<backup::Destination>,
+    pub backup_destinations: Vec<PathBuf>,
     pub delete_after_ingest: bool,
 }
 
@@ -135,30 +135,65 @@ fn delete_source_files(
     true
 }
 
-/// Remove a copied destination file while unwinding a failed ingest, logging
-/// a failure to do so: a leftover copy blocks a later retry with
-/// `DestinationExists`.
-fn roll_back_copy(path: &Path) {
-    if let Err(e) = fs::remove_file(path) {
-        tracing::warn!(
-            path = %path.display(),
-            error = %e,
-            "failed to remove destination file while rolling back a failed ingest"
-        );
-    }
-}
-
 fn same_contents(left: &Path, right: &Path) -> Result<bool, io::Error> {
     Ok(hash_file(left)? == hash_file(right)?)
 }
 
+/// Split backup failures into real failures and destinations that already
+/// hold the source's contents: an existing, matching backup is a completed
+/// copy from an earlier run, not a failure. A compare error keeps the
+/// original failure.
+fn split_matched_backups(
+    src: &Path,
+    failures: Vec<(PathBuf, copy::Error)>,
+) -> (Vec<(PathBuf, copy::Error)>, Vec<PathBuf>) {
+    let mut real = Vec::new();
+    let mut matched = Vec::new();
+    for (path, error) in failures {
+        if matches!(error, copy::Error::DestinationExists { .. })
+            && same_contents(src, &path).is_ok_and(|same| same)
+        {
+            matched.push(path);
+        } else {
+            real.push((path, error));
+        }
+    }
+    (real, matched)
+}
+
+/// Accept an existing destination as the primary copy when its contents
+/// match the source, returning the shared checksum. This lets a re-run
+/// repair a partially failed ingest; a mismatch is a genuine collision.
+fn match_existing_primary(src: &Path, dest: &Path) -> Result<String, copy::Error> {
+    let map_io = |source: io::Error| copy::Error::Io {
+        src: src.to_path_buf(),
+        dest: dest.to_path_buf(),
+        source,
+    };
+    let source_hash = hash_file(src).map_err(map_io)?;
+    if source_hash == hash_file(dest).map_err(map_io)? {
+        Ok(hex::encode(source_hash))
+    } else {
+        Err(copy::Error::DestinationExists {
+            path: dest.to_path_buf(),
+        })
+    }
+}
+
+/// How [`copy_or_match`] satisfied the destination.
+enum CopyOutcome {
+    Copied,
+    /// The destination already existed with contents matching the source.
+    Matched,
+}
+
 /// Copy `src` to `dest`, accepting an existing destination whose contents
 /// already match the source.
-fn copy_or_match(src: &Path, dest: &Path) -> Result<(), copy::Error> {
+fn copy_or_match(src: &Path, dest: &Path) -> Result<CopyOutcome, copy::Error> {
     match copy_with_checksum(src, dest, &[], |_| {}) {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(CopyOutcome::Copied),
         Err(copy::Error::DestinationExists { path }) => match same_contents(src, dest) {
-            Ok(true) => Ok(()),
+            Ok(true) => Ok(CopyOutcome::Matched),
             Ok(false) => Err(copy::Error::DestinationExists { path }),
             Err(e) => Err(copy::Error::Io {
                 src: src.to_path_buf(),
@@ -186,7 +221,7 @@ fn copy_extras(
     media_file: &MediaFile,
     relative: &Path,
     extras_dir: &Path,
-    backups: &[backup::Destination],
+    backups: &[PathBuf],
     primary_sources: &HashSet<PathBuf>,
 ) -> Extras {
     let mut extras = Extras {
@@ -204,26 +239,23 @@ fn copy_extras(
         let extra_dest = extras_dir.join(name);
         let backup_dests: Vec<PathBuf> = backups
             .iter()
-            .map(|d| d.resolve_path(&relative.with_file_name(name), Some(media_file.media_type)))
+            .map(|backup| backup.join(relative.with_file_name(name)))
             .collect();
 
         match copy_with_checksum(extra, &extra_dest, &backup_dests, |_| {}) {
             Ok(tee) => {
                 extras.copied_or_matched.insert(extra.clone());
+                // Extras are never rolled back, so the matched destinations
+                // need no tracking here.
+                let (failures, _) = split_matched_backups(extra, tee.backup_failures);
                 extras
                     .backup_failures
-                    .extend(tee.backup_failures.into_iter().map(|(p, e)| (p, e.into())));
+                    .extend(failures.into_iter().map(|(p, e)| (p, e.into())));
+                continue;
             }
             Err(copy::Error::DestinationExists { .. }) => match same_contents(extra, &extra_dest) {
                 Ok(true) => {
                     extras.copied_or_matched.insert(extra.clone());
-                    // The tee failed before writing any backup, so the extra
-                    // still has to reach each backup destination on its own.
-                    for backup_dest in backup_dests {
-                        if let Err(e) = copy_or_match(extra, &backup_dest) {
-                            extras.backup_failures.push((backup_dest, e.into()));
-                        }
-                    }
                 }
                 Ok(false) => {
                     extras.all_verified = false;
@@ -251,6 +283,15 @@ fn copy_extras(
                     error = %e,
                     "failed to copy paired/sidecar file"
                 );
+            }
+        }
+
+        // The tee wrote no backups, so bring each destination up to date on
+        // its own: a backup the extra never reached must be recorded as a
+        // failure, not silently skipped.
+        for backup_dest in backup_dests {
+            if let Err(e) = copy_or_match(extra, &backup_dest) {
+                extras.backup_failures.push((backup_dest, e.into()));
             }
         }
     }
@@ -321,34 +362,75 @@ fn ingest_file(
     let backup_dests: Vec<PathBuf> = job
         .backup_destinations
         .iter()
-        .map(|d| d.resolve_path(&relative, Some(media_file.media_type)))
+        .map(|backup| backup.join(&relative))
         .collect();
 
-    let tee = match copy_with_checksum(&media_file.path, &dest, &backup_dests, |bytes| {
-        tracker.bytes_copied.fetch_add(bytes, Ordering::Relaxed);
-    }) {
-        Ok(tee) => tee,
-        Err(error) => {
-            return Err(Failure {
-                source,
-                destination: dest,
-                error: error.into(),
-            });
-        }
-    };
-    let mut backup_failures: Vec<(PathBuf, Error)> = tee
-        .backup_failures
+    // Destinations that already held the source's contents before this run.
+    // A rollback must leave them in place: they are verified copies from an
+    // earlier run, not work to undo.
+    let mut matched: HashSet<PathBuf> = HashSet::new();
+    let (checksum, tee_failures) =
+        match copy_with_checksum(&media_file.path, &dest, &backup_dests, |bytes| {
+            tracker.bytes_copied.fetch_add(bytes, Ordering::Relaxed);
+        }) {
+            Ok(tee) => {
+                let (failures, matched_backups) =
+                    split_matched_backups(&media_file.path, tee.backup_failures);
+                matched.extend(matched_backups);
+                (tee.checksum, failures)
+            }
+            // A matching primary is a completed copy from an earlier, partially
+            // failed run; each backup is then brought up to date on its own.
+            Err(copy::Error::DestinationExists { .. }) => {
+                match match_existing_primary(&media_file.path, &dest) {
+                    Ok(checksum) => {
+                        matched.insert(dest.clone());
+                        let mut failures = Vec::new();
+                        for backup_dest in &backup_dests {
+                            match copy_or_match(&media_file.path, backup_dest) {
+                                Ok(CopyOutcome::Copied) => {}
+                                Ok(CopyOutcome::Matched) => {
+                                    matched.insert(backup_dest.clone());
+                                }
+                                Err(e) => failures.push((backup_dest.clone(), e)),
+                            }
+                        }
+                        (checksum, failures)
+                    }
+                    Err(error) => {
+                        return Err(Failure {
+                            source,
+                            destination: dest,
+                            error: error.into(),
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(Failure {
+                    source,
+                    destination: dest,
+                    error: error.into(),
+                });
+            }
+        };
+    let mut backup_failures: Vec<(PathBuf, Error)> = tee_failures
         .into_iter()
         .map(|(path, e)| (path, e.into()))
         .collect();
 
     if let Err(xmp_error) = write_xmp_sidecar(media_file, &dest) {
-        // Roll the copies back: a leftover destination would block a retry
-        // with `DestinationExists`.
-        roll_back_copy(&dest);
+        // Roll back the copies written during this run: a leftover fresh
+        // copy would block a retry with `DestinationExists`, while a matched
+        // copy predates this run and stays valid for the next retry.
+        if !matched.contains(&dest) {
+            copy::remove_partial(&dest);
+        }
         for backup_dest in &backup_dests {
-            if !backup_failures.iter().any(|(path, _)| path == backup_dest) {
-                roll_back_copy(backup_dest);
+            if !matched.contains(backup_dest)
+                && !backup_failures.iter().any(|(path, _)| path == backup_dest)
+            {
+                copy::remove_partial(backup_dest);
             }
         }
         return Err(Failure {
@@ -414,7 +496,7 @@ fn ingest_file(
     Ok(Success {
         source,
         destination: dest,
-        checksum: tee.checksum,
+        checksum,
         source_deleted,
         backup_failures,
     })

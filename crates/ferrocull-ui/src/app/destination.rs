@@ -6,7 +6,7 @@ use std::{
 };
 
 use ferrocull_core::{
-    FileCategory, MediaFile, Pattern, RenderContext, backup,
+    FileCategory, MediaFile, Pattern, RenderContext,
     hooks::{Context, Spec, run_hooks},
     ingest::{self, FileResult, execute_ingest},
     media::Item,
@@ -117,11 +117,23 @@ fn results_to_ingest_result(results: Vec<FileResult>) -> IngestResult {
     let mut failures = Vec::new();
     for result in results {
         match result {
+            // A file whose backup copies failed is not done: keeping it in
+            // the failure list keeps it tagged, in the working set, and
+            // reachable by "Retry failed", which repairs the missing backups
+            // by matching the intact primary copy.
+            Ok(s) if !s.backup_failures.is_empty() => failures.push(FailureInfo {
+                source: s.source,
+                error: s
+                    .backup_failures
+                    .iter()
+                    .map(|(_, e)| format!("backup failed: {e}"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            }),
             Ok(s) => successes.push(SuccessInfo {
                 source: s.source,
                 destination: s.destination,
                 checksum: s.checksum,
-                backup_failed: !s.backup_failures.is_empty(),
             }),
             Err(f) => failures.push(FailureInfo {
                 source: f.source,
@@ -268,15 +280,7 @@ impl Ferrocull {
             files: selected,
             dest_base: PathBuf::from(&self.photos_dest),
             videos_dest: PathBuf::from(&self.videos_dest),
-            backup_destinations: self
-                .backup_destinations
-                .iter()
-                .map(|path| backup::Destination {
-                    path: path.clone(),
-                    photo_subpath: None,
-                    video_subpath: None,
-                })
-                .collect(),
+            backup_destinations: self.backup_destinations.clone(),
             delete_after_ingest: self.delete_after_ingest,
         };
 
@@ -351,16 +355,6 @@ impl Ferrocull {
             // Reconcile focus: a now-ingested file may leave a "new only"
             // filter.
             self.reconcile_focus();
-        }
-
-        let backup_failed = result.successes.iter().filter(|s| s.backup_failed).count();
-        if backup_failed > 0 {
-            let n = backup_failed;
-            self.error(if self.delete_after_ingest {
-                format!("Backup failed for {n} file(s); sources kept on the card")
-            } else {
-                format!("Backup failed for {n} file(s)")
-            });
         }
 
         if result.successes.is_empty() || self.hooks.is_empty() {

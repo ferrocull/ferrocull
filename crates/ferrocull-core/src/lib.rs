@@ -1,4 +1,3 @@
-pub mod backup;
 pub mod cache;
 pub(crate) mod copy;
 pub mod fingerprint;

@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{self, BufReader, BufWriter, Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -32,9 +32,9 @@ pub(crate) struct Tee {
 }
 
 /// A backup destination writer that is still alive, or the error that killed it.
-type BackupSlot = Result<(PathBuf, BufWriter<File>), (PathBuf, Error)>;
+type BackupSlot = Result<(PathBuf, File), (PathBuf, Error)>;
 
-fn open_writer(src: &Path, dest: &Path) -> Result<BufWriter<File>, Error> {
+fn open_writer(src: &Path, dest: &Path) -> Result<File, Error> {
     let map_io = |source: io::Error| Error::Io {
         src: src.to_path_buf(),
         dest: dest.to_path_buf(),
@@ -44,7 +44,7 @@ fn open_writer(src: &Path, dest: &Path) -> Result<BufWriter<File>, Error> {
     let parent = dest.parent().expect("dest has a parent directory");
     fs::create_dir_all(parent).map_err(map_io)?;
 
-    let file = File::create_new(dest).map_err(|e| {
+    File::create_new(dest).map_err(|e| {
         if e.kind() == io::ErrorKind::AlreadyExists {
             Error::DestinationExists {
                 path: dest.to_path_buf(),
@@ -52,13 +52,12 @@ fn open_writer(src: &Path, dest: &Path) -> Result<BufWriter<File>, Error> {
         } else {
             map_io(e)
         }
-    })?;
-    Ok(BufWriter::with_capacity(BUFFER_SIZE, file))
+    })
 }
 
-/// Remove a partially written destination file, logging a failure to do so:
-/// a stray partial file blocks a later retry with `DestinationExists`.
-fn remove_partial(path: &Path) {
+/// Remove a partially or wrongly written destination file, logging a failure
+/// to do so: a stray file blocks a later retry with `DestinationExists`.
+pub(crate) fn remove_partial(path: &Path) {
     if let Err(e) = fs::remove_file(path) {
         tracing::warn!(
             path = %path.display(),
@@ -66,14 +65,6 @@ fn remove_partial(path: &Path) {
             "failed to remove partial destination file"
         );
     }
-}
-
-/// Flush the writer and fsync the destination file.
-fn finish_writer(writer: BufWriter<File>) -> io::Result<()> {
-    writer
-        .into_inner()
-        .map_err(io::IntoInnerError::into_error)?
-        .sync_all()
 }
 
 /// Copies a file from `src` to `dest` while computing SHA-256 in a single
@@ -102,8 +93,7 @@ pub(crate) fn copy_with_checksum(
         source,
     };
 
-    let src_file = File::open(src).map_err(map_io)?;
-    let mut reader = BufReader::with_capacity(BUFFER_SIZE, src_file);
+    let mut src_file = File::open(src).map_err(map_io)?;
 
     let mut primary = open_writer(src, dest)?;
     let mut backup_slots: Vec<BackupSlot> = backups
@@ -119,7 +109,7 @@ pub(crate) fn copy_with_checksum(
         let mut buffer = vec![0u8; BUFFER_SIZE].into_boxed_slice();
 
         loop {
-            let bytes_read = reader.read(&mut buffer).map_err(map_io)?;
+            let bytes_read = src_file.read(&mut buffer).map_err(map_io)?;
             if bytes_read == 0 {
                 break;
             }
@@ -132,7 +122,7 @@ pub(crate) fn copy_with_checksum(
             progress_fn(bytes_read as u64);
         }
 
-        finish_writer(primary).map_err(map_io)?;
+        primary.sync_all().map_err(map_io)?;
         Ok(hex::encode(hasher.finalize()))
     })();
 
@@ -172,13 +162,13 @@ fn write_to_backups(slots: &mut [BackupSlot], src: &Path, chunk: &[u8]) {
     }
 }
 
-/// Flush and fsync every surviving backup writer, converting late failures
-/// into removed partial files. Returns the accumulated failures.
+/// Fsync every surviving backup writer, converting late failures into
+/// removed partial files. Returns the accumulated failures.
 fn finish_backups(slots: Vec<BackupSlot>, src: &Path) -> Vec<(PathBuf, Error)> {
     slots
         .into_iter()
         .filter_map(|slot| match slot {
-            Ok((path, writer)) => match finish_writer(writer) {
+            Ok((path, writer)) => match writer.sync_all() {
                 Ok(()) => None,
                 Err(e) => {
                     remove_partial(&path);
@@ -197,13 +187,12 @@ fn finish_backups(slots: Vec<BackupSlot>, src: &Path) -> Vec<(PathBuf, Error)> {
 
 /// Hashes a file with SHA256 in a single buffered pass.
 pub(crate) fn hash_file(path: &Path) -> Result<[u8; 32], io::Error> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
+    let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; BUFFER_SIZE].into_boxed_slice();
 
     loop {
-        let bytes_read = reader.read(&mut buffer)?;
+        let bytes_read = file.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
         }
