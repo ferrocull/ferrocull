@@ -160,20 +160,6 @@ impl Default for PanelWidths {
     }
 }
 
-/// One frame's stored culling row, as written.
-///
-/// Rating and color label are absent until the photographer sets them, which is
-/// what keeps an XMP sidecar speaking for a field nobody has touched. The store
-/// resolves the row into a [`CullingState`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CullingRow {
-    pub rating: Option<i8>,
-    /// `None`: never set, an XMP sidecar may still answer. `Some(None)`: the
-    /// photographer explicitly cleared the label.
-    pub color_label: Option<Option<ColorLabel>>,
-    pub tagged: bool,
-}
-
 /// Errors from database operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -197,6 +183,17 @@ fn serde_err(operation: &'static str) -> impl FnOnce(serde_json::Error) -> Error
 
 fn db_err(operation: &'static str) -> impl FnOnce(rusqlite::Error) -> Error {
     move |source| Error::Db { operation, source }
+}
+
+/// A frame's culling fields as stored: each carries a value only once the app
+/// has set it, so the read path can let an XMP sidecar speak for the rest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoredCulling {
+    pub rating: Option<i8>,
+    /// `Some(None)` is an explicit clear, which silences the sidecar; the
+    /// outer `None` means the app never set a label.
+    pub color_label: Option<Option<ColorLabel>>,
+    pub tagged: bool,
 }
 
 pub struct MediaDatabase {
@@ -242,9 +239,9 @@ impl MediaDatabase {
         )
         .map_err(db_err("create ingests table"))?;
 
-        // Rating and color label are nullable: a row written by tagging alone
-        // must not claim the photographer cleared them, or it would silence the
-        // XMP sidecar those fields still fall back to.
+        // `rating` and `color_label` stay NULL until the app sets them, so a
+        // row created by an unrelated write (a tag flip) never silences the
+        // XMP sidecar fallback for the fields the app has not spoken for.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS culling_state (
                 fingerprint TEXT PRIMARY KEY,
@@ -326,8 +323,8 @@ impl MediaDatabase {
 
         self.conn
             .execute(
-                "INSERT INTO culling_state (fingerprint, rating, color_label, tagged, updated_at)
-             VALUES (?1, ?2, NULL, 0, ?3)
+                "INSERT INTO culling_state (fingerprint, rating, updated_at)
+             VALUES (?1, ?2, ?3)
              ON CONFLICT(fingerprint) DO UPDATE SET rating = excluded.rating, updated_at = excluded.updated_at",
                 params![fingerprint, rating, now],
             )
@@ -335,7 +332,9 @@ impl MediaDatabase {
             .map_err(db_err("set rating"))
     }
 
-    /// Sets the color label for a frame.
+    /// Sets the color label for a frame. `None` stores an explicit clear (`0`),
+    /// distinct from the never-set NULL, so clearing a label sticks even when a
+    /// sidecar carries one.
     pub fn set_color_label(
         &mut self,
         fingerprint: &str,
@@ -346,8 +345,8 @@ impl MediaDatabase {
 
         self.conn
             .execute(
-                "INSERT INTO culling_state (fingerprint, rating, color_label, tagged, updated_at)
-             VALUES (?1, NULL, ?2, 0, ?3)
+                "INSERT INTO culling_state (fingerprint, color_label, updated_at)
+             VALUES (?1, ?2, ?3)
              ON CONFLICT(fingerprint) DO UPDATE SET color_label = excluded.color_label, updated_at = excluded.updated_at",
                 params![fingerprint, db_value, now],
             )
@@ -364,8 +363,8 @@ impl MediaDatabase {
         {
             let mut stmt = tx
                 .prepare(
-                    "INSERT INTO culling_state (fingerprint, rating, color_label, tagged, updated_at)
-                 VALUES (?1, NULL, NULL, ?2, ?3)
+                    "INSERT INTO culling_state (fingerprint, tagged, updated_at)
+                 VALUES (?1, ?2, ?3)
                  ON CONFLICT(fingerprint) DO UPDATE SET tagged = excluded.tagged, updated_at = excluded.updated_at",
                 )
                 .map_err(db_err("prepare tag write"))?;
@@ -377,9 +376,9 @@ impl MediaDatabase {
         tx.commit().map_err(db_err("commit tag write"))
     }
 
-    /// The stored culling state of a frame. An absent row reads as the default
-    /// row: nothing rated, nothing labelled, untagged.
-    pub fn culling_state(&self, fingerprint: &str) -> Result<CullingRow, Error> {
+    /// The stored culling fields of a frame. A frame with no row has nothing
+    /// stored, which reads as the all-unset default.
+    pub fn culling_state(&self, fingerprint: &str) -> Result<StoredCulling, Error> {
         self.conn
             .query_row(
                 "SELECT rating, color_label, tagged FROM culling_state WHERE fingerprint = ?1",
@@ -387,7 +386,7 @@ impl MediaDatabase {
                 |row| {
                     // A stored `0` is the explicit "no label" written by
                     // clearing; only `1..=7` name a color.
-                    Ok(CullingRow {
+                    Ok(StoredCulling {
                         rating: row.get(0)?,
                         color_label: row.get::<_, Option<u8>>(1)?.map(|stored| match stored {
                             0 => None,

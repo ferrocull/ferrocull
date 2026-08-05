@@ -1,7 +1,8 @@
 //! The seam callers use for a frame's culling state (rating, color label, tag).
 //!
-//! Owns the read precedence — the persistent database wins, an XMP sidecar is the
-//! fallback — and the culling write policy: rating, label, and tag edits persist to
+//! Owns the read precedence — field by field, a value the app has set in the
+//! database wins, and an XMP sidecar is the fallback for the fields it never
+//! set — and the culling write policy: rating, label, and tag edits persist to
 //! the database; the XMP sidecar is authored once at ingest ([ADR-0006]), not on
 //! every edit. Wraps [`MediaDatabase`] and the [`crate::xmp`] module.
 //!
@@ -32,12 +33,13 @@ impl Store {
         Self { db }
     }
 
-    /// Culling state for a frame, preferring the database over `xmp_fallback`.
+    /// Culling state for a frame, merging the database with `xmp_fallback`
+    /// field by field: a field the app has set (including an explicit unrate or
+    /// label clear) wins, and the sidecar speaks only for fields the app never
+    /// touched — rating and color label only, never the tag.
     ///
-    /// `xmp_fallback` is the sidecar metadata parsed at scan time; the store never
-    /// re-reads it, and a sidecar speaks for rating and color label only, never
-    /// for the tag. It answers per field, so tagging a frame does not silence the
-    /// sidecar's rating. Returns the default state when neither source has
+    /// `xmp_fallback` is the sidecar metadata parsed at scan time; the store
+    /// never re-reads it. Returns the default state when neither source has
     /// anything.
     #[must_use]
     pub fn load(&self, fingerprint: &str, xmp_fallback: Option<&Metadata>) -> CullingState {
@@ -45,12 +47,10 @@ impl Store {
             .db
             .culling_state(fingerprint)
             .expect("culling_state query failed");
-
         CullingState {
             rating: stored
                 .rating
-                .or_else(|| xmp_fallback.map(|x| x.rating))
-                .unwrap_or(0),
+                .unwrap_or_else(|| xmp_fallback.map_or(0, |x| x.rating)),
             color_label: stored
                 .color_label
                 .unwrap_or_else(|| xmp_fallback.and_then(|x| x.color_label)),
@@ -240,6 +240,69 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_write_leaves_the_sidecar_speaking_for_rating_and_label() {
+        let mut store = store();
+        let fallback = Metadata {
+            rating: 3,
+            color_label: Some(ColorLabel::Blue),
+            ..Metadata::default()
+        };
+
+        store.set_tagged(&[String::from("id")], true);
+
+        assert_eq!(
+            store.load("id", Some(&fallback)),
+            CullingState {
+                rating: 3,
+                color_label: Some(ColorLabel::Blue),
+                tagged: true,
+            },
+            "a tag write speaks for the tag alone, not for rating or label"
+        );
+    }
+
+    #[test]
+    fn rating_and_label_fall_back_field_by_field() {
+        let mut store = store();
+        let fallback = Metadata {
+            rating: 3,
+            color_label: Some(ColorLabel::Blue),
+            ..Metadata::default()
+        };
+
+        store.set_rating("id", 5);
+
+        assert_eq!(
+            store.load("id", Some(&fallback)),
+            CullingState {
+                rating: 5,
+                color_label: Some(ColorLabel::Blue),
+                tagged: false,
+            },
+            "an app-set rating leaves the sidecar speaking for the label"
+        );
+    }
+
+    #[test]
+    fn an_explicit_unrate_or_unlabel_beats_the_sidecar() {
+        let mut store = store();
+        let fallback = Metadata {
+            rating: 3,
+            color_label: Some(ColorLabel::Blue),
+            ..Metadata::default()
+        };
+
+        store.set_rating("id", 0);
+        store.set_color_label("id", None);
+
+        assert_eq!(
+            store.load("id", Some(&fallback)),
+            CullingState::default(),
+            "unrating and clearing a label are decisions; the sidecar does not undo them"
+        );
+    }
+
+    #[test]
     fn ingest_history_is_keyed_by_fingerprint_not_path() {
         use chrono::DateTime;
 
@@ -381,41 +444,6 @@ mod tests {
             store.load(&different_frame.fingerprint(), None),
             CullingState::default(),
             "a different frame reusing the camera name inherits nothing"
-        );
-    }
-
-    #[test]
-    fn tagging_leaves_the_sidecar_speaking_for_rating_and_label() {
-        let mut store = store();
-        let fallback = Metadata {
-            rating: 3,
-            color_label: Some(ColorLabel::Blue),
-            ..Metadata::default()
-        };
-
-        store.set_tagged(&[String::from("id")], true);
-
-        assert_eq!(
-            store.load("id", Some(&fallback)),
-            CullingState {
-                rating: 3,
-                color_label: Some(ColorLabel::Blue),
-                tagged: true,
-            },
-            "a tag says nothing about rating or label, so the sidecar still answers"
-        );
-
-        store.set_rating("id", 0);
-        store.set_color_label("id", None);
-
-        assert_eq!(
-            store.load("id", Some(&fallback)),
-            CullingState {
-                rating: 0,
-                color_label: None,
-                tagged: true,
-            },
-            "clearing them by hand overrides the sidecar"
         );
     }
 
