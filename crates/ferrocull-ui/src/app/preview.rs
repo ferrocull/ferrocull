@@ -44,14 +44,12 @@ pub(super) fn update(state: &mut Ferrocull, msg: preview::Message) -> Task<Messa
                 && let ViewMode::Preview(ref mut p) = state.view_mode
             {
                 p.index = new_idx;
-                p.view_state = crate::widgets::ViewState::new();
                 return state.load_preview_for_index(new_idx);
             }
         }
         preview::Message::NavigateTo(idx) => {
             if let ViewMode::Preview(ref mut p) = state.view_mode {
                 p.index = idx;
-                p.view_state = crate::widgets::ViewState::new();
                 return state.load_preview_for_index(idx);
             }
         }
