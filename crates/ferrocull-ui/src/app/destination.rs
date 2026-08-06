@@ -1,11 +1,12 @@
 use std::{
     cell::Cell,
     path::{Path, PathBuf},
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
 };
 
 use ferrocull_core::{
     FileCategory, MediaFile, Pattern, RenderContext,
-    backup::{self, execute_backup},
     hooks::{Context, Spec, run_hooks},
     ingest::{self, FileResult, execute_ingest},
     media::Item,
@@ -14,7 +15,9 @@ use iced::Task;
 use sipper::sipper;
 
 use super::{Ferrocull, Modal, pick_folder};
-use crate::messages::{FailureInfo, IngestResult, Message, SuccessInfo, destination};
+use crate::messages::{
+    FailureInfo, IngestResult, IngestSnapshot, Message, SuccessInfo, destination,
+};
 
 pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<Message> {
     match msg {
@@ -109,76 +112,39 @@ pub(super) fn update(state: &mut Ferrocull, msg: destination::Message) -> Task<M
     Task::none()
 }
 
-fn run_backups(
-    results: &[FileResult],
-    backup_dests: &[PathBuf],
-    photos_dest: &Path,
-    videos_dest: &Path,
-) {
-    let destinations: Vec<backup::Destination> = backup_dests
-        .iter()
-        .map(|p| backup::Destination {
-            path: p.clone(),
-            photo_subpath: None,
-            video_subpath: None,
-        })
-        .collect();
-
-    for result in results {
-        let Ok(success) = result else { continue };
-
-        let relative_path = success
-            .destination
-            .strip_prefix(photos_dest)
-            .or_else(|_| success.destination.strip_prefix(videos_dest))
-            .expect("destination starts with photos or videos base")
-            .to_path_buf();
-
-        let job = backup::Job {
-            source_file: success.destination.clone(),
-            relative_path,
-            media_type: Some(success.media_type),
-            destinations: &destinations,
-        };
-
-        let backup_results = execute_backup(&job, |_| {});
-
-        for backup_result in backup_results {
-            match backup_result {
-                Ok((dest_path, checksum)) => {
-                    if checksum == success.checksum {
-                        tracing::info!(backup = %dest_path.display(), "backup complete");
-                    } else {
-                        tracing::warn!(
-                            source = %success.destination.display(),
-                            backup = %dest_path.display(),
-                            expected = %success.checksum,
-                            actual = %checksum,
-                            "backup checksum mismatch"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(%e, "backup failed");
-                }
-            }
-        }
-    }
-}
-
 fn results_to_ingest_result(results: Vec<FileResult>) -> IngestResult {
     let mut successes = Vec::new();
     let mut failures = Vec::new();
     for result in results {
         match result {
+            // A file whose backup copies failed is not done: keeping it in
+            // the failure list keeps it tagged, in the working set, and
+            // reachable by "Retry failed", which repairs the missing backups
+            // by matching the intact primary copy. The retry reuses the
+            // rendering so it finds that copy even under a per-run token
+            // like {sequence}.
+            Ok(s) if !s.backup_failures.is_empty() => failures.push(FailureInfo {
+                source: s.source,
+                error: s
+                    .backup_failures
+                    .iter()
+                    .map(|(_, e)| format!("backup failed: {e}"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                rendered_dest: s.rendered_dest,
+            }),
             Ok(s) => successes.push(SuccessInfo {
                 source: s.source,
                 destination: s.destination,
                 checksum: s.checksum,
             }),
+            // A real failure left nothing at the destination worth matching,
+            // so its retry renders fresh; reusing the old rendering would
+            // also pin an invalid pattern the user has since fixed.
             Err(f) => failures.push(FailureInfo {
                 source: f.source,
                 error: f.error.to_string(),
+                rendered_dest: None,
             }),
         }
     }
@@ -188,16 +154,16 @@ fn results_to_ingest_result(results: Vec<FileResult>) -> IngestResult {
     }
 }
 
-fn item_to_media_file(
+/// Render the item's destination with the pattern matching its media type,
+/// consuming the next per-run sequence number.
+fn render_destination(
     item: &Item,
     photo_pattern: &Pattern,
     video_pattern: &Pattern,
     sequence: &Cell<u32>,
     job_code: &str,
-) -> MediaFile {
-    let media_type = item.media_type;
-
-    let pattern = if media_type == FileCategory::Video {
+) -> String {
+    let pattern = if item.media_type == FileCategory::Video {
         video_pattern
     } else {
         photo_pattern
@@ -231,12 +197,29 @@ fn item_to_media_file(
         focal_length: item.capture_settings.focal_length,
         job_code: (!job_code.is_empty()).then(|| job_code.to_owned()),
     };
-    let rendered_dest = Some(pattern.render(&ctx));
+    pattern.render(&ctx)
+}
+
+fn item_to_media_file(
+    item: &Item,
+    photo_pattern: &Pattern,
+    video_pattern: &Pattern,
+    sequence: &Cell<u32>,
+    job_code: &str,
+    reused_rendering: Option<&str>,
+) -> MediaFile {
+    // A rendering reused from a failed run replaces the pattern render
+    // entirely, leaving the per-run sequence counter untouched: a phantom
+    // increment would skew the numbers of freshly rendered siblings.
+    let rendered_dest = Some(reused_rendering.map_or_else(
+        || render_destination(item, photo_pattern, video_pattern, sequence, job_code),
+        str::to_owned,
+    ));
 
     MediaFile {
         path: item.path.clone(),
         datetime: item.capture_time.second,
-        media_type,
+        media_type: item.media_type,
         paired_files: item.paired.clone(),
         sidecars: item.sidecars.clone(),
         xmp_sidecar: item.xmp_sidecar.clone(),
@@ -249,8 +232,9 @@ fn item_to_media_file(
 impl Ferrocull {
     /// Handle ingest start: ingest the current selection.
     fn handle_start_ingest(&mut self) -> Task<Message> {
-        let indices: Vec<usize> = self.selected.iter().copied().collect();
-        self.start_ingest_for(&indices)
+        let files: Vec<(usize, Option<String>)> =
+            self.selected.iter().map(|&idx| (idx, None)).collect();
+        self.start_ingest_for(&files)
     }
 
     /// Re-run ingest for exactly the files that failed last time.
@@ -258,28 +242,34 @@ impl Ferrocull {
         let total = self.last_ingest_failures.len();
         // filter_map, not map+expect: a rescan between failure and retry can
         // legitimately drop failed sources from the loaded set.
-        let indices: Vec<usize> = self
+        let files: Vec<(usize, Option<String>)> = self
             .last_ingest_failures
             .iter()
-            .filter_map(|failure| self.media.index_of(&failure.source))
+            .filter_map(|failure| {
+                self.media
+                    .index_of(&failure.source)
+                    .map(|idx| (idx, failure.rendered_dest.clone()))
+            })
             .collect();
-        if indices.is_empty() {
+        if files.is_empty() {
             self.error(format!(
                 "{total} failed file(s) are no longer loaded — rescan the source and ingest again"
             ));
             return Task::none();
         }
-        if indices.len() < total {
+        if files.len() < total {
             self.echo(format!(
                 "Retrying {} of {total} failed files — the rest are no longer loaded",
-                indices.len()
+                files.len()
             ));
         }
-        self.start_ingest_for(&indices)
+        self.start_ingest_for(&files)
     }
 
-    /// Ingest the given items: create sipper for progress tracking.
-    fn start_ingest_for(&mut self, indices: &[usize]) -> Task<Message> {
+    /// Ingest the given items: create sipper for progress tracking. Each item
+    /// may carry a rendering from a previous run to reuse in place of the
+    /// pattern, so a retry targets the destination the failed run used.
+    fn start_ingest_for(&mut self, files: &[(usize, Option<String>)]) -> Task<Message> {
         let photo_pattern = match Pattern::parse(&self.photo_pattern) {
             Ok(pattern) => pattern,
             Err(e) => {
@@ -296,16 +286,16 @@ impl Ferrocull {
         };
         let sequence = Cell::new(0u32);
 
-        let selected: Vec<MediaFile> = indices
+        let selected: Vec<MediaFile> = files
             .iter()
-            .map(|&idx| self.media.item(idx))
-            .map(|item| {
+            .map(|(idx, rendered_override)| {
                 item_to_media_file(
-                    item,
+                    self.media.item(*idx),
                     &photo_pattern,
                     &video_pattern,
                     &sequence,
                     &self.job_code,
+                    rendered_override.as_deref(),
                 )
             })
             .collect();
@@ -316,12 +306,15 @@ impl Ferrocull {
 
         self.status_message = None;
         let total_files = selected.len();
-        let photos_dest = PathBuf::from(&self.photos_dest);
-        let videos_dest = PathBuf::from(&self.videos_dest);
+        let total_bytes: u64 = files
+            .iter()
+            .map(|&(idx, _)| self.media.item(idx).size)
+            .sum();
         let job = ingest::Job {
             files: selected,
-            dest_base: photos_dest.clone(),
-            videos_dest: videos_dest.clone(),
+            dest_base: PathBuf::from(&self.photos_dest),
+            videos_dest: PathBuf::from(&self.videos_dest),
+            backup_destinations: self.backup_destinations.clone(),
             delete_after_ingest: self.delete_after_ingest,
         };
 
@@ -330,31 +323,29 @@ impl Ferrocull {
         self.ingest_progress = Some(super::IngestProgress {
             total_files,
             files_completed: 0,
+            total_bytes,
+            bytes_copied: 0,
         });
 
-        let backup_dests = self.backup_destinations.clone();
         let ingest_sipper = sipper(move |mut sender| async move {
-            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+            let tracker = Arc::new(ingest::Tracker::default());
+            let worker_tracker = Arc::clone(&tracker);
+            let mut handle =
+                tokio::task::spawn_blocking(move || execute_ingest(&job, &worker_tracker));
 
-            let handle = tokio::task::spawn_blocking(move || {
-                let results = execute_ingest(&job, |progress| {
-                    if progress.file_bytes_copied == progress.file_total_bytes {
-                        let _ = progress_tx.send(progress.current_file_index + 1);
-                    }
-                });
-
-                if !backup_dests.is_empty() {
-                    run_backups(&results, &backup_dests, &photos_dest, &videos_dest);
+            let snapshot = |counters: &ingest::Tracker| IngestSnapshot {
+                files_completed: counters.files_completed.load(Ordering::Relaxed),
+                bytes_copied: counters.bytes_copied.load(Ordering::Relaxed),
+            };
+            let mut ticks = tokio::time::interval(Duration::from_millis(100));
+            let results = loop {
+                tokio::select! {
+                    joined = &mut handle => break joined.expect("ingest task panicked"),
+                    _ = ticks.tick() => sender.send(snapshot(&tracker)).await,
                 }
+            };
+            sender.send(snapshot(&tracker)).await;
 
-                results
-            });
-
-            while let Some(progress) = progress_rx.recv().await {
-                sender.send(progress).await;
-            }
-
-            let results = handle.await.expect("ingest task panicked");
             results_to_ingest_result(results)
         });
 
@@ -483,6 +474,7 @@ mod tests {
             &pattern,
             &Cell::new(0),
             "",
+            None,
         )
         .rendered_dest
         .expect("every rendered file carries a destination")

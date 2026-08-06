@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use ferrocull_media::FileCategory;
 
 use crate::{
+    READ_CONCURRENCY,
     cache::{self, ThumbnailCache},
     media::{CaptureSettings, CaptureTime},
     thumbnail::{
@@ -75,12 +76,6 @@ fn preread(path: &Path) -> io::Result<(Vec<u8>, File)> {
     file.read_exact(&mut data)?;
     Ok((data, file))
 }
-
-/// Threads reading media file bodies concurrently. Cold-cache scans are
-/// I/O-bound and storage throughput collapses when many reads interleave, so a
-/// few near-sequential streams beat a full rayon fan-out — more so on SD cards,
-/// where interleaving costs most.
-const READ_CONCURRENCY: usize = 2;
 
 /// Read-ahead budget between the reader pool and the decode pool: how many
 /// pre-read files may sit in the channel awaiting decode. Sized to absorb
