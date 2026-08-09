@@ -181,7 +181,10 @@ mod tests {
 
     #[test]
     fn clean_frame_has_no_marks() {
-        assert!(marks(&item(0, false), TagState::Untagged).is_empty());
+        assert_eq!(
+            marks(&item(0, false), TagState::Untagged),
+            Vec::<Mark>::new()
+        );
     }
 
     #[test]

@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn job_code_history_roundtrips_with_order_and_dedup() {
         let mut store = store();
-        assert!(store.job_code_history().is_empty());
+        assert_eq!(store.job_code_history(), Vec::<String>::new());
 
         let mut history = crate::JobCodeHistory::from_codes(store.job_code_history());
         history.add("A");
@@ -584,10 +584,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "panel widths round-trip through the store bit-for-bit; exact equality is the point"
-    )]
     fn preferences_and_view_prefs_roundtrip() {
         use crate::{
             media::{FilterMode, SortOrder},
