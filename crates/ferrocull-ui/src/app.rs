@@ -1109,15 +1109,20 @@ pub fn run() -> iced::Result {
         .run()
 }
 
+#[cfg(target_os = "linux")]
 fn window_settings() -> iced::window::Settings {
     iced::window::Settings {
-        #[cfg(target_os = "linux")]
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: APP_ID.to_owned(),
             ..Default::default()
         },
         ..Default::default()
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings::default()
 }
 
 fn subscription(_state: &Ferrocull) -> Subscription<Message> {

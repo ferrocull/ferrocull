@@ -804,7 +804,7 @@ mod tests {
         // First chunk withholds the trailing 0xD9; scan leaves the final 0xFF
         // unscanned, so no span completes yet.
         scanner.scan(&jpeg[..split]);
-        assert!(scanner.spans.is_empty());
+        assert_eq!(scanner.spans, Vec::<Span>::new());
         assert_eq!(scanner.open_sois, vec![0]);
 
         // Growing buffer delivers the 0xD9; the split EOI is now recognized.
@@ -822,7 +822,7 @@ mod tests {
 
         let mut scanner = JpegScanner::new();
         scanner.scan(&data);
-        assert!(scanner.spans.is_empty());
+        assert_eq!(scanner.spans, Vec::<Span>::new());
     }
 
     #[test]
