@@ -13,7 +13,7 @@ impl JobCodeHistory {
     }
 
     /// Add a job code to history. Moves it to front if already present.
-    /// Trims to [`MAX_HISTORY`] items.
+    /// Trims to `MAX_HISTORY` items.
     pub fn add(&mut self, code: &str) {
         self.codes.retain(|c| c != code);
         self.codes.insert(0, code.to_owned());

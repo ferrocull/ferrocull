@@ -1,0 +1,4 @@
+excessive-nesting-threshold = 6
+too-many-lines-threshold = 160
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

@@ -275,7 +275,7 @@ impl ViewConfig {
     clippy::struct_excessive_bools,
     reason = "TEA pattern requires flat state struct with independent toggle flags"
 )]
-#[allow(
+#[expect(
     clippy::multiple_inherent_impl,
     reason = "impl blocks split across feature child modules (grid, sources, filters, etc.)"
 )]

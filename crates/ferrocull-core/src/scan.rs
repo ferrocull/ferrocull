@@ -97,7 +97,7 @@ struct ReadFile {
 }
 
 /// Scan `files` as a two-stage pipeline. A small reader pool
-/// ([`READ_CONCURRENCY`] threads) walks the list in order, resolves the cache,
+/// (`READ_CONCURRENCY` threads) walks the list in order, resolves the cache,
 /// and reads media bodies; the rayon pool decodes, resizes, encodes, and
 /// caches. Splitting the stages keeps disk access limited to a few
 /// near-sequential streams while decode still uses every core; `on_event`
