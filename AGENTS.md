@@ -69,7 +69,7 @@ Filesystem tests build their fixtures with `tempfile::tempdir()` and write real 
 ## Async
 
 - **Never hold a lock across an `.await`** — scope the guard so it drops before the await point.
-- **Async I/O in async contexts** — `tokio::fs`, not `std::fs`, inside async code; keep `block_on` at the edges.
+- **Async I/O in async contexts** — `tokio::fs`, not `std::fs`, inside async code; keep `block_on` at the edges. `crates/ferrocull-devices/clippy.toml` disallows `std::fs` in that crate, the only one that runs on the tokio runtime.
 
 ## Defensive Programming
 
