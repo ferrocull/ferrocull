@@ -38,7 +38,7 @@ Run the gate. CI runs the same commands, and clippy and rustdoc both fail on any
 
 ```sh
 cargo fmt
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 cargo shear

@@ -104,6 +104,10 @@ fn url_path(dict: &CFDictionary, key: &str) -> Option<PathBuf> {
     url.to_file_path()
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "runs on the blocking pool through run_blocking, so std::fs cannot stall the runtime"
+)]
 pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
     // Use /Volumes directory - simpler and more reliable than DASession for one-shot scan
     let volumes_dir = PathBuf::from("/Volumes");
