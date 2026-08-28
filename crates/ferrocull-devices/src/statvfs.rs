@@ -2,10 +2,10 @@ use std::path::Path;
 
 /// Total and used bytes for the filesystem mounted at `mount_point`, or `None`
 /// if `statvfs` fails (e.g. the mount vanished mid-scan).
-// libc `statvfs` field widths (`c_ulong`, `fsblkcnt_t`) are platform-dependent:
-// the `u64::from` conversions are no-ops on 64-bit targets but real widening on
-// 32-bit ones, so they're kept for portability.
-#[allow(clippy::useless_conversion)]
+#[expect(
+    clippy::useless_conversion,
+    reason = "libc statvfs field widths are platform-dependent: the u64::from conversions are no-ops on 64-bit targets but real widening on 32-bit ones"
+)]
 pub(crate) fn disk_space(mount_point: &Path) -> Option<(u64, u64)> {
     let stat = nix::sys::statvfs::statvfs(mount_point).ok()?;
     let block_size = u64::from(stat.fragment_size());

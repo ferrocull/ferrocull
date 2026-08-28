@@ -1,3 +1,8 @@
+//! Culling engine: ingest, copy and verify, caches, and the metadata store.
+//!
+//! Holds the media model and every operation that touches the filesystem or
+//! the on-disk databases, independent of any user interface.
+
 pub mod cache;
 pub(crate) mod copy;
 pub mod fingerprint;

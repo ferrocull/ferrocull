@@ -136,10 +136,6 @@ impl Stack {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    reason = "unwrapping known-good fixtures keeps test intent readable"
-)]
 mod tests {
     use super::{Action, Entry, LIMIT, Stack};
 

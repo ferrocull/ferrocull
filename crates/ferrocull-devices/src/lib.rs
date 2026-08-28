@@ -1,3 +1,8 @@
+//! Device and volume discovery, with a per-platform backend behind one API.
+//!
+//! Enumerates removable volumes and cameras, watches for them appearing and
+//! disappearing, and scans them for media files.
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

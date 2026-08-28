@@ -346,7 +346,7 @@ impl Ferrocull {
     /// Scroll anchors for every grid row under the current view and the
     /// geometry derived from `grid_width`. Empty when no items are visible.
     ///
-    /// Memoized on [`GridRowsKey`]: `on_scroll` calls this on every frame, but
+    /// Memoized on [`super::GridRowsKey`]: `on_scroll` calls this on every frame, but
     /// the row model only changes with the media view, sort/grouping, or column
     /// geometry — so a plain scroll hands out a cheap `Rc` clone instead of
     /// re-walking every item in `sections`.

@@ -1,3 +1,5 @@
+//! Ferrocull binary entry point: installs tracing and starts the UI.
+
 fn main() -> ferrocull_ui::Result {
     tracing_subscriber::fmt()
         .with_env_filter(

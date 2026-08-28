@@ -1,3 +1,8 @@
+//! The iced user interface, structured as The Elm Architecture.
+//!
+//! Owns the application state, its messages and update logic, and every view
+//! that renders it.
+
 mod app;
 pub(crate) mod fonts;
 pub(crate) mod icons;

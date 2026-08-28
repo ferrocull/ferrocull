@@ -966,10 +966,6 @@ fn passes(item: &Item, params: &ViewParams, hidden_jpeg_paths: &HashMap<PathBuf,
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    reason = "unwrapping known-good fixtures keeps test intent readable"
-)]
 mod tests {
     use std::path::{Path, PathBuf};
 
@@ -1402,7 +1398,7 @@ mod tests {
         ];
         let mut view = build_incremental(&items, &params);
         let c = view.index_of(Path::new("/src/c.raw")).unwrap();
-        let key = *view.burst_of.get(&c).unwrap();
+        let key = view.burst_of[&c];
 
         view.set_burst_expansion(key, true, &params.view());
         let mut focused = Some(c);

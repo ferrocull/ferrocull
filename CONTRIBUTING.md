@@ -34,13 +34,17 @@ You do not need a camera, or even a card, to work on Ferrocull. Add a folder of 
 
 ## Before you push
 
-Run the gate. CI runs the same three commands and clippy fails on any warning, so this is the whole difference between a green pull request and a red one:
+Run the gate. CI runs the same commands, and clippy and rustdoc both fail on any warning, so this is the whole difference between a green pull request and a red one:
 
 ```sh
 cargo fmt
 cargo clippy --workspace --all-targets
 cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+cargo shear
 ```
+
+`cargo shear` catches dependencies nothing imports any more; install it with `cargo install cargo-shear --locked`.
 
 Prefer fixing what clippy suggests. If a lint is wrong for a particular piece of code, suppress it with `#[expect(clippy::...)]` and a comment saying why, never `#[allow]`. An `#[expect]` warns once it stops being needed, which is what you want.
 
@@ -63,7 +67,7 @@ Every pull request, whoever or whatever wrote it:
 
 - **You can explain the diff in review.** If you cannot say why a line is there, it is not ready.
 - **Tests come with the change, and they fail without it.** Check that they do. A test that passes on an unfixed bug is worse than no test.
-- **The gate is green.** Format, clippy, tests.
+- **The gate is green.** Format, clippy, tests, docs, shear.
 - **UI changes come with a screenshot.** It is a visual tool, and a description of a layout change is not reviewable.
 
 Link the issue if there is one. If the change grew past what the issue described, say so in the description rather than quietly expanding scope.

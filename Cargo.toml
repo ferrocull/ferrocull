@@ -30,7 +30,6 @@ serde_json = "1.0"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
-toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -74,6 +73,12 @@ unneeded_field_pattern = "warn"
 unwrap_used = "warn"
 if_then_some_else_none = "warn"
 excessive_nesting = "warn"
+allow_attributes = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+get_unwrap = "warn"
+exit = "warn"
+str_to_string = "warn"
 
 [workspace.lints.rust]
 exported_private_dependencies = "deny"
@@ -93,6 +98,11 @@ let_underscore_drop = "warn"
 meta_variable_misuse = "warn"
 non_ascii_idents = "warn"
 unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unsafe_code = "warn"
+
+[workspace.lints.rustdoc]
+all = "warn"
 
 [profile.release]
 strip = "symbols"

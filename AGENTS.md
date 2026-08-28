@@ -10,6 +10,8 @@ This is an alpha version. Do not add backwards compatibility code, cache version
 
 ## Clippy Compliance
 
+Never assume a clippy warning or a test failure is pre-existing: `main` is kept warning-free by CI.
+
 Prefer fixing code as clippy suggests. Suppress a lint only when the suggested fix hurts readability or correctness — use `#[expect(clippy::...)]` rather than `#[allow(clippy::...)]` (a stale `#[expect]` warns when the lint no longer fires), always with a justifying comment.
 
 ## Toolchain
@@ -27,6 +29,14 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for build, run, test, and the pre-push
 - `crates/ferrocull-media` — media file type definitions and extension categorization
 - `crates/ferrocull-devices` — device/volume discovery and scanning (per-platform backends)
 - `crates/ferrocull-ui` — iced UI (TEA)
+
+## Testing
+
+Run `cargo test --workspace`. Prefer running the specific test or crate over the whole suite: `cargo test -p ferrocull-core scan`.
+
+Unit tests live in inline `#[cfg(test)] mod tests` blocks next to the code they cover. Integration tests live in `crates/ferrocull-core/tests/`.
+
+Filesystem tests build their fixtures with `tempfile::tempdir()` and write real files into it, rather than mocking the filesystem. `unwrap` and `expect` are allowed in tests.
 
 ## Rust Style
 
