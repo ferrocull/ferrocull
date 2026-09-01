@@ -260,6 +260,7 @@ pub async fn unmount(device: &StorageDevice, options: &UnmountOptions) -> Result
 
 /// Streams [`DeviceEvent`]s into `tx`. The returned future stays pending for the
 /// watcher's lifetime, so every platform drives it as one long-lived task.
+/// Dropping the future stops the watcher.
 #[cfg(target_os = "linux")]
 pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
     linux::watch(tx).await
@@ -267,14 +268,11 @@ pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
 
 #[cfg(target_os = "macos")]
 pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
-    let handle = run_blocking(move || macos::watch(tx)).await?;
-    run_blocking(move || drop(handle.join())).await;
-    Ok(())
+    macos::watch(tx).await
 }
 
 #[cfg(target_os = "windows")]
 pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
-    let handle = run_blocking(move || windows::watch(tx)).await;
-    run_blocking(move || drop(handle.join())).await;
+    windows::watch(tx).await;
     Ok(())
 }

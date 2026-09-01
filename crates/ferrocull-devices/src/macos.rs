@@ -3,12 +3,10 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc::Receiver,
-    thread::{self, JoinHandle},
 };
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::{
     Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
@@ -337,15 +335,18 @@ fn touches_volume_root(paths: &[PathBuf]) -> bool {
 }
 
 /// Rescans `/Volumes` on every relevant filesystem event and forwards the
-/// difference from the previous scan, until the receiver hangs up.
-fn forward_volume_events(
-    events: &Receiver<Result<notify::Event, notify::Error>>,
+/// difference from the previous scan, until the watcher or the consumer hangs
+/// up. `diskutil` rescans run on the blocking pool so the runtime stays free.
+async fn forward_volume_events(
+    events: &mut UnboundedReceiver<Result<notify::Event, notify::Error>>,
     tx: &UnboundedSender<DeviceEvent>,
 ) {
-    let mut known = scan_storage().unwrap_or_else(|error| {
-        tracing::warn!(%error, "initial volume scan failed; starting with no known volumes");
-        Vec::new()
-    });
+    let mut known = crate::run_blocking(scan_storage)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "initial volume scan failed; starting with no known volumes");
+            Vec::new()
+        });
     let mut misses: HashMap<PathBuf, u8> = HashMap::new();
 
     // Volumes present when the watch starts are replayed so one that mounted
@@ -358,7 +359,7 @@ fn forward_volume_events(
         }
     }
 
-    while let Ok(received) = events.recv() {
+    while let Some(received) = events.recv().await {
         match received {
             Ok(event) if !touches_volume_root(&event.paths) => continue,
             Ok(_) => {}
@@ -371,9 +372,12 @@ fn forward_volume_events(
         // Mounting a volume emits a burst of events; draining them costs one rescan.
         while events.try_recv().is_ok() {}
 
-        let Ok(mut current) = scan_storage().inspect_err(|error| {
-            tracing::warn!(%error, "volume scan failed; keeping the previous volume set");
-        }) else {
+        let Ok(mut current) = crate::run_blocking(scan_storage)
+            .await
+            .inspect_err(|error| {
+                tracing::warn!(%error, "volume scan failed; keeping the previous volume set");
+            })
+        else {
             continue;
         };
 
@@ -391,7 +395,8 @@ fn forward_volume_events(
 }
 
 /// Watches `/Volumes` through `FSEvents` and reports devices appearing and
-/// disappearing by diffing successive [`scan_storage`] results.
+/// disappearing by diffing successive [`scan_storage`] results. The future stays
+/// pending for as long as the watch lasts, and dropping it tears the watch down.
 ///
 /// `FSEvents` only observes `/Volumes`, while a scan also reports attached disks
 /// that carry no mount point. Mounting and unmounting both create or remove a
@@ -399,19 +404,22 @@ fn forward_volume_events(
 /// never mounted do not: attaching one that macOS declines to auto-mount, and
 /// yanking one that is already unmounted. Both are rare, and the list catches up
 /// on the next event or a manual refresh.
-pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, WatchError> {
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(event_tx)
-        .map_err(|e| WatchError::Backend(format!("failed to create the FSEvents watcher: {e}")))?;
+pub(crate) async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |event| {
+        // A failed send means the event loop is gone, leaving nothing to notify.
+        event_tx.send(event).ok();
+    })
+    .map_err(|e| WatchError::Backend(format!("failed to create the FSEvents watcher: {e}")))?;
     watcher
         .watch(Path::new(VOLUMES_DIR), RecursiveMode::NonRecursive)
         .map_err(|e| WatchError::Backend(format!("failed to watch {VOLUMES_DIR}: {e}")))?;
 
-    Ok(thread::spawn(move || {
-        forward_volume_events(&event_rx, &tx);
-        // Delivery stops when the watcher drops, so it outlives the event loop.
-        drop(watcher);
-    }))
+    forward_volume_events(&mut event_rx, &tx).await;
+    // Delivery stops when the watcher drops, so it outlives the event loop.
+    drop(watcher);
+
+    Ok(())
 }
 
 /// Mounts through `diskutil mount`, which picks the mount point and the

@@ -8,7 +8,6 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -19,6 +18,9 @@ use crate::{
     Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
     UnmountOptions, diff,
 };
+
+/// Delay between two polls of the removable drive list.
+const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Drive letter of a drive-root mount point, uppercased. Only a bare root
 /// (`E:` or `E:\`) names a removable volume, so anything else yields `None`:
@@ -99,43 +101,49 @@ pub const fn scan_cameras() -> Vec<Camera> {
 /// failure during one poll surfaces as a spurious `Removed` followed by an
 /// `Inserted` on the next poll.
 ///
+/// The future stays pending for as long as the watch lasts, and dropping it
+/// tears the watch down.
+///
 /// TODO: Replace polling with `RegisterDeviceNotificationW` for event-driven detection.
-pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> JoinHandle<()> {
-    thread::spawn(move || {
-        let mut known = scan_storage().unwrap_or_else(|error| {
+pub(crate) async fn watch(tx: UnboundedSender<DeviceEvent>) {
+    let mut known = crate::run_blocking(scan_storage)
+        .await
+        .unwrap_or_else(|error| {
             tracing::warn!(%error, "initial drive scan failed; starting with no known drives");
             Vec::new()
         });
 
-        // Drives present when the watch starts are replayed so one that mounted
-        // before the first scan completes is still reported. The consumer treats
-        // events as refresh triggers, so a replay for an already known drive is
-        // harmless.
-        for device in &known {
-            if tx.send(DeviceEvent::Inserted(device.clone())).is_err() {
+    // Drives present when the watch starts are replayed so one that mounted
+    // before the first scan completes is still reported. The consumer treats
+    // events as refresh triggers, so a replay for an already known drive is
+    // harmless.
+    for device in &known {
+        if tx.send(DeviceEvent::Inserted(device.clone())).is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::time::sleep(SCAN_INTERVAL).await;
+
+        let Ok(current) = crate::run_blocking(scan_storage)
+            .await
+            .inspect_err(|error| {
+                tracing::warn!(%error, "drive scan failed; keeping the previous drive set");
+            })
+        else {
+            continue;
+        };
+
+        let device_events = diff::events(&known, &current);
+        known = current;
+
+        for device_event in device_events {
+            if tx.send(device_event).is_err() {
                 return;
             }
         }
-
-        loop {
-            thread::sleep(Duration::from_secs(2));
-
-            let Ok(current) = scan_storage().inspect_err(|error| {
-                tracing::warn!(%error, "drive scan failed; keeping the previous drive set");
-            }) else {
-                continue;
-            };
-
-            let device_events = diff::events(&known, &current);
-            known = current;
-
-            for device_event in device_events {
-                if tx.send(device_event).is_err() {
-                    return;
-                }
-            }
-        }
-    })
+    }
 }
 
 /// Windows auto-mounts devices -- manual mount is not supported.
