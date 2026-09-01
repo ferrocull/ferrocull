@@ -1,7 +1,9 @@
-//! Windows device detection through `sysinfo`.
+//! Windows device detection through the Win32 volume functions.
 //!
-//! Removable storage is read from the system disk list; cameras are detected
-//! only when they mount as mass storage.
+//! Removable storage is read from the drive letters Windows has assigned, one
+//! volume per letter, so a card whose filesystem Windows cannot read is listed
+//! alongside the ones it can. Cameras are detected only when they mount as mass
+//! storage.
 //!
 //! TODO: Proper WPD (Windows Portable Devices) integration for PTP/MTP cameras.
 
@@ -11,78 +13,82 @@ use std::{
     time::Duration,
 };
 
-use sysinfo::{DiskRefreshKind, Disks};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
-    UnmountOptions, diff,
+    UnmountOptions, diff, win32,
 };
 
 /// Delay between two polls of the removable drive list.
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Drive letter of a drive-root mount point, uppercased. Only a bare root
-/// (`E:` or `E:\`) names a removable volume, so anything else yields `None`:
-/// network shares and GUID volume paths carry no letter, and a folder-mounted
-/// volume (`C:\mnt\card`) sits on another drive's filesystem, where reporting
-/// it by its first character would misattribute it to that host drive.
-fn drive_letter(mount_point: &Path) -> Option<char> {
-    let raw = mount_point.to_string_lossy();
-    let root = raw.strip_suffix('\\').unwrap_or(&raw);
-
-    let mut chars = root.chars();
-    let letter = chars.next()?;
-    (letter.is_ascii_alphabetic() && chars.next() == Some(':') && chars.next().is_none())
-        .then_some(letter.to_ascii_uppercase())
+/// Every removable volume Windows has a drive letter for, whether or not its
+/// filesystem can be read.
+///
+/// Letters come back in alphabetical order, so the device list is ordered by
+/// drive letter.
+pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
+    Ok(win32::removable_letters()?
+        .into_iter()
+        .filter_map(|letter| device(letter, win32::read_volume(letter)))
+        .collect())
 }
 
-pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
-    let disks = Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
-
-    // The system volume is always present, so an enumeration holding no disks
-    // at all is the enumeration itself having failed rather than a machine with
-    // no drives. An empty removable subset, in contrast, is the normal case.
-    if disks.list().is_empty() {
-        return Err(ScanError::Backend(String::from(
-            "volume enumeration returned no disks at all",
-        )));
-    }
-
-    let devices = disks
-        .iter()
-        .filter(|disk| disk.is_removable())
-        .filter_map(|disk| {
-            let letter = drive_letter(disk.mount_point())?;
-
-            let volume_name = disk.name().to_string_lossy();
-            let name = if volume_name.is_empty() {
-                format!("Removable ({letter}:)")
-            } else {
-                volume_name.into_owned()
-            };
-
-            // sysinfo leaves the sizes at zero when the size query fails, so a
-            // zero total means unknown rather than empty.
-            let (total_bytes, used_bytes) = match disk.total_space() {
+/// The card in the drive at `letter`, or `None` when the slot is empty.
+///
+/// A removable drive keeps its letter while its slot is empty, and a multi-slot
+/// card reader takes a letter per slot, so a letter on its own does not mean a
+/// card is present.
+///
+/// Media whose filesystem Windows cannot read carries no mount point, since it
+/// offers no usable filesystem path.
+fn device(letter: char, volume: win32::Volume) -> Option<StorageDevice> {
+    match volume {
+        win32::Volume::Empty => None,
+        win32::Volume::Unreadable => Some(StorageDevice {
+            name: unlabelled_name(letter),
+            mount_point: None,
+            device_path: device_path(letter),
+            total_bytes: None,
+            used_bytes: None,
+        }),
+        win32::Volume::Readable {
+            label,
+            total_bytes,
+            used_bytes,
+        } => {
+            // A zero total is the size query having failed, so the sizes read
+            // as unknown rather than as a card holding nothing.
+            let (total_bytes, used_bytes) = match total_bytes {
                 0 => (None, None),
-                total => (
-                    Some(total),
-                    Some(total.saturating_sub(disk.available_space())),
-                ),
+                total => (Some(total), Some(used_bytes)),
             };
 
             Some(StorageDevice {
-                name,
+                name: if label.is_empty() {
+                    unlabelled_name(letter)
+                } else {
+                    label
+                },
                 mount_point: Some(PathBuf::from(format!("{letter}:\\"))),
-                device_path: PathBuf::from(format!(r"\\.\{letter}:")),
+                device_path: device_path(letter),
                 total_bytes,
                 used_bytes,
             })
-        })
-        .collect();
+        }
+    }
+}
 
-    Ok(devices)
+/// Display name for a volume that carries no label of its own.
+fn unlabelled_name(letter: char) -> String {
+    format!("Removable ({letter}:)")
+}
+
+/// Device-namespace path of the drive at `letter`, the identity the watcher
+/// keys devices by.
+fn device_path(letter: char) -> PathBuf {
+    PathBuf::from(format!(r"\\.\{letter}:"))
 }
 
 /// TODO: Implement WPD (Windows Portable Devices) for PTP/MTP camera detection.
@@ -95,11 +101,10 @@ pub const fn scan_cameras() -> Vec<Camera> {
 /// Polls the removable drive list and reports the difference between successive
 /// scans.
 ///
-/// A scan that loses the whole volume enumeration is reported as an error and
-/// skipped, so the previous drive set stands. `sysinfo` still drops an
-/// individual volume whose information query fails, so a transient per-volume
-/// failure during one poll surfaces as a spurious `Removed` followed by an
-/// `Inserted` on the next poll.
+/// A scan that loses the whole drive-letter enumeration is reported as an error
+/// and skipped, so the previous drive set stands. A card whose filesystem
+/// Windows cannot read is reported with no mount point, so reformatting it in
+/// the same slot arrives as a `Mounted`.
 ///
 /// The future stays pending for as long as the watch lasts, and dropping it
 /// tears the watch down.
@@ -152,7 +157,7 @@ pub(crate) fn mount(
     _options: &MountOptions,
 ) -> Result<PathBuf, MountError> {
     Err(MountError::Failed(String::from(
-        "Windows auto-mounts devices — manual mount not supported",
+        "Windows auto-mounts devices, manual mount not supported",
     )))
 }
 
@@ -206,22 +211,68 @@ fn parse_unmount_error(stderr: &str) -> UnmountError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::PathBuf;
+
+    use crate::win32::Volume;
 
     #[test]
-    fn drive_letter_uppercases_and_accepts_trimmed_roots() {
-        assert_eq!(super::drive_letter(Path::new(r"E:\")), Some('E'));
-        assert_eq!(super::drive_letter(Path::new("e:")), Some('E'));
+    fn labelled_volume_keeps_its_label_and_sizes() {
+        let volume = Volume::Readable {
+            label: String::from("EOS_DIGITAL"),
+            total_bytes: 64_000_000_000,
+            used_bytes: 1_000_000,
+        };
+
+        let device = super::device('E', volume).expect("readable volume dropped");
+
+        assert_eq!(device.name, "EOS_DIGITAL");
+        assert_eq!(device.mount_point, Some(PathBuf::from(r"E:\")));
+        assert_eq!(device.device_path, PathBuf::from(r"\\.\E:"));
+        assert_eq!(device.total_bytes, Some(64_000_000_000));
+        assert_eq!(device.used_bytes, Some(1_000_000));
     }
 
     #[test]
-    fn drive_letter_rejects_paths_without_one() {
-        assert_eq!(super::drive_letter(Path::new(r"\\server\share")), None);
-        assert_eq!(super::drive_letter(Path::new("")), None);
+    fn unlabelled_volume_is_named_after_its_drive_letter() {
+        let volume = Volume::Readable {
+            label: String::new(),
+            total_bytes: 64_000_000_000,
+            used_bytes: 1_000_000,
+        };
+
+        let device = super::device('E', volume).expect("readable volume dropped");
+
+        assert_eq!(device.name, "Removable (E:)");
     }
 
     #[test]
-    fn drive_letter_rejects_folder_mounts() {
-        assert_eq!(super::drive_letter(Path::new(r"C:\mnt\card")), None);
+    fn zero_total_reads_as_unknown_sizes() {
+        let volume = Volume::Readable {
+            label: String::from("EOS_DIGITAL"),
+            total_bytes: 0,
+            used_bytes: 0,
+        };
+
+        let device = super::device('E', volume).expect("readable volume dropped");
+
+        assert_eq!(device.total_bytes, None);
+        assert_eq!(device.used_bytes, None);
+        assert_eq!(device.mount_point, Some(PathBuf::from(r"E:\")));
+    }
+
+    #[test]
+    fn media_windows_cannot_read_is_surfaced_without_a_mount_point() {
+        let device = super::device('E', Volume::Unreadable).expect("unreadable media dropped");
+
+        assert_eq!(device.name, "Removable (E:)");
+        assert_eq!(device.mount_point, None);
+        assert_eq!(device.device_path, PathBuf::from(r"\\.\E:"));
+        assert_eq!(device.total_bytes, None);
+        assert_eq!(device.used_bytes, None);
+    }
+
+    #[test]
+    fn empty_slot_yields_no_device() {
+        assert!(super::device('E', Volume::Empty).is_none());
     }
 }

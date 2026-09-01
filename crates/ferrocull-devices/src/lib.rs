@@ -13,6 +13,8 @@ pub mod scanner;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod statvfs;
 #[cfg(target_os = "windows")]
+mod win32;
+#[cfg(target_os = "windows")]
 mod windows;
 
 use std::{
