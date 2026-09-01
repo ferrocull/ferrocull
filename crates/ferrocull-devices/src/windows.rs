@@ -1,87 +1,64 @@
-//! Windows device detection using Win32 APIs.
+//! Windows device detection through `sysinfo`.
 //!
-//! Uses `GetLogicalDrives` and `GetVolumeInformation` for removable storage detection.
-//! Camera detection currently relies on cameras mounting as mass storage devices.
+//! Removable storage is read from the system disk list; cameras are detected
+//! only when they mount as mass storage.
 //!
 //! TODO: Proper WPD (Windows Portable Devices) integration for PTP/MTP cameras.
 
 use std::{
     collections::HashMap,
-    ffi::{OsStr, OsString},
-    os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     process::Command,
     thread::{self, JoinHandle},
     time::Duration,
 };
 
+use sysinfo::{DiskRefreshKind, Disks};
 use tokio::sync::mpsc::UnboundedSender;
-use windows::{
-    Win32::{
-        Storage::FileSystem::{
-            GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
-        },
-        System::WindowsProgramming::DRIVE_REMOVABLE,
-    },
-    core::PCWSTR,
-};
 
 use crate::{
     Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
     UnmountOptions, WatchError,
 };
 
-fn disk_space(mount_point: &Path) -> Option<(u64, u64)> {
-    let root_wide = os_to_wide_null(mount_point.as_os_str());
-    let mut total: u64 = 0;
-    let mut free: u64 = 0;
-
-    unsafe {
-        GetDiskFreeSpaceExW(
-            PCWSTR(root_wide.as_ptr()),
-            None,
-            Some(&mut total),
-            Some(&mut free),
-        )
-        .ok()?;
-    }
-
-    let used = total.saturating_sub(free);
-    Some((total, used))
+/// Drive letter of a mount point, uppercased. Volume paths without one
+/// (network shares, GUID volume paths) never name removable media, so they
+/// yield `None`.
+fn drive_letter(mount_point: &Path) -> Option<char> {
+    let letter = mount_point.to_string_lossy().chars().next()?;
+    letter
+        .is_ascii_alphabetic()
+        .then_some(letter.to_ascii_uppercase())
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "signature shared with the fallible Linux and macOS backends"
+)]
 pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
-    let drive_mask = unsafe { GetLogicalDrives() };
-    if drive_mask == 0 {
-        return Err(ScanError::Backend(
-            "GetLogicalDrives returned 0 (no drives accessible or Win32 error)".to_owned(),
-        ));
-    }
+    let disks = Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
 
-    let devices = (0u8..26)
-        .filter(|i| drive_mask & (1 << i) != 0)
-        .filter_map(|i| {
-            let letter = (b'A' + i) as char;
-            let root = format!("{letter}:\\");
-            let root_wide = to_wide_null(&root);
+    let devices = disks
+        .iter()
+        .filter(|disk| disk.is_removable())
+        .filter_map(|disk| {
+            let letter = drive_letter(disk.mount_point())?;
 
-            let drive_type = unsafe { GetDriveTypeW(PCWSTR(root_wide.as_ptr())) };
-            if drive_type != DRIVE_REMOVABLE {
-                return None;
-            }
+            let volume_name = disk.name().to_string_lossy();
+            let name = if volume_name.is_empty() {
+                format!("Removable ({letter}:)")
+            } else {
+                volume_name.into_owned()
+            };
 
-            let name = volume_name(&root_wide).unwrap_or_else(|| format!("Removable ({letter}:)"));
-            let mount_point = PathBuf::from(&root);
-            let device_path = PathBuf::from(format!("\\\\.\\{letter}:"));
-
-            let (total_bytes, used_bytes) = disk_space(&mount_point).unzip();
+            let total_bytes = disk.total_space();
 
             Some(StorageDevice {
                 name,
-                mount_point: Some(mount_point),
-                device_path,
-                total_bytes,
-                used_bytes,
+                mount_point: Some(PathBuf::from(format!("{letter}:\\"))),
+                device_path: PathBuf::from(format!(r"\\.\{letter}:")),
+                total_bytes: Some(total_bytes),
+                used_bytes: Some(total_bytes.saturating_sub(disk.available_space())),
             })
         })
         .collect();
@@ -97,9 +74,10 @@ pub const fn scan_cameras() -> Vec<Camera> {
 }
 
 /// TODO: Replace polling with `RegisterDeviceNotificationW` for event-driven detection.
-/// TODO: Propagate per-poll scan failures (currently `scan_current_removable_drives`
-/// silently degrades to empty on a `scan_storage` error, which can produce spurious
-/// `Removed` events). Requires extending the channel payload to carry errors.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "signature shared with the fallible Linux and macOS backends"
+)]
 pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, WatchError> {
     Ok(thread::spawn(move || {
         let mut known_drives = scan_current_removable_drives();
@@ -136,58 +114,17 @@ pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, 
 
 fn scan_current_removable_drives() -> HashMap<char, StorageDevice> {
     scan_storage()
-        .unwrap_or_default()
+        .expect("scan_storage is infallible on Windows")
         .into_iter()
         .map(|d| {
-            let letter = d
+            let mount_point = d
                 .mount_point
                 .as_ref()
-                .expect("scan_storage sets mount_point")
-                .to_string_lossy()
-                .chars()
-                .next()
-                .expect("mount point has drive letter");
+                .expect("scan_storage sets mount_point");
+            let letter = drive_letter(mount_point).expect("mount point has no drive letter");
             (letter, d)
         })
         .collect()
-}
-
-fn to_wide_null(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn os_to_wide_null(s: &OsStr) -> Vec<u16> {
-    s.encode_wide().chain(std::iter::once(0)).collect()
-}
-
-fn volume_name(root_wide: &[u16]) -> Option<String> {
-    let mut name_buf = [0u16; 256];
-
-    unsafe {
-        GetVolumeInformationW(
-            PCWSTR(root_wide.as_ptr()),
-            Some(&mut name_buf),
-            None,
-            None,
-            None,
-            None,
-        )
-        .ok()?;
-    }
-
-    let len = name_buf
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(name_buf.len());
-    if len == 0 {
-        return None;
-    }
-
-    Some(
-        OsString::from_wide(&name_buf[..len])
-            .to_string_lossy()
-            .into_owned(),
-    )
 }
 
 /// Windows auto-mounts devices -- manual mount is not supported.
@@ -245,5 +182,22 @@ fn parse_unmount_error(stderr: &str) -> UnmountError {
         UnmountError::NotMounted
     } else {
         UnmountError::Failed(stderr.trim().to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn drive_letter_uppercases_and_accepts_trimmed_roots() {
+        assert_eq!(super::drive_letter(Path::new(r"E:\")), Some('E'));
+        assert_eq!(super::drive_letter(Path::new("e:")), Some('E'));
+    }
+
+    #[test]
+    fn drive_letter_rejects_paths_without_one() {
+        assert_eq!(super::drive_letter(Path::new(r"\\server\share")), None);
+        assert_eq!(super::drive_letter(Path::new("")), None);
     }
 }
