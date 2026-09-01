@@ -17,28 +17,28 @@ use sysinfo::{DiskRefreshKind, Disks};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
-    UnmountOptions, WatchError,
+    Camera, DeviceEvent, MountError, MountOptions, StorageDevice, UnmountError, UnmountOptions,
 };
 
-/// Drive letter of a mount point, uppercased. Volume paths without one
-/// (network shares, GUID volume paths) never name removable media, so they
-/// yield `None`.
+/// Drive letter of a drive-root mount point, uppercased. Only a bare root
+/// (`E:` or `E:\`) names a removable volume, so anything else yields `None`:
+/// network shares and GUID volume paths carry no letter, and a folder-mounted
+/// volume (`C:\mnt\card`) sits on another drive's filesystem, where reporting
+/// it by its first character would misattribute it to that host drive.
 fn drive_letter(mount_point: &Path) -> Option<char> {
-    let letter = mount_point.to_string_lossy().chars().next()?;
-    letter
-        .is_ascii_alphabetic()
+    let raw = mount_point.to_string_lossy();
+    let root = raw.strip_suffix('\\').unwrap_or(&raw);
+
+    let mut chars = root.chars();
+    let letter = chars.next()?;
+    (letter.is_ascii_alphabetic() && chars.next() == Some(':') && chars.next().is_none())
         .then_some(letter.to_ascii_uppercase())
 }
 
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "signature shared with the fallible Linux and macOS backends"
-)]
-pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
+pub(crate) fn scan_storage() -> Vec<StorageDevice> {
     let disks = Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
 
-    let devices = disks
+    disks
         .iter()
         .filter(|disk| disk.is_removable())
         .filter_map(|disk| {
@@ -51,19 +51,25 @@ pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
                 volume_name.into_owned()
             };
 
-            let total_bytes = disk.total_space();
+            // sysinfo leaves the sizes at zero when the size query fails, so a
+            // zero total means unknown rather than empty.
+            let (total_bytes, used_bytes) = match disk.total_space() {
+                0 => (None, None),
+                total => (
+                    Some(total),
+                    Some(total.saturating_sub(disk.available_space())),
+                ),
+            };
 
             Some(StorageDevice {
                 name,
                 mount_point: Some(PathBuf::from(format!("{letter}:\\"))),
                 device_path: PathBuf::from(format!(r"\\.\{letter}:")),
-                total_bytes: Some(total_bytes),
-                used_bytes: Some(total_bytes.saturating_sub(disk.available_space())),
+                total_bytes,
+                used_bytes,
             })
         })
-        .collect();
-
-    Ok(devices)
+        .collect()
 }
 
 /// TODO: Implement WPD (Windows Portable Devices) for PTP/MTP camera detection.
@@ -73,13 +79,16 @@ pub const fn scan_cameras() -> Vec<Camera> {
     Vec::new()
 }
 
+/// Polls the removable drive list and reports the difference between successive
+/// scans.
+///
+/// `sysinfo` drops a volume whose information query fails, so a transient
+/// per-volume failure during one poll surfaces as a spurious `Removed` followed
+/// by an `Inserted` on the next poll.
+///
 /// TODO: Replace polling with `RegisterDeviceNotificationW` for event-driven detection.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "signature shared with the fallible Linux and macOS backends"
-)]
-pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, WatchError> {
-    Ok(thread::spawn(move || {
+pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> JoinHandle<()> {
+    thread::spawn(move || {
         let mut known_drives = scan_current_removable_drives();
 
         loop {
@@ -109,18 +118,17 @@ pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, 
 
             known_drives = current_drives;
         }
-    }))
+    })
 }
 
 fn scan_current_removable_drives() -> HashMap<char, StorageDevice> {
     scan_storage()
-        .expect("scan_storage is infallible on Windows")
         .into_iter()
         .map(|d| {
             let mount_point = d
                 .mount_point
                 .as_ref()
-                .expect("scan_storage sets mount_point");
+                .expect("storage device has no mount point");
             let letter = drive_letter(mount_point).expect("mount point has no drive letter");
             (letter, d)
         })
@@ -199,5 +207,10 @@ mod tests {
     fn drive_letter_rejects_paths_without_one() {
         assert_eq!(super::drive_letter(Path::new(r"\\server\share")), None);
         assert_eq!(super::drive_letter(Path::new("")), None);
+    }
+
+    #[test]
+    fn drive_letter_rejects_folder_mounts() {
+        assert_eq!(super::drive_letter(Path::new(r"C:\mnt\card")), None);
     }
 }

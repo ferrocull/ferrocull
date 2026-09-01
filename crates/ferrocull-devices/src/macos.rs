@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc::Receiver,
@@ -107,62 +107,70 @@ pub const fn scan_cameras() -> Vec<Camera> {
     Vec::new()
 }
 
-/// Mount point to device path for every volume in `devices`.
-fn mount_map(devices: &[StorageDevice]) -> HashMap<PathBuf, PathBuf> {
+/// Mount point of a scanned volume.
+fn mount_point(device: &StorageDevice) -> &Path {
+    device
+        .mount_point
+        .as_deref()
+        .expect("storage device has no mount point")
+}
+
+fn by_mount_point(devices: &[StorageDevice]) -> HashMap<&Path, &StorageDevice> {
     devices
         .iter()
-        .map(|device| {
-            let mount_point = device
-                .mount_point
-                .clone()
-                .expect("scan_storage sets mount_point");
-            (mount_point, device.device_path.clone())
-        })
+        .map(|device| (mount_point(device), device))
         .collect()
 }
 
-/// Events implied by moving from the `known` volume set to `current`, paired
-/// with the map describing `current`. Removals read their device path from
-/// `known`, which is the only place it survives once the volume is gone.
-fn diff_mounts(
-    known: &HashMap<PathBuf, PathBuf>,
-    current: &[StorageDevice],
-) -> (Vec<DeviceEvent>, HashMap<PathBuf, PathBuf>) {
-    let fresh = mount_map(current);
+/// Events implied by moving from the `known` volume set to `current`.
+///
+/// Removals read their device path from `known`, which is the only place it
+/// survives once the volume is gone. A mount point held by a different device in
+/// each set is a card swapped under a reused volume name, two cards carrying the
+/// factory label `EOS_DIGITAL` for instance, and reports as the removal of the
+/// old card followed by the insertion of the new one.
+fn diff_devices(known: &[StorageDevice], current: &[StorageDevice]) -> Vec<DeviceEvent> {
+    let known_by_mount = by_mount_point(known);
+    let current_by_mount = by_mount_point(current);
 
-    let inserted = current
-        .iter()
-        .filter(|device| {
-            let mount_point = device
-                .mount_point
-                .as_ref()
-                .expect("scan_storage sets mount_point");
-            !known.contains_key(mount_point)
-        })
-        .map(|device| DeviceEvent::Inserted(device.clone()));
+    let appeared =
+        current
+            .iter()
+            .flat_map(|device| match known_by_mount.get(mount_point(device)) {
+                None => vec![DeviceEvent::Inserted(device.clone())],
+                Some(previous) if previous.device_path != device.device_path => vec![
+                    DeviceEvent::Removed {
+                        device_path: previous.device_path.clone(),
+                    },
+                    DeviceEvent::Inserted(device.clone()),
+                ],
+                Some(_) => Vec::new(),
+            });
 
-    let removed = known
+    let vanished = known
         .iter()
-        .filter(|(mount_point, _)| !fresh.contains_key(*mount_point))
-        .map(|(_, device_path)| DeviceEvent::Removed {
-            device_path: device_path.clone(),
+        .filter(|device| !current_by_mount.contains_key(mount_point(device)))
+        .map(|device| DeviceEvent::Removed {
+            device_path: device.device_path.clone(),
         });
 
-    let events = inserted.chain(removed).collect();
-    (events, fresh)
+    appeared.chain(vanished).collect()
 }
 
-/// Whether any of `paths` is a direct child of `/Volumes`.
+/// Whether any of `paths` is `/Volumes` itself or a direct child of it.
 ///
 /// `FSEvents` is recursive in the kernel and `notify` applies
 /// [`RecursiveMode::NonRecursive`] in userspace, so writes deep inside a mounted
 /// card arrive here too. Only the volume directories themselves signal a mount
 /// or an unmount, and the depth check keeps a card being read from triggering a
-/// `diskutil` rescan per file.
+/// `diskutil` rescan per file. `/Volumes` itself counts because `notify`
+/// delivers events on the watched root, and a dropped-event rescan notification
+/// carries the root path rather than the volume that changed.
 fn touches_volume_root(paths: &[PathBuf]) -> bool {
+    let volumes = Path::new(VOLUMES_DIR);
     paths
         .iter()
-        .any(|path| path.parent() == Some(Path::new(VOLUMES_DIR)))
+        .any(|path| path == volumes || path.parent() == Some(volumes))
 }
 
 /// Rescans `/Volumes` on every relevant filesystem event and forwards the
@@ -171,13 +179,10 @@ fn forward_volume_events(
     events: &Receiver<Result<notify::Event, notify::Error>>,
     tx: &UnboundedSender<DeviceEvent>,
 ) {
-    let mut known = scan_storage().map_or_else(
-        |error| {
-            tracing::warn!(%error, "initial volume scan failed; starting with no known volumes");
-            HashMap::new()
-        },
-        |devices| mount_map(&devices),
-    );
+    let mut known = scan_storage().unwrap_or_else(|error| {
+        tracing::warn!(%error, "initial volume scan failed; starting with no known volumes");
+        Vec::new()
+    });
 
     while let Ok(received) = events.recv() {
         match received {
@@ -192,13 +197,29 @@ fn forward_volume_events(
         // Mounting a volume emits a burst of events; draining them costs one rescan.
         while events.try_recv().is_ok() {}
 
-        let Ok(devices) = scan_storage().inspect_err(|error| {
+        let Ok(mut current) = scan_storage().inspect_err(|error| {
             tracing::warn!(%error, "volume scan failed; keeping the previous volume set");
         }) else {
             continue;
         };
 
-        let (device_events, current) = diff_mounts(&known, &devices);
+        // macOS removes a volume's directory under /Volumes when it unmounts, so
+        // a known volume whose directory survives a scan that lost it is still
+        // mounted and its `diskutil` query failed.
+        let still_mounted: Vec<StorageDevice> = {
+            let scanned: HashSet<&Path> = current.iter().map(mount_point).collect();
+            known
+                .iter()
+                .filter(|device| {
+                    let path = mount_point(device);
+                    !scanned.contains(path) && path.is_dir()
+                })
+                .cloned()
+                .collect()
+        };
+        current.extend(still_mounted);
+
+        let device_events = diff_devices(&known, &current);
         known = current;
 
         for device_event in device_events {
@@ -281,7 +302,7 @@ fn parse_unmount_error(output: &str) -> UnmountError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf};
+    use std::path::{Path, PathBuf};
 
     use crate::{DeviceEvent, StorageDevice};
 
@@ -292,6 +313,13 @@ mod tests {
             device_path: PathBuf::from(format!("/dev/disk-{name}")),
             total_bytes: Some(64_000_000_000),
             used_bytes: Some(1_000_000),
+        }
+    }
+
+    fn device_on(name: &str, device_path: &str) -> StorageDevice {
+        StorageDevice {
+            device_path: PathBuf::from(device_path),
+            ..device(name)
         }
     }
 
@@ -317,61 +345,56 @@ mod tests {
 
     #[test]
     fn appearing_volume_is_reported_as_inserted() {
-        let (events, mounts) = super::diff_mounts(&HashMap::new(), &[device("EOS_DIGITAL")]);
+        let events = super::diff_devices(&[], &[device("EOS_DIGITAL")]);
 
         assert_eq!(inserted_names(&events), vec!["EOS_DIGITAL".to_owned()]);
         assert_eq!(removed_paths(&events), Vec::<PathBuf>::new());
-        assert_eq!(
-            mounts.get(&PathBuf::from("/Volumes/EOS_DIGITAL")),
-            Some(&PathBuf::from("/dev/disk-EOS_DIGITAL"))
-        );
     }
 
     #[test]
     fn vanished_volume_is_reported_as_removed() {
-        let known = HashMap::from([(
-            PathBuf::from("/Volumes/EOS_DIGITAL"),
-            PathBuf::from("/dev/disk-EOS_DIGITAL"),
-        )]);
-
-        let (events, mounts) = super::diff_mounts(&known, &[]);
+        let events = super::diff_devices(&[device("EOS_DIGITAL")], &[]);
 
         assert_eq!(
             removed_paths(&events),
             vec![PathBuf::from("/dev/disk-EOS_DIGITAL")]
         );
         assert_eq!(inserted_names(&events), Vec::<String>::new());
-        assert!(mounts.is_empty());
     }
 
     #[test]
     fn unchanged_volume_set_emits_nothing() {
-        let known = HashMap::from([(
-            PathBuf::from("/Volumes/EOS_DIGITAL"),
-            PathBuf::from("/dev/disk-EOS_DIGITAL"),
-        )]);
-
-        let (events, mounts) = super::diff_mounts(&known, &[device("EOS_DIGITAL")]);
+        let events = super::diff_devices(&[device("EOS_DIGITAL")], &[device("EOS_DIGITAL")]);
 
         assert!(events.is_empty());
-        assert_eq!(mounts, known);
     }
 
     #[test]
     fn swapped_card_is_reported_as_both_removed_and_inserted() {
-        let known = HashMap::from([(
-            PathBuf::from("/Volumes/EOS_DIGITAL"),
-            PathBuf::from("/dev/disk-EOS_DIGITAL"),
-        )]);
-
-        let (events, mounts) = super::diff_mounts(&known, &[device("NIKON D850")]);
+        let events = super::diff_devices(&[device("EOS_DIGITAL")], &[device("NIKON D850")]);
 
         assert_eq!(inserted_names(&events), vec!["NIKON D850".to_owned()]);
         assert_eq!(
             removed_paths(&events),
             vec![PathBuf::from("/dev/disk-EOS_DIGITAL")]
         );
-        assert_eq!(mounts.len(), 1);
-        assert!(mounts.contains_key(&PathBuf::from("/Volumes/NIKON D850")));
+    }
+
+    #[test]
+    fn card_swapped_under_a_reused_volume_name_is_removed_then_inserted() {
+        let known = [device_on("EOS_DIGITAL", "/dev/disk2s1")];
+        let current = [device_on("EOS_DIGITAL", "/dev/disk4s1")];
+
+        let events = super::diff_devices(&known, &current);
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            DeviceEvent::Removed { device_path } if device_path == Path::new("/dev/disk2s1")
+        ));
+        assert!(matches!(
+            &events[1],
+            DeviceEvent::Inserted(device) if device.device_path == Path::new("/dev/disk4s1")
+        ));
     }
 }

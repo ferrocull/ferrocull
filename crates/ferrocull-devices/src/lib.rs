@@ -213,7 +213,7 @@ pub async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
 
 #[cfg(target_os = "windows")]
 pub async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
-    run_blocking(windows::scan_storage).await
+    Ok(run_blocking(windows::scan_storage).await)
 }
 
 /// Mounts `device`'s filesystem, returning the resulting mount point.
@@ -272,7 +272,7 @@ pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
 
 #[cfg(target_os = "windows")]
 pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
-    let handle = run_blocking(move || windows::watch(tx)).await?;
+    let handle = run_blocking(move || windows::watch(tx)).await;
     run_blocking(move || drop(handle.join())).await;
     Ok(())
 }
