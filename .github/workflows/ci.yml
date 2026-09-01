@@ -50,6 +50,21 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --document-private-items
 
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy -p ferrocull-devices --all-targets -- -D warnings
+      - name: Test
+        run: cargo test -p ferrocull-devices
+
   shear:
     runs-on: ubuntu-latest
     steps:
