@@ -1,58 +1,67 @@
 //! Volume-set diffing shared by the macOS and Windows watchers.
 //!
-//! Both backends rescan the whole set of mounted removable volumes and report
-//! what changed since the previous set. The swap arm, one mount point held by a
-//! different device in each set, only fires on macOS: Windows derives the device
-//! path from the drive letter, so a card swapped into the same letter keeps the
-//! same device path.
+//! Both backends rescan the whole set of removable devices, mounted or not, and
+//! report what changed since the previous set. Devices are keyed by device path,
+//! so a card swapped under a reused volume name, two cards carrying the factory
+//! label `EOS_DIGITAL` for instance, arrives as a removal and an insertion
+//! rather than as one device changing identity. Windows derives the device path
+//! from the drive letter, so a card swapped into the same letter keeps the key
+//! and reports nothing.
 
 use std::{collections::HashMap, path::Path};
 
 use crate::{DeviceEvent, StorageDevice};
 
-/// Mount point of a scanned volume.
-pub(crate) fn mount_point(device: &StorageDevice) -> &Path {
-    device
-        .mount_point
-        .as_deref()
-        .expect("storage device has no mount point")
-}
-
-fn by_mount_point(devices: &[StorageDevice]) -> HashMap<&Path, &StorageDevice> {
+fn by_device_path(devices: &[StorageDevice]) -> HashMap<&Path, &StorageDevice> {
     devices
         .iter()
-        .map(|device| (mount_point(device), device))
+        .map(|device| (device.device_path.as_path(), device))
         .collect()
 }
 
-/// Events implied by moving from the `known` volume set to `current`.
+/// Events implied by moving from the `known` device set to `current`.
 ///
 /// Removals read their device path from `known`, which is the only place it
-/// survives once the volume is gone. A mount point held by a different device in
-/// each set is a card swapped under a reused volume name, two cards carrying the
-/// factory label `EOS_DIGITAL` for instance, and reports as the removal of the
-/// old card followed by the insertion of the new one.
+/// survives once the device is gone. A device present in both sets reports a
+/// mount or an unmount when its mount point appears or disappears, and a mount
+/// at the new path when it moves, as it does when a card remounts beside the
+/// leftover directory of an abnormal unmount.
 pub(crate) fn events(known: &[StorageDevice], current: &[StorageDevice]) -> Vec<DeviceEvent> {
-    let known_by_mount = by_mount_point(known);
-    let current_by_mount = by_mount_point(current);
+    let known_by_path = by_device_path(known);
+    let current_by_path = by_device_path(current);
 
-    let appeared =
-        current
-            .iter()
-            .flat_map(|device| match known_by_mount.get(mount_point(device)) {
-                None => vec![DeviceEvent::Inserted(device.clone())],
-                Some(previous) if previous.device_path != device.device_path => vec![
-                    DeviceEvent::Removed {
-                        device_path: previous.device_path.clone(),
-                    },
-                    DeviceEvent::Inserted(device.clone()),
-                ],
-                Some(_) => Vec::new(),
-            });
+    let appeared = current.iter().filter_map(|device| {
+        let Some(previous) = known_by_path.get(device.device_path.as_path()) else {
+            return Some(DeviceEvent::Inserted(device.clone()));
+        };
+
+        match (&previous.mount_point, &device.mount_point) {
+            (Some(_), None) => Some(DeviceEvent::Unmounted {
+                device_path: device.device_path.clone(),
+            }),
+            (None, Some(mount_point)) => Some(DeviceEvent::Mounted {
+                device_path: device.device_path.clone(),
+                mount_point: mount_point.clone(),
+                total_bytes: device.total_bytes,
+                used_bytes: device.used_bytes,
+            }),
+            (Some(previous_mount_point), Some(mount_point))
+                if previous_mount_point != mount_point =>
+            {
+                Some(DeviceEvent::Mounted {
+                    device_path: device.device_path.clone(),
+                    mount_point: mount_point.clone(),
+                    total_bytes: device.total_bytes,
+                    used_bytes: device.used_bytes,
+                })
+            }
+            _ => None,
+        }
+    });
 
     let vanished = known
         .iter()
-        .filter(|device| !current_by_mount.contains_key(mount_point(device)))
+        .filter(|device| !current_by_path.contains_key(device.device_path.as_path()))
         .map(|device| DeviceEvent::Removed {
             device_path: device.device_path.clone(),
         });
@@ -79,6 +88,15 @@ mod tests {
     fn device_on(name: &str, device_path: &str) -> StorageDevice {
         StorageDevice {
             device_path: PathBuf::from(device_path),
+            ..device(name)
+        }
+    }
+
+    fn unmounted(name: &str) -> StorageDevice {
+        StorageDevice {
+            mount_point: None,
+            total_bytes: None,
+            used_bytes: None,
             ..device(name)
         }
     }
@@ -141,20 +159,77 @@ mod tests {
     }
 
     #[test]
-    fn card_swapped_under_a_reused_volume_name_is_removed_then_inserted() {
+    fn card_swapped_under_a_reused_volume_name_is_removed_and_inserted() {
         let known = [device_on("EOS_DIGITAL", "/dev/disk2s1")];
         let current = [device_on("EOS_DIGITAL", "/dev/disk4s1")];
 
         let events = super::events(&known, &current);
 
         assert_eq!(events.len(), 2);
+        assert_eq!(removed_paths(&events), vec![PathBuf::from("/dev/disk2s1")]);
+        assert_eq!(inserted_names(&events), vec!["EOS_DIGITAL".to_owned()]);
+    }
+
+    #[test]
+    fn volume_losing_its_mount_point_is_reported_as_unmounted() {
+        let events = super::events(&[device("EOS_DIGITAL")], &[unmounted("EOS_DIGITAL")]);
+
+        assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],
-            DeviceEvent::Removed { device_path } if device_path == Path::new("/dev/disk2s1")
+            DeviceEvent::Unmounted { device_path }
+                if device_path == Path::new("/dev/disk-EOS_DIGITAL")
         ));
+    }
+
+    #[test]
+    fn volume_gaining_a_mount_point_is_reported_as_mounted() {
+        let events = super::events(&[unmounted("EOS_DIGITAL")], &[device("EOS_DIGITAL")]);
+
+        assert_eq!(events.len(), 1);
         assert!(matches!(
-            &events[1],
-            DeviceEvent::Inserted(device) if device.device_path == Path::new("/dev/disk4s1")
+            &events[0],
+            DeviceEvent::Mounted {
+                device_path,
+                mount_point,
+                total_bytes,
+                used_bytes,
+            } if device_path == Path::new("/dev/disk-EOS_DIGITAL")
+                && mount_point == Path::new("/Volumes/EOS_DIGITAL")
+                && *total_bytes == Some(64_000_000_000)
+                && *used_bytes == Some(1_000_000)
         ));
+    }
+
+    #[test]
+    fn volume_remounted_elsewhere_is_reported_as_mounted_at_the_new_path() {
+        let known = [device("EOS_DIGITAL")];
+        let current = [StorageDevice {
+            mount_point: Some(PathBuf::from("/Volumes/EOS_DIGITAL 1")),
+            ..device("EOS_DIGITAL")
+        }];
+
+        let events = super::events(&known, &current);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            DeviceEvent::Mounted {
+                device_path,
+                mount_point,
+                total_bytes,
+                used_bytes,
+            } if device_path == Path::new("/dev/disk-EOS_DIGITAL")
+                && mount_point == Path::new("/Volumes/EOS_DIGITAL 1")
+                && *total_bytes == Some(64_000_000_000)
+                && *used_bytes == Some(1_000_000)
+        ));
+    }
+
+    #[test]
+    fn disk_appearing_unmounted_is_reported_as_inserted() {
+        let events = super::events(&[], &[unmounted("NIKON_D850")]);
+
+        assert_eq!(inserted_names(&events), vec!["NIKON_D850".to_owned()]);
     }
 }
