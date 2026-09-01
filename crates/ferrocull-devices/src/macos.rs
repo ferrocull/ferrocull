@@ -11,11 +11,15 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
-    UnmountOptions, WatchError,
+    UnmountOptions, WatchError, diff,
 };
 
 /// Directory macOS mounts removable volumes under, one child per volume.
 const VOLUMES_DIR: &str = "/Volumes";
+
+/// Consecutive rescans a volume may go missing from while its `/Volumes`
+/// directory survives before it counts as gone.
+const MISSED_SCAN_LIMIT: u8 = 3;
 
 #[expect(
     clippy::disallowed_methods,
@@ -107,54 +111,45 @@ pub const fn scan_cameras() -> Vec<Camera> {
     Vec::new()
 }
 
-/// Mount point of a scanned volume.
-fn mount_point(device: &StorageDevice) -> &Path {
-    device
-        .mount_point
-        .as_deref()
-        .expect("storage device has no mount point")
-}
-
-fn by_mount_point(devices: &[StorageDevice]) -> HashMap<&Path, &StorageDevice> {
-    devices
-        .iter()
-        .map(|device| (mount_point(device), device))
-        .collect()
-}
-
-/// Events implied by moving from the `known` volume set to `current`.
+/// Volumes from `known` to keep in the current scan, with `misses` advanced to
+/// the number of consecutive rescans each carried mount point has been absent
+/// from. `mount_exists` reports whether a mount point is still a directory.
 ///
-/// Removals read their device path from `known`, which is the only place it
-/// survives once the volume is gone. A mount point held by a different device in
-/// each set is a card swapped under a reused volume name, two cards carrying the
-/// factory label `EOS_DIGITAL` for instance, and reports as the removal of the
-/// old card followed by the insertion of the new one.
-fn diff_devices(known: &[StorageDevice], current: &[StorageDevice]) -> Vec<DeviceEvent> {
-    let known_by_mount = by_mount_point(known);
-    let current_by_mount = by_mount_point(current);
+/// macOS removes a volume's directory under `/Volumes` when it unmounts, so a
+/// directory that outlives its scan entry means one of two things: a `diskutil`
+/// query that failed for this rescan, which recovers within
+/// [`MISSED_SCAN_LIMIT`] rescans, or a leftover directory from an abnormal
+/// unmount, which never recovers. The cap bounds the second case so the volume
+/// is eventually reported removed.
+fn carried_over(
+    known: &[StorageDevice],
+    current: &[StorageDevice],
+    misses: &mut HashMap<PathBuf, u8>,
+    mount_exists: impl Fn(&Path) -> bool,
+) -> Vec<StorageDevice> {
+    let scanned: HashSet<&Path> = current.iter().map(diff::mount_point).collect();
 
-    let appeared =
-        current
-            .iter()
-            .flat_map(|device| match known_by_mount.get(mount_point(device)) {
-                None => vec![DeviceEvent::Inserted(device.clone())],
-                Some(previous) if previous.device_path != device.device_path => vec![
-                    DeviceEvent::Removed {
-                        device_path: previous.device_path.clone(),
-                    },
-                    DeviceEvent::Inserted(device.clone()),
-                ],
-                Some(_) => Vec::new(),
-            });
-
-    let vanished = known
+    let carried = known
         .iter()
-        .filter(|device| !current_by_mount.contains_key(mount_point(device)))
-        .map(|device| DeviceEvent::Removed {
-            device_path: device.device_path.clone(),
-        });
+        .filter(|device| {
+            let path = diff::mount_point(device);
+            if scanned.contains(path) || !mount_exists(path) {
+                return false;
+            }
 
-    appeared.chain(vanished).collect()
+            let count = misses.entry(path.to_path_buf()).or_default();
+            *count += 1;
+            *count <= MISSED_SCAN_LIMIT
+        })
+        .cloned()
+        .collect();
+
+    let tracked: HashSet<&Path> = known.iter().map(diff::mount_point).collect();
+    misses.retain(|mount_point, _| {
+        tracked.contains(mount_point.as_path()) && !scanned.contains(mount_point.as_path())
+    });
+
+    carried
 }
 
 /// Whether any of `paths` is `/Volumes` itself or a direct child of it.
@@ -183,6 +178,17 @@ fn forward_volume_events(
         tracing::warn!(%error, "initial volume scan failed; starting with no known volumes");
         Vec::new()
     });
+    let mut misses: HashMap<PathBuf, u8> = HashMap::new();
+
+    // Volumes present when the watch starts are replayed so one that mounted
+    // before the baseline scan completes is still reported. The consumer treats
+    // events as refresh triggers, so a replay for an already known volume is
+    // harmless.
+    for device in &known {
+        if tx.send(DeviceEvent::Inserted(device.clone())).is_err() {
+            return;
+        }
+    }
 
     while let Ok(received) = events.recv() {
         match received {
@@ -203,23 +209,9 @@ fn forward_volume_events(
             continue;
         };
 
-        // macOS removes a volume's directory under /Volumes when it unmounts, so
-        // a known volume whose directory survives a scan that lost it is still
-        // mounted and its `diskutil` query failed.
-        let still_mounted: Vec<StorageDevice> = {
-            let scanned: HashSet<&Path> = current.iter().map(mount_point).collect();
-            known
-                .iter()
-                .filter(|device| {
-                    let path = mount_point(device);
-                    !scanned.contains(path) && path.is_dir()
-                })
-                .cloned()
-                .collect()
-        };
-        current.extend(still_mounted);
+        current.extend(carried_over(&known, &current, &mut misses, Path::is_dir));
 
-        let device_events = diff_devices(&known, &current);
+        let device_events = diff::events(&known, &current);
         known = current;
 
         for device_event in device_events {
@@ -302,9 +294,12 @@ fn parse_unmount_error(output: &str) -> UnmountError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+    };
 
-    use crate::{DeviceEvent, StorageDevice};
+    use crate::StorageDevice;
 
     fn device(name: &str) -> StorageDevice {
         StorageDevice {
@@ -316,85 +311,49 @@ mod tests {
         }
     }
 
-    fn device_on(name: &str, device_path: &str) -> StorageDevice {
-        StorageDevice {
-            device_path: PathBuf::from(device_path),
-            ..device(name)
+    /// Stands in for a mount point directory that outlives its volume.
+    fn directory_survives(_path: &Path) -> bool {
+        true
+    }
+
+    #[test]
+    fn volume_missing_from_a_scan_is_carried_over_up_to_the_limit() {
+        let known = [device("EOS_DIGITAL")];
+        let mut misses = HashMap::new();
+
+        for miss in 1..=super::MISSED_SCAN_LIMIT {
+            let carried = super::carried_over(&known, &[], &mut misses, directory_survives);
+            assert_eq!(carried.len(), 1, "dropped on missed scan {miss}");
+        }
+
+        let carried = super::carried_over(&known, &[], &mut misses, directory_survives);
+        assert!(carried.is_empty());
+    }
+
+    #[test]
+    fn volume_back_in_a_scan_starts_its_missed_scan_count_over() {
+        let known = [device("EOS_DIGITAL")];
+        let mut misses = HashMap::new();
+
+        for _ in 1..=super::MISSED_SCAN_LIMIT {
+            super::carried_over(&known, &[], &mut misses, directory_survives);
+        }
+        super::carried_over(&known, &known, &mut misses, directory_survives);
+
+        for miss in 1..=super::MISSED_SCAN_LIMIT {
+            let carried = super::carried_over(&known, &[], &mut misses, directory_survives);
+            assert_eq!(carried.len(), 1, "dropped on missed scan {miss}");
         }
     }
 
-    fn inserted_names(events: &[DeviceEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                DeviceEvent::Inserted(device) => Some(device.name.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn removed_paths(events: &[DeviceEvent]) -> Vec<PathBuf> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                DeviceEvent::Removed { device_path } => Some(device_path.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     #[test]
-    fn appearing_volume_is_reported_as_inserted() {
-        let events = super::diff_devices(&[], &[device("EOS_DIGITAL")]);
+    fn volume_whose_directory_is_gone_is_not_carried_over() {
+        let known = [device("EOS_DIGITAL")];
+        let mut misses = HashMap::new();
 
-        assert_eq!(inserted_names(&events), vec!["EOS_DIGITAL".to_owned()]);
-        assert_eq!(removed_paths(&events), Vec::<PathBuf>::new());
-    }
+        let carried = super::carried_over(&known, &[], &mut misses, |_| false);
 
-    #[test]
-    fn vanished_volume_is_reported_as_removed() {
-        let events = super::diff_devices(&[device("EOS_DIGITAL")], &[]);
-
-        assert_eq!(
-            removed_paths(&events),
-            vec![PathBuf::from("/dev/disk-EOS_DIGITAL")]
-        );
-        assert_eq!(inserted_names(&events), Vec::<String>::new());
-    }
-
-    #[test]
-    fn unchanged_volume_set_emits_nothing() {
-        let events = super::diff_devices(&[device("EOS_DIGITAL")], &[device("EOS_DIGITAL")]);
-
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn swapped_card_is_reported_as_both_removed_and_inserted() {
-        let events = super::diff_devices(&[device("EOS_DIGITAL")], &[device("NIKON D850")]);
-
-        assert_eq!(inserted_names(&events), vec!["NIKON D850".to_owned()]);
-        assert_eq!(
-            removed_paths(&events),
-            vec![PathBuf::from("/dev/disk-EOS_DIGITAL")]
-        );
-    }
-
-    #[test]
-    fn card_swapped_under_a_reused_volume_name_is_removed_then_inserted() {
-        let known = [device_on("EOS_DIGITAL", "/dev/disk2s1")];
-        let current = [device_on("EOS_DIGITAL", "/dev/disk4s1")];
-
-        let events = super::diff_devices(&known, &current);
-
-        assert_eq!(events.len(), 2);
-        assert!(matches!(
-            &events[0],
-            DeviceEvent::Removed { device_path } if device_path == Path::new("/dev/disk2s1")
-        ));
-        assert!(matches!(
-            &events[1],
-            DeviceEvent::Inserted(device) if device.device_path == Path::new("/dev/disk4s1")
-        ));
+        assert!(carried.is_empty());
+        assert!(misses.is_empty());
     }
 }

@@ -3,6 +3,8 @@
 //! Enumerates removable volumes and cameras, watches for them appearing and
 //! disappearing, and scans them for media files.
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod diff;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -213,7 +215,7 @@ pub async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
 
 #[cfg(target_os = "windows")]
 pub async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
-    Ok(run_blocking(windows::scan_storage).await)
+    run_blocking(windows::scan_storage).await
 }
 
 /// Mounts `device`'s filesystem, returning the resulting mount point.

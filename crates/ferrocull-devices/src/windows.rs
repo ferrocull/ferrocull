@@ -6,7 +6,6 @@
 //! TODO: Proper WPD (Windows Portable Devices) integration for PTP/MTP cameras.
 
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     process::Command,
     thread::{self, JoinHandle},
@@ -17,7 +16,8 @@ use sysinfo::{DiskRefreshKind, Disks};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    Camera, DeviceEvent, MountError, MountOptions, StorageDevice, UnmountError, UnmountOptions,
+    Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
+    UnmountOptions, diff,
 };
 
 /// Drive letter of a drive-root mount point, uppercased. Only a bare root
@@ -35,10 +35,19 @@ fn drive_letter(mount_point: &Path) -> Option<char> {
         .then_some(letter.to_ascii_uppercase())
 }
 
-pub(crate) fn scan_storage() -> Vec<StorageDevice> {
+pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
     let disks = Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
 
-    disks
+    // The system volume is always present, so an enumeration holding no disks
+    // at all is the enumeration itself having failed rather than a machine with
+    // no drives. An empty removable subset, in contrast, is the normal case.
+    if disks.list().is_empty() {
+        return Err(ScanError::Backend(String::from(
+            "volume enumeration returned no disks at all",
+        )));
+    }
+
+    let devices = disks
         .iter()
         .filter(|disk| disk.is_removable())
         .filter_map(|disk| {
@@ -69,7 +78,9 @@ pub(crate) fn scan_storage() -> Vec<StorageDevice> {
                 used_bytes,
             })
         })
-        .collect()
+        .collect();
+
+    Ok(devices)
 }
 
 /// TODO: Implement WPD (Windows Portable Devices) for PTP/MTP camera detection.
@@ -82,57 +93,49 @@ pub const fn scan_cameras() -> Vec<Camera> {
 /// Polls the removable drive list and reports the difference between successive
 /// scans.
 ///
-/// `sysinfo` drops a volume whose information query fails, so a transient
-/// per-volume failure during one poll surfaces as a spurious `Removed` followed
-/// by an `Inserted` on the next poll.
+/// A scan that loses the whole volume enumeration is reported as an error and
+/// skipped, so the previous drive set stands. `sysinfo` still drops an
+/// individual volume whose information query fails, so a transient per-volume
+/// failure during one poll surfaces as a spurious `Removed` followed by an
+/// `Inserted` on the next poll.
 ///
 /// TODO: Replace polling with `RegisterDeviceNotificationW` for event-driven detection.
 pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> JoinHandle<()> {
     thread::spawn(move || {
-        let mut known_drives = scan_current_removable_drives();
+        let mut known = scan_storage().unwrap_or_else(|error| {
+            tracing::warn!(%error, "initial drive scan failed; starting with no known drives");
+            Vec::new()
+        });
+
+        // Drives present when the watch starts are replayed so one that mounted
+        // before the first scan completes is still reported. The consumer treats
+        // events as refresh triggers, so a replay for an already known drive is
+        // harmless.
+        for device in &known {
+            if tx.send(DeviceEvent::Inserted(device.clone())).is_err() {
+                return;
+            }
+        }
 
         loop {
             thread::sleep(Duration::from_secs(2));
 
-            let current_drives = scan_current_removable_drives();
+            let Ok(current) = scan_storage().inspect_err(|error| {
+                tracing::warn!(%error, "drive scan failed; keeping the previous drive set");
+            }) else {
+                continue;
+            };
 
-            for (letter, device) in &current_drives {
-                if !known_drives.contains_key(letter)
-                    && tx.send(DeviceEvent::Inserted(device.clone())).is_err()
-                {
+            let device_events = diff::events(&known, &current);
+            known = current;
+
+            for device_event in device_events {
+                if tx.send(device_event).is_err() {
                     return;
                 }
             }
-
-            for (letter, device) in &known_drives {
-                if !current_drives.contains_key(letter)
-                    && tx
-                        .send(DeviceEvent::Removed {
-                            device_path: device.device_path.clone(),
-                        })
-                        .is_err()
-                {
-                    return;
-                }
-            }
-
-            known_drives = current_drives;
         }
     })
-}
-
-fn scan_current_removable_drives() -> HashMap<char, StorageDevice> {
-    scan_storage()
-        .into_iter()
-        .map(|d| {
-            let mount_point = d
-                .mount_point
-                .as_ref()
-                .expect("storage device has no mount point");
-            let letter = drive_letter(mount_point).expect("mount point has no drive letter");
-            (letter, d)
-        })
-        .collect()
 }
 
 /// Windows auto-mounts devices -- manual mount is not supported.
