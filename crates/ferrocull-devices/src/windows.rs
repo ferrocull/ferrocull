@@ -1,85 +1,79 @@
-//! Windows device detection using Win32 APIs.
+//! Windows device detection through `sysinfo`.
 //!
-//! Uses `GetLogicalDrives` and `GetVolumeInformation` for removable storage detection.
-//! Camera detection currently relies on cameras mounting as mass storage devices.
+//! Removable storage is read from the system disk list; cameras are detected
+//! only when they mount as mass storage.
 //!
 //! TODO: Proper WPD (Windows Portable Devices) integration for PTP/MTP cameras.
 
 use std::{
-    collections::HashMap,
-    ffi::{OsStr, OsString},
-    os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     process::Command,
     thread::{self, JoinHandle},
     time::Duration,
 };
 
+use sysinfo::{DiskRefreshKind, Disks};
 use tokio::sync::mpsc::UnboundedSender;
-use windows::{
-    Win32::{
-        Storage::FileSystem::{
-            GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
-        },
-        System::WindowsProgramming::DRIVE_REMOVABLE,
-    },
-    core::PCWSTR,
-};
 
 use crate::{
     Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
-    UnmountOptions, WatchError,
+    UnmountOptions, diff,
 };
 
-fn disk_space(mount_point: &Path) -> Option<(u64, u64)> {
-    let root_wide = os_to_wide_null(mount_point.as_os_str());
-    let mut total: u64 = 0;
-    let mut free: u64 = 0;
+/// Drive letter of a drive-root mount point, uppercased. Only a bare root
+/// (`E:` or `E:\`) names a removable volume, so anything else yields `None`:
+/// network shares and GUID volume paths carry no letter, and a folder-mounted
+/// volume (`C:\mnt\card`) sits on another drive's filesystem, where reporting
+/// it by its first character would misattribute it to that host drive.
+fn drive_letter(mount_point: &Path) -> Option<char> {
+    let raw = mount_point.to_string_lossy();
+    let root = raw.strip_suffix('\\').unwrap_or(&raw);
 
-    unsafe {
-        GetDiskFreeSpaceExW(
-            PCWSTR(root_wide.as_ptr()),
-            None,
-            Some(&mut total),
-            Some(&mut free),
-        )
-        .ok()?;
-    }
-
-    let used = total.saturating_sub(free);
-    Some((total, used))
+    let mut chars = root.chars();
+    let letter = chars.next()?;
+    (letter.is_ascii_alphabetic() && chars.next() == Some(':') && chars.next().is_none())
+        .then_some(letter.to_ascii_uppercase())
 }
 
 pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
-    let drive_mask = unsafe { GetLogicalDrives() };
-    if drive_mask == 0 {
-        return Err(ScanError::Backend(
-            "GetLogicalDrives returned 0 (no drives accessible or Win32 error)".to_owned(),
-        ));
+    let disks = Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
+
+    // The system volume is always present, so an enumeration holding no disks
+    // at all is the enumeration itself having failed rather than a machine with
+    // no drives. An empty removable subset, in contrast, is the normal case.
+    if disks.list().is_empty() {
+        return Err(ScanError::Backend(String::from(
+            "volume enumeration returned no disks at all",
+        )));
     }
 
-    let devices = (0u8..26)
-        .filter(|i| drive_mask & (1 << i) != 0)
-        .filter_map(|i| {
-            let letter = (b'A' + i) as char;
-            let root = format!("{letter}:\\");
-            let root_wide = to_wide_null(&root);
+    let devices = disks
+        .iter()
+        .filter(|disk| disk.is_removable())
+        .filter_map(|disk| {
+            let letter = drive_letter(disk.mount_point())?;
 
-            let drive_type = unsafe { GetDriveTypeW(PCWSTR(root_wide.as_ptr())) };
-            if drive_type != DRIVE_REMOVABLE {
-                return None;
-            }
+            let volume_name = disk.name().to_string_lossy();
+            let name = if volume_name.is_empty() {
+                format!("Removable ({letter}:)")
+            } else {
+                volume_name.into_owned()
+            };
 
-            let name = volume_name(&root_wide).unwrap_or_else(|| format!("Removable ({letter}:)"));
-            let mount_point = PathBuf::from(&root);
-            let device_path = PathBuf::from(format!("\\\\.\\{letter}:"));
-
-            let (total_bytes, used_bytes) = disk_space(&mount_point).unzip();
+            // sysinfo leaves the sizes at zero when the size query fails, so a
+            // zero total means unknown rather than empty.
+            let (total_bytes, used_bytes) = match disk.total_space() {
+                0 => (None, None),
+                total => (
+                    Some(total),
+                    Some(total.saturating_sub(disk.available_space())),
+                ),
+            };
 
             Some(StorageDevice {
                 name,
-                mount_point: Some(mount_point),
-                device_path,
+                mount_point: Some(PathBuf::from(format!("{letter}:\\"))),
+                device_path: PathBuf::from(format!(r"\\.\{letter}:")),
                 total_bytes,
                 used_bytes,
             })
@@ -96,98 +90,52 @@ pub const fn scan_cameras() -> Vec<Camera> {
     Vec::new()
 }
 
+/// Polls the removable drive list and reports the difference between successive
+/// scans.
+///
+/// A scan that loses the whole volume enumeration is reported as an error and
+/// skipped, so the previous drive set stands. `sysinfo` still drops an
+/// individual volume whose information query fails, so a transient per-volume
+/// failure during one poll surfaces as a spurious `Removed` followed by an
+/// `Inserted` on the next poll.
+///
 /// TODO: Replace polling with `RegisterDeviceNotificationW` for event-driven detection.
-/// TODO: Propagate per-poll scan failures (currently `scan_current_removable_drives`
-/// silently degrades to empty on a `scan_storage` error, which can produce spurious
-/// `Removed` events). Requires extending the channel payload to carry errors.
-pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<JoinHandle<()>, WatchError> {
-    Ok(thread::spawn(move || {
-        let mut known_drives = scan_current_removable_drives();
+pub(crate) fn watch(tx: UnboundedSender<DeviceEvent>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut known = scan_storage().unwrap_or_else(|error| {
+            tracing::warn!(%error, "initial drive scan failed; starting with no known drives");
+            Vec::new()
+        });
+
+        // Drives present when the watch starts are replayed so one that mounted
+        // before the first scan completes is still reported. The consumer treats
+        // events as refresh triggers, so a replay for an already known drive is
+        // harmless.
+        for device in &known {
+            if tx.send(DeviceEvent::Inserted(device.clone())).is_err() {
+                return;
+            }
+        }
 
         loop {
             thread::sleep(Duration::from_secs(2));
 
-            let current_drives = scan_current_removable_drives();
+            let Ok(current) = scan_storage().inspect_err(|error| {
+                tracing::warn!(%error, "drive scan failed; keeping the previous drive set");
+            }) else {
+                continue;
+            };
 
-            for (letter, device) in &current_drives {
-                if !known_drives.contains_key(letter)
-                    && tx.send(DeviceEvent::Inserted(device.clone())).is_err()
-                {
+            let device_events = diff::events(&known, &current);
+            known = current;
+
+            for device_event in device_events {
+                if tx.send(device_event).is_err() {
                     return;
                 }
             }
-
-            for (letter, device) in &known_drives {
-                if !current_drives.contains_key(letter)
-                    && tx
-                        .send(DeviceEvent::Removed {
-                            device_path: device.device_path.clone(),
-                        })
-                        .is_err()
-                {
-                    return;
-                }
-            }
-
-            known_drives = current_drives;
         }
-    }))
-}
-
-fn scan_current_removable_drives() -> HashMap<char, StorageDevice> {
-    scan_storage()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|d| {
-            let letter = d
-                .mount_point
-                .as_ref()
-                .expect("scan_storage sets mount_point")
-                .to_string_lossy()
-                .chars()
-                .next()
-                .expect("mount point has drive letter");
-            (letter, d)
-        })
-        .collect()
-}
-
-fn to_wide_null(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn os_to_wide_null(s: &OsStr) -> Vec<u16> {
-    s.encode_wide().chain(std::iter::once(0)).collect()
-}
-
-fn volume_name(root_wide: &[u16]) -> Option<String> {
-    let mut name_buf = [0u16; 256];
-
-    unsafe {
-        GetVolumeInformationW(
-            PCWSTR(root_wide.as_ptr()),
-            Some(&mut name_buf),
-            None,
-            None,
-            None,
-            None,
-        )
-        .ok()?;
-    }
-
-    let len = name_buf
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(name_buf.len());
-    if len == 0 {
-        return None;
-    }
-
-    Some(
-        OsString::from_wide(&name_buf[..len])
-            .to_string_lossy()
-            .into_owned(),
-    )
+    })
 }
 
 /// Windows auto-mounts devices -- manual mount is not supported.
@@ -245,5 +193,27 @@ fn parse_unmount_error(stderr: &str) -> UnmountError {
         UnmountError::NotMounted
     } else {
         UnmountError::Failed(stderr.trim().to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn drive_letter_uppercases_and_accepts_trimmed_roots() {
+        assert_eq!(super::drive_letter(Path::new(r"E:\")), Some('E'));
+        assert_eq!(super::drive_letter(Path::new("e:")), Some('E'));
+    }
+
+    #[test]
+    fn drive_letter_rejects_paths_without_one() {
+        assert_eq!(super::drive_letter(Path::new(r"\\server\share")), None);
+        assert_eq!(super::drive_letter(Path::new("")), None);
+    }
+
+    #[test]
+    fn drive_letter_rejects_folder_mounts() {
+        assert_eq!(super::drive_letter(Path::new(r"C:\mnt\card")), None);
     }
 }

@@ -3,6 +3,8 @@
 //! Enumerates removable volumes and cameras, watches for them appearing and
 //! disappearing, and scans them for media files.
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod diff;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -272,7 +274,7 @@ pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
 
 #[cfg(target_os = "windows")]
 pub async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
-    let handle = run_blocking(move || windows::watch(tx)).await?;
+    let handle = run_blocking(move || windows::watch(tx)).await;
     run_blocking(move || drop(handle.join())).await;
     Ok(())
 }
