@@ -23,7 +23,6 @@ ferrocull-ui = { path = "crates/ferrocull-ui" }
 iced = { version = "0.14", features = ["tokio"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 kamadak-exif = "0.6"
-plist = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -19,9 +19,24 @@ tokio = { workspace = true, features = ["macros"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
 nix = { version = "0.31", features = ["fs"] }
-notify = "8"
-plist = { workspace = true }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "CFArray",
+  "CFDictionary",
+  "CFNumber",
+  "CFString",
+  "CFURL",
+] }
+objc2-disk-arbitration = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "DADisk",
+  "DADissenter",
+  "DASession",
+  "dispatch2",
+  "libc",
+] }
 tokio = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

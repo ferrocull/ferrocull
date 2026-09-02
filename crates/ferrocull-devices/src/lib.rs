@@ -5,6 +5,8 @@
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod diff;
+#[cfg(target_os = "macos")]
+mod diskarb;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
