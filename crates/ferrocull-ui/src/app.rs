@@ -1155,6 +1155,10 @@ fn subscription(_state: &Ferrocull) -> Subscription<Message> {
 /// over.
 const DEVICE_EVENT_QUIET_WINDOW: Duration = Duration::from_millis(200);
 
+/// How long the device stream absorbs a burst before taking it as over even
+/// though events keep arriving.
+const DEVICE_EVENT_BURST_LIMIT: Duration = Duration::from_secs(2);
+
 /// Subscription that turns storage hotplug events into source rescans,
 /// replacing the periodic poll. The device watcher emits an event on every
 /// plug, unplug, mount, or unmount, and a burst of them collapses into a single
@@ -1191,16 +1195,30 @@ fn device_events() -> impl iced::futures::Stream<Item = Message> {
 
 /// Drops the device events that keep arriving right behind the one already
 /// received, returning once the channel has been quiet for
-/// `DEVICE_EVENT_QUIET_WINDOW` or has closed.
+/// `DEVICE_EVENT_QUIET_WINDOW`, has closed, or has been absorbed for
+/// `DEVICE_EVENT_BURST_LIMIT`.
 ///
 /// One card insertion reaches the watcher as several events, the appearance
 /// followed by the mount that settles about a hundred milliseconds later, and
 /// the watch replays every attached card when it starts. Absorbing the burst
-/// leaves one rescan instead of one per event.
+/// leaves one rescan instead of one per event. The quiet window restarts on
+/// every event, so the total bound is what keeps a stream of description
+/// changes that never falls quiet from postponing the rescan indefinitely.
 async fn absorb_burst(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<ferrocull_devices::DeviceEvent>,
 ) {
-    while let Ok(Some(_)) = tokio::time::timeout(DEVICE_EVENT_QUIET_WINDOW, rx.recv()).await {}
+    let deadline = tokio::time::Instant::now() + DEVICE_EVENT_BURST_LIMIT;
+
+    while tokio::time::Instant::now() < deadline {
+        let quiet = tokio::time::Instant::now() + DEVICE_EVENT_QUIET_WINDOW;
+
+        if !matches!(
+            tokio::time::timeout_at(quiet.min(deadline), rx.recv()).await,
+            Ok(Some(_))
+        ) {
+            return;
+        }
+    }
 }
 
 fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {

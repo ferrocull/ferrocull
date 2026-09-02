@@ -15,7 +15,8 @@ use std::{
     ffi::{CStr, CString, c_char, c_void},
     path::PathBuf,
     ptr::NonNull,
-    sync::mpsc,
+    sync::mpsc::{self, RecvTimeoutError},
+    time::Duration,
 };
 
 use dispatch2::{DispatchQueue, DispatchRetained};
@@ -35,6 +36,14 @@ use objc2_disk_arbitration::{
 
 /// Label of the serial queue `DiskArbitration` delivers callbacks on.
 const QUEUE_LABEL: &str = "io.github.ferrocull.diskarb";
+
+/// How long a mount or an unmount waits for its completion callback.
+///
+/// `diskarbitrationd` can take a while to answer: a mount may wait on user
+/// authorization, and a filesystem that stalls holds the request open for as
+/// long as it stalls. The bound keeps a stalled request from parking the
+/// blocking thread it runs on forever.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A snapshot of one disk's `DiskArbitration` description. Every field is the
 /// value DA reported for the matching `kDADiskDescription*` key.
@@ -59,6 +68,8 @@ pub(crate) enum Error {
     Undescribed(String),
     #[error("DiskArbitration refused with status {0}")]
     Dissented(i32),
+    #[error("DiskArbitration did not answer the request on {0} within {REQUEST_TIMEOUT:?}")]
+    TimedOut(String),
 }
 
 /// What a running [`Watcher`] reports.
@@ -334,7 +345,8 @@ unsafe extern "C-unwind" fn completed(
     context: *mut c_void,
 ) {
     // SAFETY: `context` addresses the sender on the requesting thread's stack,
-    // which stays there until this answer arrives.
+    // which stays there until the session is unscheduled and the queue this
+    // callback runs on has drained.
     let sender = unsafe { &*context.cast::<mpsc::Sender<Completion>>() };
 
     let completion = if dissenter.is_null() {
@@ -374,10 +386,12 @@ unsafe fn status(dissenter: *const DADissenter) -> i32 {
 /// `DiskArbitration` only delivers completions on a scheduled session, so the
 /// request runs against a session carrying a serial queue of its own. `issue`
 /// receives the disk and a context pointer addressing the sending half of the
-/// answer channel, which lives on this thread's stack until the answer arrives.
-/// Registering a callback against that pointer is itself an unsafe call, so the
-/// obligation to read it back as an `mpsc::Sender<Completion>` is discharged
-/// where `issue` is written.
+/// answer channel, which lives on this thread's stack until the session is
+/// unscheduled and its queue drained. Registering a callback against that
+/// pointer is itself an unsafe call, so the obligation to read it back as an
+/// `mpsc::Sender<Completion>` is discharged where `issue` is written.
+///
+/// A request the framework never answers gives up after [`REQUEST_TIMEOUT`].
 fn request(bsd_name: &str, issue: impl FnOnce(&DADisk, *mut c_void)) -> Result<Completion, Error> {
     // SAFETY: the call takes only an allocator, and `None` asks for the
     // default one.
@@ -392,20 +406,24 @@ fn request(bsd_name: &str, issue: impl FnOnce(&DADisk, *mut c_void)) -> Result<C
     let (sender, receiver) = mpsc::channel::<Completion>();
     issue(&disk, (&raw const sender).cast::<c_void>().cast_mut());
 
-    let answer = receiver
-        .recv()
-        .expect("DiskArbitration answer channel closed");
+    let answer = receiver.recv_timeout(REQUEST_TIMEOUT);
 
     // SAFETY: unscheduling the session stops DiskArbitration from queuing any
     // further callback.
     unsafe { session.set_dispatch_queue(None) };
 
-    // The completion callback runs to completion before this empty block does,
-    // so once the barrier returns nothing is reading `sender` and dropping it
-    // at the end of this call is sound.
+    // A completion callback already dispatched runs to completion before this
+    // empty block does, so once the barrier returns nothing is reading `sender`
+    // and dropping it at the end of this call is sound.
     queue.exec_sync(|| {});
 
-    Ok(answer)
+    match answer {
+        Ok(answer) => Ok(answer),
+        Err(RecvTimeoutError::Timeout) => Err(Error::TimedOut(bsd_name.to_owned())),
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("DiskArbitration answer channel closed")
+        }
+    }
 }
 
 /// The disk `DiskArbitration` knows under `bsd_name`.

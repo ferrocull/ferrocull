@@ -277,9 +277,9 @@ pub(crate) fn mount(
 
     let description = diskarb::mount(disk).map_err(|error| match error {
         diskarb::Error::Dissented(status) => mount_error(status),
-        diskarb::Error::NoSession | diskarb::Error::Undescribed(_) => {
-            MountError::Failed(error.to_string())
-        }
+        diskarb::Error::NoSession
+        | diskarb::Error::Undescribed(_)
+        | diskarb::Error::TimedOut(_) => MountError::Failed(error.to_string()),
     })?;
 
     description.volume_path.ok_or_else(|| {
@@ -317,9 +317,9 @@ pub(crate) fn unmount(
     )
     .map_err(|error| match error {
         diskarb::Error::Dissented(status) => unmount_error(status),
-        diskarb::Error::NoSession | diskarb::Error::Undescribed(_) => {
-            UnmountError::Failed(error.to_string())
-        }
+        diskarb::Error::NoSession
+        | diskarb::Error::Undescribed(_)
+        | diskarb::Error::TimedOut(_) => UnmountError::Failed(error.to_string()),
     })
 }
 
