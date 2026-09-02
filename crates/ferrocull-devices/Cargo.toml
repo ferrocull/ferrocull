@@ -24,6 +24,9 @@ notify = "8"
 plist = { workspace = true }
 tokio = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "macros"] }
+
 [target.'cfg(windows)'.dependencies]
 tokio = { workspace = true }
 windows = { version = "0.62", features = [

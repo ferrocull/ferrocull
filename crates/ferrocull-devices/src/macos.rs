@@ -3,10 +3,14 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::{
+    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    time::Instant,
+};
 
 use crate::{
     Camera, DeviceEvent, Filesystem, MountError, MountOptions, ScanError, StorageDevice,
@@ -19,6 +23,10 @@ const VOLUMES_DIR: &str = "/Volumes";
 /// Consecutive rescans a device may go missing from while its mount point or
 /// `/dev` node survives before it counts as gone.
 const MISSED_SCAN_LIMIT: u8 = 3;
+
+/// How long a rescan that explained nothing waits before running once more,
+/// leaving a mount time to settle and `diskutil` time to describe it.
+const RESCAN_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Removable volumes mounted under [`VOLUMES_DIR`], plus the removable disks
 /// that are attached without a mount point.
@@ -334,19 +342,100 @@ fn touches_volume_root(paths: &[PathBuf]) -> bool {
         .any(|path| path == volumes || path.parent() == Some(volumes))
 }
 
+/// What woke the watch loop for a rescan.
+enum Trigger {
+    /// A filesystem event under [`VOLUMES_DIR`].
+    FsEvent,
+    /// The delayed rescan armed after an event a scan could not explain.
+    Retry,
+}
+
+/// How a rescan left the device list.
+enum Rescan {
+    /// Device events went out, so the list reflects what changed.
+    Reported,
+    /// The scan failed or matched the known set, so whatever moved is still
+    /// unaccounted for.
+    Unexplained,
+    /// The consumer hung up, leaving nothing to forward events to.
+    ConsumerGone,
+}
+
+/// Runs one `scan`, folds the volumes [`carried_over`] from `known` into it, and
+/// forwards the difference to `tx`. `known` and `misses` come out describing the
+/// scanned set, and `probe_exists` reports whether a carried device's
+/// [`existence_probe`] path is still there. The scan runs on the blocking pool
+/// so `diskutil` cannot stall the runtime.
+async fn rescan(
+    scan: &(impl Fn() -> Result<Vec<StorageDevice>, ScanError> + Send + Clone + 'static),
+    known: &mut Vec<StorageDevice>,
+    misses: &mut HashMap<PathBuf, u8>,
+    tx: &UnboundedSender<DeviceEvent>,
+    probe_exists: impl Fn(&Path) -> bool,
+) -> Rescan {
+    let Ok(mut current) = crate::run_blocking(scan.clone())
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(%error, "volume scan failed; keeping the previous volume set");
+        })
+    else {
+        return Rescan::Unexplained;
+    };
+
+    current.extend(carried_over(known, &current, misses, probe_exists));
+
+    let device_events = diff::events(known, &current);
+    *known = current;
+
+    if device_events.is_empty() {
+        return Rescan::Unexplained;
+    }
+
+    for device_event in device_events {
+        if tx.send(device_event).is_err() {
+            return Rescan::ConsumerGone;
+        }
+    }
+
+    Rescan::Reported
+}
+
+/// Completes once an armed `retry` deadline arrives, and stays pending while no
+/// rescan is armed.
+async fn retry_elapsed(retry: Option<Instant>) {
+    match retry {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Rescans `/Volumes` on every relevant filesystem event and forwards the
 /// difference from the previous scan, until the watcher or the consumer hangs
-/// up. `diskutil` rescans run on the blocking pool so the runtime stays free.
+/// up.
+///
+/// An event a rescan cannot explain, because the scan failed or because
+/// `diskutil` could not yet describe the volume that just mounted, is followed
+/// by one more rescan [`RESCAN_RETRY_DELAY`] later, so the list heals without
+/// further filesystem activity. A failed baseline scan arms the same delayed
+/// rescan, so a watch starting while `diskutil` is unwell still lists the
+/// volumes that were already mounted. That rescan arms no successor, bounding
+/// recovery to a single extra scan. A filesystem event that arrives before the
+/// deadline runs its own rescan but leaves the pending retry armed, since that
+/// rescan explains only the volume its own event brought, not the one the
+/// retry is still waiting on.
 async fn forward_volume_events(
     events: &mut UnboundedReceiver<Result<notify::Event, notify::Error>>,
     tx: &UnboundedSender<DeviceEvent>,
+    scan: impl Fn() -> Result<Vec<StorageDevice>, ScanError> + Send + Clone + 'static,
+    probe_exists: impl Fn(&Path) -> bool,
 ) {
-    let mut known = crate::run_blocking(scan_storage)
-        .await
-        .unwrap_or_else(|error| {
+    let (mut known, mut retry) = match crate::run_blocking(scan.clone()).await {
+        Ok(devices) => (devices, None),
+        Err(error) => {
             tracing::warn!(%error, "initial volume scan failed; starting with no known volumes");
-            Vec::new()
-        });
+            (Vec::new(), Some(Instant::now() + RESCAN_RETRY_DELAY))
+        }
+    };
     let mut misses: HashMap<PathBuf, u8> = HashMap::new();
 
     // Volumes present when the watch starts are replayed so one that mounted
@@ -359,38 +448,45 @@ async fn forward_volume_events(
         }
     }
 
-    while let Some(received) = events.recv().await {
-        match received {
-            Ok(event) if !touches_volume_root(&event.paths) => continue,
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%error, "FSEvents watch error");
-                continue;
-            }
-        }
+    loop {
+        // Polling the events arm first gives a queued mount priority over the
+        // retry deadline: the retry is a backstop for a mount nothing else
+        // explains, while an event's own rescan already answers for it. A
+        // stream of events can starve the retry arm indefinitely, but each
+        // event runs a rescan of its own, so the stream does what the retry
+        // it starves would have done.
+        let trigger = tokio::select! {
+            biased;
 
-        // Mounting a volume emits a burst of events; draining them costs one rescan.
-        while events.try_recv().is_ok() {}
-
-        let Ok(mut current) = crate::run_blocking(scan_storage)
-            .await
-            .inspect_err(|error| {
-                tracing::warn!(%error, "volume scan failed; keeping the previous volume set");
-            })
-        else {
-            continue;
+            received = events.recv() => match received {
+                Some(Ok(event)) if !touches_volume_root(&event.paths) => continue,
+                Some(Ok(_)) => Trigger::FsEvent,
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "FSEvents watch error");
+                    continue;
+                }
+                None => return,
+            },
+            () = retry_elapsed(retry) => Trigger::Retry,
         };
 
-        current.extend(carried_over(&known, &current, &mut misses, Path::exists));
-
-        let device_events = diff::events(&known, &current);
-        known = current;
-
-        for device_event in device_events {
-            if tx.send(device_event).is_err() {
-                return;
-            }
+        // Mounting a volume emits a burst of events; draining them costs one
+        // rescan. Only the burst that woke the loop is drained: an event
+        // reaching a retry is a mount of its own, and the rescan the retry runs
+        // may well predate it.
+        if matches!(trigger, Trigger::FsEvent) {
+            while events.try_recv().is_ok() {}
         }
+
+        retry = match (
+            trigger,
+            rescan(&scan, &mut known, &mut misses, tx, &probe_exists).await,
+        ) {
+            (_, Rescan::ConsumerGone) => return,
+            (Trigger::FsEvent, Rescan::Unexplained) => Some(Instant::now() + RESCAN_RETRY_DELAY),
+            (Trigger::FsEvent, Rescan::Reported) => retry,
+            (Trigger::Retry, _) => None,
+        };
     }
 }
 
@@ -403,7 +499,9 @@ async fn forward_volume_events(
 /// volume directory, so those reach the watcher. Two changes to a disk that is
 /// never mounted do not: attaching one that macOS declines to auto-mount, and
 /// yanking one that is already unmounted. Both are rare, and the list catches up
-/// on the next event or a manual refresh.
+/// on the next event or a manual refresh. A volume that mounts while `diskutil`
+/// cannot yet describe it does reach the watcher, and the delayed rescan of
+/// [`forward_volume_events`] picks it up.
 pub(crate) async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |event| {
@@ -415,7 +513,7 @@ pub(crate) async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchE
         .watch(Path::new(VOLUMES_DIR), RecursiveMode::NonRecursive)
         .map_err(|e| WatchError::Backend(format!("failed to watch {VOLUMES_DIR}: {e}")))?;
 
-    forward_volume_events(&mut event_rx, &tx).await;
+    forward_volume_events(&mut event_rx, &tx, scan_storage, Path::exists).await;
     // Delivery stops when the watcher drops, so it outlives the event loop.
     drop(watcher);
 
@@ -509,11 +607,15 @@ fn parse_unmount_error(output: &str) -> UnmountError {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, VecDeque},
         path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+        time::Duration,
     };
 
-    use crate::{Filesystem, StorageDevice};
+    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+    use crate::{DeviceEvent, Filesystem, ScanError, StorageDevice};
 
     fn device(name: &str) -> StorageDevice {
         StorageDevice {
@@ -704,6 +806,269 @@ mod tests {
 
         assert!(carried.is_empty());
         assert!(misses.is_empty());
+    }
+
+    /// One result a [`FakeScanner`] hands out in place of a `diskutil` scan.
+    type CannedScan = Result<Vec<StorageDevice>, ScanError>;
+
+    /// Scanner stand-in handing out canned results in order and signalling
+    /// every call, so a test can wait for the watch loop to scan. An exhausted
+    /// queue scans as an empty volume set.
+    #[derive(Clone)]
+    struct FakeScanner {
+        results: Arc<Mutex<VecDeque<CannedScan>>>,
+        calls: UnboundedSender<()>,
+    }
+
+    impl FakeScanner {
+        fn new(results: Vec<CannedScan>) -> (Self, UnboundedReceiver<()>) {
+            let (calls, received) = tokio::sync::mpsc::unbounded_channel();
+            let scanner = Self {
+                results: Arc::new(Mutex::new(results.into_iter().collect())),
+                calls,
+            };
+
+            (scanner, received)
+        }
+
+        fn scan(&self) -> CannedScan {
+            // Nothing is left to signal once a test that has seen the scans it
+            // waits for drops the receiver.
+            self.calls.send(()).ok();
+
+            self.results
+                .lock()
+                .expect("scanner queue poisoned")
+                .pop_front()
+                .unwrap_or_else(|| Ok(Vec::new()))
+        }
+    }
+
+    /// The watch loop running on a task against a [`FakeScanner`], with the
+    /// channels a test drives it through.
+    struct Watch {
+        events: UnboundedSender<Result<notify::Event, notify::Error>>,
+        devices: UnboundedReceiver<DeviceEvent>,
+        scans: UnboundedReceiver<()>,
+    }
+
+    /// Starts a watch loop that scans `results` in order. The loop stops when
+    /// the test runtime shuts down.
+    fn watch_scanning(results: Vec<CannedScan>) -> Watch {
+        let (scanner, scans) = FakeScanner::new(results);
+        let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (device_tx, devices) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            super::forward_volume_events(
+                &mut event_rx,
+                &device_tx,
+                move || scanner.scan(),
+                |_| false,
+            )
+            .await;
+        });
+
+        Watch {
+            events,
+            devices,
+            scans,
+        }
+    }
+
+    /// The next item from `items`, or `None` once the steps below run out,
+    /// which bounds a test waiting on a rescan that never comes.
+    ///
+    /// The clock is paused, so it only moves while the runtime is idle. Waiting
+    /// in short steps advances it past a retry deadline the watch loop armed,
+    /// and gives a scan running on the blocking pool the polls it needs to land.
+    async fn next_from<T>(items: &mut UnboundedReceiver<T>) -> Option<T> {
+        const STEP: Duration = Duration::from_millis(50);
+        const STEPS: u32 = 1_200;
+
+        for _ in 0..STEPS {
+            if let Ok(item) = tokio::time::timeout(STEP, items.recv()).await {
+                return item;
+            }
+        }
+
+        None
+    }
+
+    /// What `FSEvents` delivers when a volume directory appears under
+    /// `/Volumes`.
+    fn volume_mounted() -> notify::Event {
+        notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
+            .add_path(PathBuf::from("/Volumes/EOS_DIGITAL"))
+    }
+
+    fn inserted_name(event: Option<DeviceEvent>) -> Option<String> {
+        match event {
+            Some(DeviceEvent::Inserted(device)) => Some(device.name),
+            _ => None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn insertion_a_failed_scan_missed_is_reported_after_the_retry() {
+        let mut watch = watch_scanning(vec![
+            Ok(Vec::new()),
+            Err(ScanError::Backend(String::from("diskutil info failed"))),
+            Ok(vec![device("EOS_DIGITAL")]),
+        ]);
+        assert!(
+            next_from(&mut watch.scans).await.is_some(),
+            "baseline scan did not run"
+        );
+
+        watch
+            .events
+            .send(Ok(volume_mounted()))
+            .expect("watch loop stopped reading events");
+
+        let reported = next_from(&mut watch.devices).await;
+        assert_eq!(inserted_name(reported).as_deref(), Some("EOS_DIGITAL"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn insertion_a_scan_omitted_is_reported_after_the_retry() {
+        let mut watch = watch_scanning(vec![
+            Ok(Vec::new()),
+            Ok(Vec::new()),
+            Ok(vec![device("EOS_DIGITAL")]),
+        ]);
+        assert!(
+            next_from(&mut watch.scans).await.is_some(),
+            "baseline scan did not run"
+        );
+
+        watch
+            .events
+            .send(Ok(volume_mounted()))
+            .expect("watch loop stopped reading events");
+
+        let reported = next_from(&mut watch.devices).await;
+        assert_eq!(inserted_name(reported).as_deref(), Some("EOS_DIGITAL"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_that_explains_nothing_schedules_no_further_rescan() {
+        let mut watch = watch_scanning(vec![Ok(Vec::new())]);
+        assert!(
+            next_from(&mut watch.scans).await.is_some(),
+            "baseline scan did not run"
+        );
+
+        watch
+            .events
+            .send(Ok(volume_mounted()))
+            .expect("watch loop stopped reading events");
+
+        assert!(
+            next_from(&mut watch.scans).await.is_some(),
+            "the event triggered no scan"
+        );
+        assert!(
+            next_from(&mut watch.scans).await.is_some(),
+            "the unexplained scan armed no retry"
+        );
+        assert!(
+            next_from(&mut watch.scans).await.is_none(),
+            "the retry armed a retry of its own"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn volumes_a_failed_baseline_scan_missed_are_reported_after_the_retry() {
+        let mut watch = watch_scanning(vec![
+            Err(ScanError::Backend(String::from("diskutil list failed"))),
+            Ok(vec![device("EOS_DIGITAL")]),
+        ]);
+
+        assert_eq!(
+            inserted_name(next_from(&mut watch.devices).await).as_deref(),
+            Some("EOS_DIGITAL"),
+            "the volumes the baseline scan missed went unreported"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_survives_a_scan_that_explains_a_different_volume() {
+        let mut watch = watch_scanning(vec![
+            Ok(vec![device("EOS_DIGITAL")]),
+            Ok(vec![device("EOS_DIGITAL")]),
+            Ok(Vec::new()),
+            Ok(vec![device("NIKON_D850")]),
+        ]);
+        assert!(
+            next_from(&mut watch.scans).await.is_some(),
+            "baseline scan did not run"
+        );
+        assert_eq!(
+            inserted_name(next_from(&mut watch.devices).await).as_deref(),
+            Some("EOS_DIGITAL"),
+            "the baseline volume was not replayed"
+        );
+
+        // The card mounts, the scan cannot yet describe it, and a retry is armed.
+        watch
+            .events
+            .send(Ok(volume_mounted()))
+            .expect("watch loop stopped reading events");
+        assert!(
+            next_from(&mut watch.scans).await.is_some(),
+            "the event triggered no scan"
+        );
+
+        // The other card is pulled inside the retry delay, and its own rescan
+        // explains that removal alone.
+        watch
+            .events
+            .send(Ok(volume_mounted()))
+            .expect("watch loop stopped reading events");
+        assert!(
+            next_from(&mut watch.scans).await.is_some(),
+            "the second event triggered no scan"
+        );
+        assert!(
+            matches!(
+                next_from(&mut watch.devices).await,
+                Some(DeviceEvent::Removed { .. })
+            ),
+            "the pulled volume was not reported removed"
+        );
+
+        assert_eq!(
+            inserted_name(next_from(&mut watch.devices).await).as_deref(),
+            Some("NIKON_D850"),
+            "the retry did not survive the rescan that explained the removal"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scan_that_reports_an_insertion_schedules_no_rescan() {
+        let mut watch = watch_scanning(vec![Ok(Vec::new()), Ok(vec![device("EOS_DIGITAL")])]);
+        assert!(
+            next_from(&mut watch.scans).await.is_some(),
+            "baseline scan did not run"
+        );
+
+        watch
+            .events
+            .send(Ok(volume_mounted()))
+            .expect("watch loop stopped reading events");
+
+        assert!(
+            next_from(&mut watch.scans).await.is_some(),
+            "the event triggered no scan"
+        );
+        let reported = next_from(&mut watch.devices).await;
+        assert_eq!(inserted_name(reported).as_deref(), Some("EOS_DIGITAL"));
+
+        assert!(
+            next_from(&mut watch.scans).await.is_none(),
+            "a scan that reported an insertion armed a retry"
+        );
     }
 
     #[test]
