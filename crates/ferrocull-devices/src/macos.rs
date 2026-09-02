@@ -1,259 +1,195 @@
+//! macOS device detection through the `DiskArbitration` framework.
+//!
+//! `DiskArbitration` answers for every medium `diskarbitrationd` knows about, so
+//! a card is listed whether it is mounted, waiting to be mounted, or carrying a
+//! filesystem macOS cannot read. Cameras are detected only when they mount as
+//! mass storage.
+//!
+//! TODO: Implement `ImageCaptureCore` integration for PTP cameras.
+
 use std::{
-    collections::{HashMap, HashSet},
-    ffi::OsStr,
+    collections::HashMap,
     path::{Path, PathBuf},
-    process::Command,
+    sync::{Mutex, PoisonError},
 };
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use objc2_disk_arbitration::{
+    kDAReturnBusy, kDAReturnNotMounted, kDAReturnNotPermitted, kDAReturnNotPrivileged,
+};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     Camera, DeviceEvent, Filesystem, MountError, MountOptions, ScanError, StorageDevice,
-    UnmountError, UnmountOptions, WatchError, diff,
+    UnmountError, UnmountOptions, WatchError, diff, diskarb,
 };
 
-/// Directory macOS mounts removable volumes under, one child per volume.
-const VOLUMES_DIR: &str = "/Volumes";
+/// Directory holding one node per BSD disk and partition.
+const DEV_DIR: &str = "/dev";
 
-/// Consecutive rescans a device may go missing from while its mount point or
-/// `/dev` node survives before it counts as gone.
-const MISSED_SCAN_LIMIT: u8 = 3;
+/// The status a filesystem returns when it refuses an unmount because files are
+/// still open on it. `DiskArbitration` passes the Mach encoding of the POSIX
+/// error through untouched, as `err_sub(3) | EBUSY`, rather than translating it
+/// into `kDAReturnBusy`.
+const UNIX_BUSY: i32 = (3 << 14) | nix::libc::EBUSY;
 
-/// Removable volumes mounted under [`VOLUMES_DIR`], plus the removable disks
-/// that are attached without a mount point.
-pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
-    let mut devices = mounted_volumes()?;
-    let mounted: HashSet<PathBuf> = devices
-        .iter()
-        .map(|device| device.device_path.clone())
-        .collect();
+/// `DiskArbitration` reports a GPT partition's type as its GUID, and every
+/// volume of an APFS container carries this one.
+const APFS_VOLUME_TYPE: &str = "41504653-0000-11AA-AA11-00306543ECAC";
 
-    match unmounted_disks() {
-        // A volume can unmount between the /Volumes walk and the diskutil
-        // listing: the walk saw it mounted and the listing reports it as an
-        // unmounted candidate, so without the filter the same device would be
-        // listed twice. The stale mounted entry wins; the next rescan corrects
-        // it.
-        Ok(unmounted) => devices.extend(
-            unmounted
-                .into_iter()
-                .filter(|device| !mounted.contains(&device.device_path)),
-        ),
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "cannot list unmounted disks; the scan reports mounted volumes only"
-            );
-        }
-    }
+/// GPT partition types that never carry media a user shoots to: the EFI System
+/// Partition, the Microsoft Reserved partition and Linux swap.
+const RESERVED_PARTITION_TYPES: &[&str] = &[
+    "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+    "E3C9E316-0B5C-4DB8-817D-F92DF00215AE",
+    "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F",
+];
 
-    Ok(devices)
-}
+/// The volume names macOS gives the role volumes of an APFS container, which it
+/// mounts and unmounts on its own beside the volume the user sees.
+const APFS_ROLE_VOLUMES: &[&str] = &["Preboot", "Recovery", "VM", "Update"];
 
+/// Every removable card `DiskArbitration` describes, mounted or not.
+///
+/// The disks to describe come from the `/dev` nodes rather than from `IOKit`:
+/// every medium `DiskArbitration` answers for publishes one, and reading a
+/// directory needs no second framework.
 #[expect(
     clippy::disallowed_methods,
     reason = "runs on the blocking pool through run_blocking, so std::fs cannot stall the runtime"
 )]
-fn mounted_volumes() -> Result<Vec<StorageDevice>, ScanError> {
-    let entries = std::fs::read_dir(VOLUMES_DIR)?;
+pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
+    let entries = std::fs::read_dir(DEV_DIR)?;
 
-    let devices = entries
+    let bsd_names: Vec<String> = entries
         .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let mount_point = entry.path();
-
-            if !mount_point.is_dir() {
-                return None;
-            }
-
-            let info = disk_info(&mount_point)?;
-            if !is_removable(&info, &mount_point.to_string_lossy())? {
-                return None;
-            }
-
-            let name = entry.file_name().to_string_lossy().into_owned();
-
-            let device_path = info
-                .device_node
-                .map_or_else(|| mount_point.clone(), PathBuf::from);
-
-            let (total_bytes, used_bytes) = crate::statvfs::disk_space(&mount_point).unzip();
-
-            Some(StorageDevice {
-                name,
-                filesystem: Filesystem::Mounted(mount_point),
-                device_path,
-                total_bytes,
-                used_bytes,
-            })
-        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| is_disk_node(name))
         .collect();
 
-    Ok(devices)
-}
+    let descriptions =
+        diskarb::describe(&bsd_names).map_err(|error| ScanError::Backend(error.to_string()))?;
 
-/// Removable disks carrying a filesystem that is attached but not mounted, so
-/// the user can pick one and mount it.
-fn unmounted_disks() -> Result<Vec<StorageDevice>, ScanError> {
-    let listing = disk_listing()?;
-
-    Ok(unmounted_candidates(&listing)
-        .into_iter()
-        .filter_map(unmounted_device)
+    Ok(descriptions
+        .iter()
+        .filter_map(device)
+        .map(with_disk_space)
         .collect())
 }
 
-/// Entries of a listing that carry a filesystem with no mount point: the
-/// unmounted partitions of a partitioned disk, and an unpartitioned disk
-/// formatted end to end. A partition without a volume name holds no filesystem
-/// `diskutil` recognizes, which rules out the Apple internal partitions. The
-/// EFI System Partition of a GPT disk does carry one, so it is ruled out by its
-/// `Content` instead; filtering on the partition type rather than on the name
-/// keeps a card the user labeled `EFI` in the list.
-fn unmounted_candidates(listing: &Listing) -> Vec<&ListedDisk> {
-    listing
-        .disks
-        .iter()
-        .flat_map(|disk| {
-            disk.partitions
-                .as_ref()
-                .map_or_else(|| vec![disk], |partitions| partitions.iter().collect())
-        })
-        .filter(|entry| {
-            entry.volume_name.is_some()
-                && entry.mount_point.is_none()
-                && entry.content.as_deref() != Some("EFI")
-        })
-        .collect()
+/// `device` with the capacity of a mounted filesystem read off the mount point.
+///
+/// The read is a blocking `statvfs`, so it happens here rather than in
+/// [`device`], which the watcher calls on the `DiskArbitration` callback queue.
+fn with_disk_space(device: StorageDevice) -> StorageDevice {
+    let Filesystem::Mounted(mount_point) = &device.filesystem else {
+        return device;
+    };
+
+    let (total_bytes, used_bytes) = crate::statvfs::disk_space(mount_point).unzip();
+
+    StorageDevice {
+        total_bytes,
+        used_bytes,
+        ..device
+    }
 }
 
-/// The candidate as a storage device, or `None` when it is not removable media
-/// or `diskutil` cannot describe it.
-fn unmounted_device(candidate: &ListedDisk) -> Option<StorageDevice> {
-    let info = disk_info(&candidate.device_identifier)?;
-    if !is_removable(&info, &candidate.device_identifier)? {
+/// Whether `name` is a BSD disk node: `disk` followed by the unit number and
+/// one slice number per level of nesting, as `disk4s1` and `disk3s1s1` are.
+/// The `rdisk` character nodes name the same media, so they are left out.
+fn is_disk_node(name: &str) -> bool {
+    name.strip_prefix("disk").is_some_and(|numbers| {
+        numbers
+            .split('s')
+            .all(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+    })
+}
+
+/// The removable card `description` describes, or `None` when it is not one.
+fn device(description: &diskarb::Description) -> Option<StorageDevice> {
+    // A whole disk carrying a partition table is not a volume, while a card
+    // formatted end to end is a leaf and belongs in the list.
+    if description.media_leaf != Some(true) {
         return None;
     }
 
-    let name = candidate
-        .volume_name
-        .clone()
-        .expect("candidate without a volume name");
+    // The IOKit properties `diskutil` reports as `RemovableMedia` and
+    // `Ejectable`.
+    if description.media_removable != Some(true) && description.media_ejectable != Some(true) {
+        return None;
+    }
 
-    let device_path = info.device_node.map_or_else(
-        || PathBuf::from(format!("/dev/{}", candidate.device_identifier)),
-        PathBuf::from,
-    );
+    // A partition reserved by the partition table holds no media. Filtering on
+    // the partition type rather than on the volume name keeps a card the user
+    // labelled `EFI` in the list.
+    if let Some(media_content) = description.media_content.as_deref()
+        && RESERVED_PARTITION_TYPES.contains(&media_content)
+    {
+        return None;
+    }
+
+    if is_unmounted_apfs_role_volume(description) {
+        return None;
+    }
 
     Some(StorageDevice {
-        name,
-        filesystem: Filesystem::Unmounted,
-        device_path,
-        total_bytes: candidate.size,
+        name: description
+            .volume_name
+            .clone()
+            .unwrap_or_else(|| unlabelled_name(&description.bsd_name)),
+        filesystem: filesystem(description),
+        device_path: device_path(&description.bsd_name),
+        total_bytes: description.media_size,
         used_bytes: None,
     })
 }
 
-/// Parsed subset of `diskutil list -plist` output.
-#[derive(serde::Deserialize)]
-struct Listing {
-    #[serde(rename = "AllDisksAndPartitions")]
-    disks: Vec<ListedDisk>,
-}
-
-/// A whole disk or one of its partitions. Both shapes carry the same keys; only
-/// a whole disk carries `Partitions`, and a disk formatted without a partition
-/// table carries the volume keys itself. `APFSVolumes` stays unparsed: APFS
-/// never holds camera media, and skipping it keeps the internal system volumes
-/// of an APFS container out of the scan.
-#[derive(serde::Deserialize)]
-struct ListedDisk {
-    #[serde(rename = "DeviceIdentifier")]
-    device_identifier: String,
-    #[serde(rename = "Content")]
-    content: Option<String>,
-    #[serde(rename = "VolumeName")]
-    volume_name: Option<String>,
-    #[serde(rename = "MountPoint")]
-    mount_point: Option<String>,
-    #[serde(rename = "Size")]
-    size: Option<u64>,
-    #[serde(rename = "Partitions")]
-    partitions: Option<Vec<Self>>,
-}
-
-fn disk_listing() -> Result<Listing, ScanError> {
-    let output = Command::new("diskutil")
-        .args(["list", "-plist"])
-        .output()
-        .map_err(|e| ScanError::Backend(format!("failed to execute diskutil list: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ScanError::Backend(format!(
-            "diskutil list failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    plist::from_bytes(&output.stdout)
-        .map_err(|e| ScanError::Backend(format!("failed to parse diskutil list output: {e}")))
-}
-
-/// Parsed subset of `diskutil info -plist` output. A volume counts as removable
-/// media when it reports either `RemovableMedia` or `Ejectable`.
-#[derive(serde::Deserialize)]
-struct DiskInfo {
-    #[serde(rename = "DeviceNode")]
-    device_node: Option<String>,
-    #[serde(rename = "MountPoint")]
-    mount_point: Option<String>,
-    #[serde(rename = "RemovableMedia")]
-    removable_media: Option<bool>,
-    #[serde(rename = "Ejectable")]
-    ejectable: Option<bool>,
-}
-
-impl DiskInfo {
-    /// Where the volume is mounted. `diskutil` reports an unmounted volume with
-    /// an empty mount point.
-    fn mount_point(&self) -> Option<&str> {
-        self.mount_point
+/// Whether the description is one of the APFS volumes macOS keeps beside the
+/// volume the user sees, currently unmounted.
+///
+/// `DiskArbitration` publishes no role for an APFS volume, so the name is the
+/// only discriminator: a user volume named exactly `Recovery` disappears from
+/// the list while it is unmounted, and comes back once macOS mounts it.
+fn is_unmounted_apfs_role_volume(description: &diskarb::Description) -> bool {
+    description.media_content.as_deref() == Some(APFS_VOLUME_TYPE)
+        && description.volume_path.is_none()
+        && description
+            .volume_name
             .as_deref()
-            .filter(|mount_point| !mount_point.is_empty())
+            .is_some_and(|name| APFS_ROLE_VOLUMES.contains(&name))
+}
+
+/// Where the described media's filesystem stands. Media whose filesystem macOS
+/// cannot read is not mountable and never carries a path, which is also how a
+/// partition that holds no filesystem at all describes itself, so a reserved
+/// partition of a foreign partition table reads as unreadable media.
+fn filesystem(description: &diskarb::Description) -> Filesystem {
+    match &description.volume_path {
+        Some(mount_point) => Filesystem::Mounted(mount_point.clone()),
+        None if description.volume_mountable == Some(true) => Filesystem::Unmounted,
+        None => Filesystem::Unreadable,
     }
 }
 
-/// Whether the disk is removable media, or `None` when `diskutil` omits a key
-/// the decision rests on. `disk` names the disk in the log line.
-fn is_removable(info: &DiskInfo, disk: &str) -> Option<bool> {
-    let Some(removable) = info.removable_media else {
-        tracing::error!(disk, "diskutil plist missing RemovableMedia; skipping");
-        return None;
-    };
-    let Some(ejectable) = info.ejectable else {
-        tracing::error!(disk, "diskutil plist missing Ejectable; skipping");
-        return None;
-    };
-
-    Some(removable || ejectable)
+/// Display name for a volume that carries no label of its own.
+fn unlabelled_name(bsd_name: &str) -> String {
+    format!("Removable ({bsd_name})")
 }
 
-/// Queries `diskutil` about a disk named by mount point, `/dev` node, or device
-/// identifier, all of which it accepts.
-fn disk_info(disk: impl AsRef<OsStr>) -> Option<DiskInfo> {
-    let output = Command::new("diskutil")
-        .args(["info", "-plist"])
-        .arg(disk)
-        .output()
-        .ok()?;
+/// `/dev` node of the disk named `bsd_name`, the identity the watcher keys
+/// devices by.
+fn device_path(bsd_name: &str) -> PathBuf {
+    PathBuf::from(format!("{DEV_DIR}/{bsd_name}"))
+}
 
-    if !output.status.success() {
-        return None;
-    }
-
-    plist::from_bytes(&output.stdout).ok()
+/// The BSD name of the disk at `device_path`, the last component of its `/dev`
+/// node.
+fn bsd_name(device_path: &Path) -> &str {
+    device_path
+        .file_name()
+        .expect("device path without a file name")
+        .to_str()
+        .expect("BSD disk name outside UTF-8")
 }
 
 /// TODO: Implement `ImageCaptureCore` integration for PTP cameras.
@@ -263,246 +199,143 @@ pub const fn scan_cameras() -> Vec<Camera> {
     Vec::new()
 }
 
-/// Path whose existence means the device is still attached: its mount point
-/// while mounted, its `/dev` node otherwise. Both disappear when the disk is
-/// detached.
-fn existence_probe(device: &StorageDevice) -> &Path {
-    device.mount_point().unwrap_or(&device.device_path)
-}
-
-/// Devices from `known` to keep in the current scan, with `misses` advanced to
-/// the number of consecutive rescans each carried device has been absent from.
-/// `probe_exists` reports whether a device's [`existence_probe`] path is still
-/// there.
+/// Reports removable cards appearing, mounting, unmounting and disappearing as
+/// `DiskArbitration` publishes them. The future stays pending for as long as the
+/// watch lasts, and dropping it tears the watch down.
 ///
-/// macOS removes a volume's directory under `/Volumes` when it unmounts and its
-/// `/dev` node when the disk is detached, so a probe path that outlives its scan
-/// entry means one of two things: a `diskutil` query that failed for this
-/// rescan, which recovers within [`MISSED_SCAN_LIMIT`] rescans, or a leftover
-/// directory from an abnormal unmount, which never recovers. The cap bounds the
-/// second case so the device is eventually reported removed.
-fn carried_over(
-    known: &[StorageDevice],
-    current: &[StorageDevice],
-    misses: &mut HashMap<PathBuf, u8>,
-    probe_exists: impl Fn(&Path) -> bool,
-) -> Vec<StorageDevice> {
-    let scanned: HashSet<&Path> = current
-        .iter()
-        .map(|device| device.device_path.as_path())
-        .collect();
-
-    let carried = known
-        .iter()
-        .filter(|device| {
-            let device_path = device.device_path.as_path();
-            if scanned.contains(device_path) || !probe_exists(existence_probe(device)) {
-                return false;
-            }
-
-            let count = misses.entry(device_path.to_path_buf()).or_default();
-            *count += 1;
-            *count <= MISSED_SCAN_LIMIT
-        })
-        .cloned()
-        .collect();
-
-    let tracked: HashSet<&Path> = known
-        .iter()
-        .map(|device| device.device_path.as_path())
-        .collect();
-    misses.retain(|device_path, _| {
-        tracked.contains(device_path.as_path()) && !scanned.contains(device_path.as_path())
-    });
-
-    carried
-}
-
-/// Whether any of `paths` is `/Volumes` itself or a direct child of it.
-///
-/// `FSEvents` is recursive in the kernel and `notify` applies
-/// [`RecursiveMode::NonRecursive`] in userspace, so writes deep inside a mounted
-/// card arrive here too. Only the volume directories themselves signal a mount
-/// or an unmount, and the depth check keeps a card being read from triggering a
-/// `diskutil` rescan per file. `/Volumes` itself counts because `notify`
-/// delivers events on the watched root, and a dropped-event rescan notification
-/// carries the root path rather than the volume that changed.
-fn touches_volume_root(paths: &[PathBuf]) -> bool {
-    let volumes = Path::new(VOLUMES_DIR);
-    paths
-        .iter()
-        .any(|path| path == volumes || path.parent() == Some(volumes))
-}
-
-/// Rescans `/Volumes` on every relevant filesystem event and forwards the
-/// difference from the previous scan, until the watcher or the consumer hangs
-/// up. `diskutil` rescans run on the blocking pool so the runtime stays free.
-async fn forward_volume_events(
-    events: &mut UnboundedReceiver<Result<notify::Event, notify::Error>>,
-    tx: &UnboundedSender<DeviceEvent>,
-) {
-    let mut known = crate::run_blocking(scan_storage)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "initial volume scan failed; starting with no known volumes");
-            Vec::new()
-        });
-    let mut misses: HashMap<PathBuf, u8> = HashMap::new();
-
-    // Volumes present when the watch starts are replayed so one that mounted
-    // before the baseline scan completes is still reported. The consumer treats
-    // events as refresh triggers, so a replay for an already known volume is
-    // harmless.
-    for device in &known {
-        if tx.send(DeviceEvent::Inserted(device.clone())).is_err() {
-            return;
-        }
-    }
-
-    while let Some(received) = events.recv().await {
-        match received {
-            Ok(event) if !touches_volume_root(&event.paths) => continue,
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%error, "FSEvents watch error");
-                continue;
-            }
-        }
-
-        // Mounting a volume emits a burst of events; draining them costs one rescan.
-        while events.try_recv().is_ok() {}
-
-        let Ok(mut current) = crate::run_blocking(scan_storage)
-            .await
-            .inspect_err(|error| {
-                tracing::warn!(%error, "volume scan failed; keeping the previous volume set");
-            })
-        else {
-            continue;
-        };
-
-        current.extend(carried_over(&known, &current, &mut misses, Path::exists));
-
-        let device_events = diff::events(&known, &current);
-        known = current;
-
-        for device_event in device_events {
-            if tx.send(device_event).is_err() {
-                return;
-            }
-        }
-    }
-}
-
-/// Watches `/Volumes` through `FSEvents` and reports devices appearing and
-/// disappearing by diffing successive [`scan_storage`] results. The future stays
-/// pending for as long as the watch lasts, and dropping it tears the watch down.
-///
-/// `FSEvents` only observes `/Volumes`, while a scan also reports attached disks
-/// that carry no mount point. Mounting and unmounting both create or remove a
-/// volume directory, so those reach the watcher. Two changes to a disk that is
-/// never mounted do not: attaching one that macOS declines to auto-mount, and
-/// yanking one that is already unmounted. Both are rare, and the list catches up
-/// on the next event or a manual refresh.
+/// Registration replays every attached disk, so the watch needs no baseline
+/// scan. `DiskArbitration` publishes a mount the moment `diskarbitrationd` knows
+/// where the volume landed, so a card that arrives before its mount point is
+/// settled reaches the consumer as an insertion carrying no mount point
+/// followed by a mount carrying one, with no timer in between.
 pub(crate) async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchError> {
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |event| {
-        // A failed send means the event loop is gone, leaving nothing to notify.
-        event_tx.send(event).ok();
-    })
-    .map_err(|e| WatchError::Backend(format!("failed to create the FSEvents watcher: {e}")))?;
-    watcher
-        .watch(Path::new(VOLUMES_DIR), RecursiveMode::NonRecursive)
-        .map_err(|e| WatchError::Backend(format!("failed to watch {VOLUMES_DIR}: {e}")))?;
+    let known = Mutex::new(HashMap::new());
+    let sender = tx.clone();
 
-    forward_volume_events(&mut event_rx, &tx).await;
-    // Delivery stops when the watcher drops, so it outlives the event loop.
+    let watcher = diskarb::Watcher::start(move |event| {
+        if let Some(device_event) = reported(&known, event) {
+            // A closed channel means the consumer is gone, leaving nothing to
+            // notify; the watch itself ends with the task holding it.
+            sender.send(device_event).ok();
+        }
+    })
+    .map_err(|error| WatchError::Backend(error.to_string()))?;
+
+    tx.closed().await;
     drop(watcher);
 
     Ok(())
 }
 
-/// Mounts through `diskutil mount`, which picks the mount point and the
+/// The event `report` implies for the consumer, with `known` advanced to the
+/// device set the report leaves behind.
+///
+/// A disk `DiskArbitration` reports that is no card, one of the internal disks
+/// or an APFS snapshot, reads the same as one that detached: it leaves the
+/// known set, and only a disk that was in it reports a removal. Classifying the
+/// disk touches no filesystem, so this runs on the `DiskArbitration` callback
+/// queue without holding up the events behind it.
+fn reported(
+    known: &Mutex<HashMap<String, StorageDevice>>,
+    report: diskarb::Event,
+) -> Option<DeviceEvent> {
+    let (bsd_name, current) = match report {
+        diskarb::Event::Appeared(description) | diskarb::Event::Changed(description) => {
+            (description.bsd_name.clone(), device(&description))
+        }
+        diskarb::Event::Disappeared { bsd_name } => (bsd_name, None),
+    };
+
+    // Unwinding out of a DiskArbitration callback would cross the framework's C
+    // frames, so a map poisoned by an earlier panic is taken as it stands.
+    let mut known = known.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let Some(current) = current else {
+        return known.remove(&bsd_name).map(removed);
+    };
+
+    let device_event = diff::change(known.get(&bsd_name), &current);
+    known.insert(bsd_name, current);
+
+    device_event
+}
+
+/// The removal of a device the watch was reporting.
+fn removed(device: StorageDevice) -> DeviceEvent {
+    DeviceEvent::Removed {
+        device_path: device.device_path,
+    }
+}
+
+/// Mounts through `DiskArbitration`, which picks the mount point and the
 /// filesystem driver itself, so `options` carries nothing macOS can act on.
 pub(crate) fn mount(
     device: &StorageDevice,
     _options: &MountOptions,
 ) -> Result<PathBuf, MountError> {
-    let output = Command::new("diskutil")
-        .arg("mount")
-        .arg(&device.device_path)
-        .output()
-        .map_err(|e| MountError::Failed(format!("failed to execute diskutil: {e}")))?;
+    let disk = bsd_name(&device.device_path);
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(parse_mount_error(&format!("{stderr}{stdout}")));
-    }
+    let description = diskarb::mount(disk).map_err(|error| match error {
+        diskarb::Error::Dissented(status) => mount_error(status),
+        diskarb::Error::NoSession
+        | diskarb::Error::Undescribed(_)
+        | diskarb::Error::TimedOut(_) => MountError::Failed(error.to_string()),
+    })?;
 
-    // `diskutil mount` names the volume it mounted, not where it landed, so the
-    // mount point comes from a follow-up query. A volume that mounts without one
-    // being readable is reported as a failure; the next rescan reconciles the
-    // list either way.
-    disk_info(&device.device_path)
-        .and_then(|info| info.mount_point().map(PathBuf::from))
-        .ok_or_else(|| {
-            MountError::Failed(format!(
-                "mounted {} but could not read its mount point",
-                device.device_path.display()
-            ))
-        })
+    description.volume_path.ok_or_else(|| {
+        MountError::Failed(format!(
+            "mounted {disk} but DiskArbitration reported no mount point"
+        ))
+    })
 }
 
-fn parse_mount_error(output: &str) -> MountError {
-    let lower = output.to_lowercase();
-    if lower.contains("permission") || lower.contains("not permitted") {
-        MountError::PermissionDenied
-    } else {
-        MountError::Failed(output.trim().to_owned())
+/// `MountError` for the status `DiskArbitration` dissented a mount with.
+#[expect(
+    non_upper_case_globals,
+    reason = "the DiskArbitration statuses are matched under the names the framework exports"
+)]
+fn mount_error(status: i32) -> MountError {
+    match status {
+        // A disk that is already mounted is one something else is holding.
+        kDAReturnBusy => MountError::AlreadyMounted,
+        kDAReturnNotPermitted | kDAReturnNotPrivileged => MountError::PermissionDenied,
+        _ => MountError::Failed(format!(
+            "DiskArbitration refused the mount with status {status}"
+        )),
     }
 }
 
-/// Unmount via `diskutil unmount [force]`.
+/// Unmounts through `DiskArbitration`, forcing the unmount past open files when
+/// `options` asks for it.
 pub(crate) fn unmount(
     device: &StorageDevice,
     options: &UnmountOptions,
 ) -> Result<(), UnmountError> {
-    let mut cmd = Command::new("diskutil");
-    cmd.arg("unmount");
-    if options.force.unwrap_or(false) {
-        cmd.arg("force");
-    }
-    cmd.arg(&device.device_path);
-
-    let output = cmd
-        .output()
-        .map_err(|e| UnmountError::Failed(format!("failed to execute diskutil: {e}")))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let combined = format!("{stderr}{stdout}");
-
-    Err(parse_unmount_error(&combined))
+    diskarb::unmount(
+        bsd_name(&device.device_path),
+        options.force.unwrap_or(false),
+    )
+    .map_err(|error| match error {
+        diskarb::Error::Dissented(status) => unmount_error(status),
+        diskarb::Error::NoSession
+        | diskarb::Error::Undescribed(_)
+        | diskarb::Error::TimedOut(_) => UnmountError::Failed(error.to_string()),
+    })
 }
 
-fn parse_unmount_error(output: &str) -> UnmountError {
-    let lower = output.to_lowercase();
-    if lower.contains("resource busy") || lower.contains("in use") {
-        UnmountError::Busy
-    } else if lower.contains("permission") || lower.contains("not permitted") {
-        UnmountError::PermissionDenied
-    } else if lower.contains("not a mount point")
-        || lower.contains("could not find")
-        || lower.contains("no such")
-    {
-        UnmountError::NotMounted
-    } else {
-        UnmountError::Failed(output.trim().to_owned())
+/// `UnmountError` for the status `DiskArbitration` dissented an unmount with.
+#[expect(
+    non_upper_case_globals,
+    reason = "the DiskArbitration statuses are matched under the names the framework exports"
+)]
+fn unmount_error(status: i32) -> UnmountError {
+    match status {
+        kDAReturnBusy | UNIX_BUSY => UnmountError::Busy,
+        kDAReturnNotPermitted | kDAReturnNotPrivileged => UnmountError::PermissionDenied,
+        kDAReturnNotMounted => UnmountError::NotMounted,
+        _ => UnmountError::Failed(format!(
+            "DiskArbitration refused the unmount with status {status}"
+        )),
     }
 }
 
@@ -511,211 +344,337 @@ mod tests {
     use std::{
         collections::HashMap,
         path::{Path, PathBuf},
+        sync::Mutex,
     };
 
-    use crate::{Filesystem, StorageDevice};
+    use objc2_disk_arbitration::{
+        kDAReturnBusy, kDAReturnError, kDAReturnNotMounted, kDAReturnNotPermitted,
+        kDAReturnNotPrivileged,
+    };
 
-    fn device(name: &str) -> StorageDevice {
-        StorageDevice {
-            name: name.to_owned(),
-            filesystem: Filesystem::Mounted(PathBuf::from(format!("/Volumes/{name}"))),
-            device_path: PathBuf::from(format!("/dev/disk-{name}")),
-            total_bytes: Some(64_000_000_000),
-            used_bytes: Some(1_000_000),
+    use crate::{DeviceEvent, Filesystem, MountError, UnmountError, diskarb};
+
+    /// A mounted, removable, FAT-formatted card.
+    fn description(bsd_name: &str) -> diskarb::Description {
+        diskarb::Description {
+            bsd_name: bsd_name.to_owned(),
+            volume_name: Some(String::from("EOS_DIGITAL")),
+            volume_path: Some(PathBuf::from("/Volumes/EOS_DIGITAL")),
+            volume_mountable: Some(true),
+            media_removable: Some(true),
+            media_ejectable: Some(true),
+            media_leaf: Some(true),
+            media_content: Some(String::from("DOS_FAT_32")),
+            media_size: Some(64_000_000_000),
         }
     }
 
-    fn unmounted(name: &str) -> StorageDevice {
-        StorageDevice {
-            filesystem: Filesystem::Unmounted,
-            total_bytes: None,
-            used_bytes: None,
-            ..device(name)
+    /// The same card attached without a mount point.
+    fn unmounted(bsd_name: &str) -> diskarb::Description {
+        diskarb::Description {
+            volume_path: None,
+            ..description(bsd_name)
         }
     }
 
-    /// Stands in for a probe path that outlives its device.
-    fn path_survives(_path: &Path) -> bool {
-        true
-    }
-
-    /// Hand-written `diskutil list -plist` output covering the shapes the
-    /// parser meets: an internal disk whose partitions carry no volume name, an
-    /// APFS container with keys the parser skips, a mounted and an unmounted
-    /// partition, an external GPT disk whose EFI System Partition carries a
-    /// volume name, and an unpartitioned disk formatted end to end.
-    const DISKUTIL_LISTING: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>AllDisksAndPartitions</key>
-    <array>
-        <dict>
-            <key>Content</key><string>GUID_partition_scheme</string>
-            <key>DeviceIdentifier</key><string>disk0</string>
-            <key>OSInternal</key><false/>
-            <key>Partitions</key>
-            <array>
-                <dict>
-                    <key>Content</key><string>Apple_APFS_ISC</string>
-                    <key>DeviceIdentifier</key><string>disk0s1</string>
-                    <key>Size</key><integer>524288000</integer>
-                </dict>
-                <dict>
-                    <key>Content</key><string>Apple_APFS</string>
-                    <key>DeviceIdentifier</key><string>disk0s2</string>
-                    <key>Size</key><integer>494384795648</integer>
-                </dict>
-            </array>
-            <key>Size</key><integer>500277792768</integer>
-        </dict>
-        <dict>
-            <key>APFSPhysicalStores</key>
-            <array>
-                <dict><key>DeviceIdentifier</key><string>disk0s2</string></dict>
-            </array>
-            <key>APFSVolumes</key>
-            <array>
-                <dict>
-                    <key>DeviceIdentifier</key><string>disk3s3</string>
-                    <key>Size</key><integer>1342177280</integer>
-                    <key>VolumeName</key><string>Recovery</string>
-                </dict>
-            </array>
-            <key>Content</key><string>Apple_APFS</string>
-            <key>DeviceIdentifier</key><string>disk3</string>
-            <key>OSInternal</key><true/>
-            <key>Partitions</key><array/>
-            <key>Size</key><integer>494384795648</integer>
-        </dict>
-        <dict>
-            <key>Content</key><string>FDisk_partition_scheme</string>
-            <key>DeviceIdentifier</key><string>disk4</string>
-            <key>OSInternal</key><false/>
-            <key>Partitions</key>
-            <array>
-                <dict>
-                    <key>Content</key><string>DOS_FAT_32</string>
-                    <key>DeviceIdentifier</key><string>disk4s1</string>
-                    <key>MountPoint</key><string>/Volumes/EOS_DIGITAL</string>
-                    <key>Size</key><integer>67108352</integer>
-                    <key>VolumeName</key><string>EOS_DIGITAL</string>
-                </dict>
-            </array>
-            <key>Size</key><integer>67108864</integer>
-        </dict>
-        <dict>
-            <key>Content</key><string>GUID_partition_scheme</string>
-            <key>DeviceIdentifier</key><string>disk5</string>
-            <key>OSInternal</key><false/>
-            <key>Partitions</key>
-            <array>
-                <dict>
-                    <key>Content</key><string>Microsoft Basic Data</string>
-                    <key>DeviceIdentifier</key><string>disk5s1</string>
-                    <key>Size</key><integer>65011712</integer>
-                    <key>VolumeName</key><string>NIKON_D850</string>
-                </dict>
-            </array>
-            <key>Size</key><integer>67108864</integer>
-        </dict>
-        <dict>
-            <key>Content</key><string>GUID_partition_scheme</string>
-            <key>DeviceIdentifier</key><string>disk6</string>
-            <key>OSInternal</key><false/>
-            <key>Partitions</key>
-            <array>
-                <dict>
-                    <key>Content</key><string>EFI</string>
-                    <key>DeviceIdentifier</key><string>disk6s1</string>
-                    <key>Size</key><integer>209715200</integer>
-                    <key>VolumeName</key><string>EFI</string>
-                </dict>
-                <dict>
-                    <key>Content</key><string>Microsoft Basic Data</string>
-                    <key>DeviceIdentifier</key><string>disk6s2</string>
-                    <key>Size</key><integer>63963136</integer>
-                    <key>VolumeName</key><string>LUMIX</string>
-                </dict>
-            </array>
-            <key>Size</key><integer>67108864</integer>
-        </dict>
-        <dict>
-            <key>Content</key><string></string>
-            <key>DeviceIdentifier</key><string>disk7</string>
-            <key>OSInternal</key><false/>
-            <key>Size</key><integer>33554432</integer>
-            <key>VolumeName</key><string>SUPERFLOPPY</string>
-        </dict>
-    </array>
-</dict>
-</plist>
-"#;
-
-    #[test]
-    fn candidates_are_the_unmounted_volumes_of_a_listing() {
-        let listing: super::Listing = plist::from_bytes(DISKUTIL_LISTING.as_bytes())
-            .expect("diskutil listing fixture does not parse");
-
-        let identifiers: Vec<&str> = super::unmounted_candidates(&listing)
-            .iter()
-            .map(|disk| disk.device_identifier.as_str())
-            .collect();
-
-        assert_eq!(identifiers, ["disk5s1", "disk6s2", "disk7"]);
-    }
-
-    #[test]
-    fn volume_missing_from_a_scan_is_carried_over_up_to_the_limit() {
-        let known = [device("EOS_DIGITAL")];
-        let mut misses = HashMap::new();
-
-        for miss in 1..=super::MISSED_SCAN_LIMIT {
-            let carried = super::carried_over(&known, &[], &mut misses, path_survives);
-            assert_eq!(carried.len(), 1, "dropped on missed scan {miss}");
-        }
-
-        let carried = super::carried_over(&known, &[], &mut misses, path_survives);
-        assert!(carried.is_empty());
-    }
-
-    #[test]
-    fn volume_back_in_a_scan_starts_its_missed_scan_count_over() {
-        let known = [device("EOS_DIGITAL")];
-        let mut misses = HashMap::new();
-
-        for _ in 1..=super::MISSED_SCAN_LIMIT {
-            super::carried_over(&known, &[], &mut misses, path_survives);
-        }
-        super::carried_over(&known, &known, &mut misses, path_survives);
-
-        for miss in 1..=super::MISSED_SCAN_LIMIT {
-            let carried = super::carried_over(&known, &[], &mut misses, path_survives);
-            assert_eq!(carried.len(), 1, "dropped on missed scan {miss}");
+    /// Media `DiskArbitration` reports as carrying no mountable filesystem.
+    fn unreadable(bsd_name: &str) -> diskarb::Description {
+        diskarb::Description {
+            volume_name: None,
+            volume_mountable: Some(false),
+            media_content: None,
+            ..unmounted(bsd_name)
         }
     }
 
     #[test]
-    fn volume_whose_directory_is_gone_is_not_carried_over() {
-        let known = [device("EOS_DIGITAL")];
-        let mut misses = HashMap::new();
+    fn mounted_card_keeps_its_volume_name_mount_point_and_device_node() {
+        let device = super::device(&description("disk4s1")).expect("mounted card dropped");
 
-        let carried = super::carried_over(&known, &[], &mut misses, |_| false);
-
-        assert!(carried.is_empty());
-        assert!(misses.is_empty());
+        assert_eq!(device.name, "EOS_DIGITAL");
+        assert_eq!(
+            device.filesystem,
+            Filesystem::Mounted(PathBuf::from("/Volumes/EOS_DIGITAL"))
+        );
+        assert_eq!(device.device_path, PathBuf::from("/dev/disk4s1"));
+        // Classification reports the media size and reads no filesystem, so a
+        // mount point that exists nowhere still carries a total.
+        assert_eq!(device.total_bytes, Some(64_000_000_000));
+        assert_eq!(device.used_bytes, None);
     }
 
     #[test]
-    fn unmounted_disk_is_carried_over_while_its_device_node_survives() {
-        let known = [unmounted("NIKON_D850")];
-        let device_node = Path::new("/dev/disk-NIKON_D850");
-        let mut misses = HashMap::new();
+    fn unmounted_card_carries_its_media_size_as_its_total() {
+        let device = super::device(&unmounted("disk4s1")).expect("unmounted card dropped");
 
-        let attached = super::carried_over(&known, &[], &mut misses, |path| path == device_node);
-        assert_eq!(attached.len(), 1);
+        assert_eq!(device.filesystem, Filesystem::Unmounted);
+        assert_eq!(device.total_bytes, Some(64_000_000_000));
+        assert_eq!(device.used_bytes, None);
+    }
 
-        let detached = super::carried_over(&known, &[], &mut misses, |_| false);
-        assert!(detached.is_empty());
+    #[test]
+    fn media_macos_cannot_read_is_surfaced_as_unreadable() {
+        let device = super::device(&unreadable("disk4s1")).expect("unreadable media dropped");
+
+        assert_eq!(device.filesystem, Filesystem::Unreadable);
+        assert_eq!(device.device_path, PathBuf::from("/dev/disk4s1"));
+    }
+
+    #[test]
+    fn card_without_a_volume_name_is_named_after_its_bsd_name() {
+        let described = diskarb::Description {
+            volume_name: None,
+            ..description("disk4s1")
+        };
+
+        let device = super::device(&described).expect("unlabelled card dropped");
+
+        assert_eq!(device.name, "Removable (disk4s1)");
+    }
+
+    #[test]
+    fn internal_disk_yields_no_device() {
+        let described = diskarb::Description {
+            media_removable: Some(false),
+            media_ejectable: Some(false),
+            ..description("disk1s1")
+        };
+
+        assert!(super::device(&described).is_none());
+    }
+
+    #[test]
+    fn partitioned_whole_disk_yields_no_device() {
+        let described = diskarb::Description {
+            media_leaf: Some(false),
+            ..description("disk4")
+        };
+
+        assert!(super::device(&described).is_none());
+    }
+
+    #[test]
+    fn efi_system_partition_yields_no_device() {
+        let described = diskarb::Description {
+            volume_name: Some(String::from("EFI")),
+            media_content: Some(String::from("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")),
+            ..description("disk4s1")
+        };
+
+        assert!(super::device(&described).is_none());
+    }
+
+    #[test]
+    fn microsoft_reserved_partition_yields_no_device() {
+        let described = diskarb::Description {
+            volume_name: None,
+            media_content: Some(String::from("E3C9E316-0B5C-4DB8-817D-F92DF00215AE")),
+            ..unreadable("disk4s1")
+        };
+
+        assert!(super::device(&described).is_none());
+    }
+
+    #[test]
+    fn unmounted_apfs_role_volume_yields_no_device() {
+        let described = diskarb::Description {
+            volume_name: Some(String::from("Recovery")),
+            media_content: Some(String::from(super::APFS_VOLUME_TYPE)),
+            ..unmounted("disk4s3")
+        };
+
+        assert!(super::device(&described).is_none());
+    }
+
+    #[test]
+    fn unmounted_apfs_volume_the_user_named_is_kept() {
+        let described = diskarb::Description {
+            volume_name: Some(String::from("Backup")),
+            media_content: Some(String::from(super::APFS_VOLUME_TYPE)),
+            ..unmounted("disk4s3")
+        };
+
+        let device = super::device(&described).expect("unmounted APFS card dropped");
+
+        assert_eq!(device.name, "Backup");
+        assert_eq!(device.filesystem, Filesystem::Unmounted);
+    }
+
+    #[test]
+    fn mounted_apfs_volume_is_kept() {
+        let described = diskarb::Description {
+            volume_name: Some(String::from("Backup")),
+            media_content: Some(String::from(super::APFS_VOLUME_TYPE)),
+            ..description("disk4s1")
+        };
+
+        let device = super::device(&described).expect("mounted APFS volume dropped");
+
+        assert_eq!(device.name, "Backup");
+        assert_eq!(
+            device.filesystem,
+            Filesystem::Mounted(PathBuf::from("/Volumes/EOS_DIGITAL"))
+        );
+    }
+
+    #[test]
+    fn card_labelled_efi_is_kept() {
+        let described = diskarb::Description {
+            volume_name: Some(String::from("EFI")),
+            media_content: Some(String::from("Windows_FAT_32")),
+            ..description("disk4s1")
+        };
+
+        let device = super::device(&described).expect("card labelled EFI dropped");
+
+        assert_eq!(device.name, "EFI");
+    }
+
+    #[test]
+    fn disk_nodes_are_the_buffered_ones_carrying_a_unit_and_its_slices() {
+        assert!(super::is_disk_node("disk4"));
+        assert!(super::is_disk_node("disk4s1"));
+        assert!(super::is_disk_node("disk3s1s1"));
+
+        assert!(!super::is_disk_node("rdisk4s1"));
+        assert!(!super::is_disk_node("null"));
+        assert!(!super::is_disk_node("disk"));
+        assert!(!super::is_disk_node("disks1"));
+    }
+
+    #[test]
+    fn appearing_card_is_reported_inserted_and_joins_the_known_set() {
+        let known = Mutex::new(HashMap::new());
+
+        let event = super::reported(&known, diskarb::Event::Appeared(unmounted("disk4s1")))
+            .expect("appearing card reported nothing");
+
+        assert!(matches!(event, DeviceEvent::Inserted(device) if device.name == "EOS_DIGITAL"));
+        assert!(
+            known
+                .lock()
+                .expect("known set poisoned")
+                .contains_key("disk4s1")
+        );
+    }
+
+    #[test]
+    fn card_that_gains_a_mount_point_is_reported_mounted() {
+        let known = Mutex::new(HashMap::new());
+        super::reported(&known, diskarb::Event::Appeared(unmounted("disk4s1")));
+
+        let event = super::reported(&known, diskarb::Event::Changed(description("disk4s1")))
+            .expect("settling mount reported nothing");
+
+        assert!(matches!(
+            event,
+            DeviceEvent::Mounted { mount_point, .. }
+                if mount_point == Path::new("/Volumes/EOS_DIGITAL")
+        ));
+    }
+
+    #[test]
+    fn apfs_card_losing_its_mount_point_is_reported_unmounted() {
+        let known = Mutex::new(HashMap::new());
+        let apfs = |bsd_name: &str| diskarb::Description {
+            volume_name: Some(String::from("Backup")),
+            media_content: Some(String::from(super::APFS_VOLUME_TYPE)),
+            ..description(bsd_name)
+        };
+        super::reported(&known, diskarb::Event::Appeared(apfs("disk4s1")));
+
+        let unmounted = diskarb::Description {
+            volume_path: None,
+            ..apfs("disk4s1")
+        };
+        let event = super::reported(&known, diskarb::Event::Changed(unmounted))
+            .expect("unmounting APFS card reported nothing");
+
+        assert!(matches!(
+            event,
+            DeviceEvent::Unmounted { device_path } if device_path == Path::new("/dev/disk4s1")
+        ));
+    }
+
+    #[test]
+    fn detached_card_is_reported_removed_and_leaves_the_known_set() {
+        let known = Mutex::new(HashMap::new());
+        super::reported(&known, diskarb::Event::Appeared(unmounted("disk4s1")));
+
+        let event = super::reported(
+            &known,
+            diskarb::Event::Disappeared {
+                bsd_name: String::from("disk4s1"),
+            },
+        )
+        .expect("detached card reported nothing");
+
+        assert!(matches!(
+            event,
+            DeviceEvent::Removed { device_path } if device_path == Path::new("/dev/disk4s1")
+        ));
+        assert!(known.lock().expect("known set poisoned").is_empty());
+    }
+
+    #[test]
+    fn disk_the_watch_never_reported_disappears_silently() {
+        let known = Mutex::new(HashMap::new());
+
+        let event = super::reported(
+            &known,
+            diskarb::Event::Disappeared {
+                bsd_name: String::from("disk0"),
+            },
+        );
+
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn dissented_mount_statuses_map_to_mount_errors() {
+        assert!(matches!(
+            super::mount_error(kDAReturnBusy),
+            MountError::AlreadyMounted
+        ));
+        assert!(matches!(
+            super::mount_error(kDAReturnNotPermitted),
+            MountError::PermissionDenied
+        ));
+        assert!(matches!(
+            super::mount_error(kDAReturnNotPrivileged),
+            MountError::PermissionDenied
+        ));
+        assert!(matches!(
+            super::mount_error(kDAReturnError),
+            MountError::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn dissented_unmount_statuses_map_to_unmount_errors() {
+        assert!(matches!(
+            super::unmount_error(kDAReturnBusy),
+            UnmountError::Busy
+        ));
+        assert!(matches!(
+            super::unmount_error(super::UNIX_BUSY),
+            UnmountError::Busy
+        ));
+        assert!(matches!(
+            super::unmount_error(kDAReturnNotPermitted),
+            UnmountError::PermissionDenied
+        ));
+        assert!(matches!(
+            super::unmount_error(kDAReturnNotPrivileged),
+            UnmountError::PermissionDenied
+        ));
+        assert!(matches!(
+            super::unmount_error(kDAReturnNotMounted),
+            UnmountError::NotMounted
+        ));
+        assert!(matches!(
+            super::unmount_error(kDAReturnError),
+            UnmountError::Failed(_)
+        ));
     }
 }

@@ -1,5 +1,5 @@
-//! Win32 volume enumeration: the crate's FFI layer, and the only module in the
-//! workspace that contains `unsafe`.
+//! Win32 volume enumeration: the Windows FFI layer, and the only Windows
+//! module in the workspace that contains `unsafe`.
 //!
 //! Drives are enumerated by letter rather than by volume GUID, because the
 //! mount manager answers for a letter without reading the media behind it: a
