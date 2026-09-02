@@ -123,7 +123,9 @@ pub enum DeviceEvent {
     /// Block device appeared (USB plugged in). May already be mounted on
     /// platforms that auto-mount (macOS, Windows).
     Inserted(StorageDevice),
-    /// Filesystem mounted — mount point and disk space now available.
+    /// Filesystem mounted: the mount point is known. Disk space is what the
+    /// backend could read without touching the filesystem, so a rescan may
+    /// refine it.
     Mounted {
         device_path: PathBuf,
         mount_point: PathBuf,

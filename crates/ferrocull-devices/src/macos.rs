@@ -26,20 +26,27 @@ use crate::{
 /// Directory holding one node per BSD disk and partition.
 const DEV_DIR: &str = "/dev";
 
-/// `DiskArbitration`'s status for a request against a disk something else is
-/// holding, and the one it reports for a mount of a disk already mounted.
-const BUSY: i32 = kDAReturnBusy;
-
-/// `DiskArbitration`'s statuses for a request the caller may not make.
-const NOT_PERMITTED: i32 = kDAReturnNotPermitted;
-const NOT_PRIVILEGED: i32 = kDAReturnNotPrivileged;
-
-/// `DiskArbitration`'s status for an unmount of a disk that is not mounted.
-const NOT_MOUNTED: i32 = kDAReturnNotMounted;
+/// The status a filesystem returns when it refuses an unmount because files are
+/// still open on it. `DiskArbitration` passes the Mach encoding of the POSIX
+/// error through untouched, as `err_sub(3) | EBUSY`, rather than translating it
+/// into `kDAReturnBusy`.
+const UNIX_BUSY: i32 = (3 << 14) | nix::libc::EBUSY;
 
 /// `DiskArbitration` reports a GPT partition's type as its GUID, and every
 /// volume of an APFS container carries this one.
 const APFS_VOLUME_TYPE: &str = "41504653-0000-11AA-AA11-00306543ECAC";
+
+/// GPT partition types that never carry media a user shoots to: the EFI System
+/// Partition, the Microsoft Reserved partition and Linux swap.
+const RESERVED_PARTITION_TYPES: &[&str] = &[
+    "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+    "E3C9E316-0B5C-4DB8-817D-F92DF00215AE",
+    "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F",
+];
+
+/// The volume names macOS gives the role volumes of an APFS container, which it
+/// mounts and unmounts on its own beside the volume the user sees.
+const APFS_ROLE_VOLUMES: &[&str] = &["Preboot", "Recovery", "VM", "Update"];
 
 /// Every removable card `DiskArbitration` describes, mounted or not.
 ///
@@ -62,7 +69,29 @@ pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
     let descriptions =
         diskarb::describe(&bsd_names).map_err(|error| ScanError::Backend(error.to_string()))?;
 
-    Ok(descriptions.iter().filter_map(device).collect())
+    Ok(descriptions
+        .iter()
+        .filter_map(device)
+        .map(with_disk_space)
+        .collect())
+}
+
+/// `device` with the capacity of a mounted filesystem read off the mount point.
+///
+/// The read is a blocking `statvfs`, so it happens here rather than in
+/// [`device`], which the watcher calls on the `DiskArbitration` callback queue.
+fn with_disk_space(device: StorageDevice) -> StorageDevice {
+    let Filesystem::Mounted(mount_point) = &device.filesystem else {
+        return device;
+    };
+
+    let (total_bytes, used_bytes) = crate::statvfs::disk_space(mount_point).unzip();
+
+    StorageDevice {
+        total_bytes,
+        used_bytes,
+        ..device
+    }
 }
 
 /// Whether `name` is a BSD disk node: `disk` followed by the unit number and
@@ -90,38 +119,44 @@ fn device(description: &diskarb::Description) -> Option<StorageDevice> {
         return None;
     }
 
-    // The EFI System Partition of a GPT card. Filtering on the partition type
-    // rather than on the volume name keeps a card the user labelled `EFI` in
-    // the list.
-    if description.media_content.as_deref() == Some("EFI") {
-        return None;
-    }
-
-    // An APFS container holds Preboot, Recovery, Update and VM beside the
-    // volume the user sees; macOS mounts that one and leaves the rest, so an
-    // APFS volume earns a place in the list only once it carries a mount point.
-    if description.media_content.as_deref() == Some(APFS_VOLUME_TYPE)
-        && description.volume_path.is_none()
+    // A partition reserved by the partition table holds no media. Filtering on
+    // the partition type rather than on the volume name keeps a card the user
+    // labelled `EFI` in the list.
+    if let Some(media_content) = description.media_content.as_deref()
+        && RESERVED_PARTITION_TYPES.contains(&media_content)
     {
         return None;
     }
 
-    let filesystem = filesystem(description);
-    let (total_bytes, used_bytes) = match &filesystem {
-        Filesystem::Mounted(mount_point) => crate::statvfs::disk_space(mount_point).unzip(),
-        Filesystem::Unmounted | Filesystem::Unreadable => (description.media_size, None),
-    };
+    if is_unmounted_apfs_role_volume(description) {
+        return None;
+    }
 
     Some(StorageDevice {
         name: description
             .volume_name
             .clone()
             .unwrap_or_else(|| unlabelled_name(&description.bsd_name)),
-        filesystem,
+        filesystem: filesystem(description),
         device_path: device_path(&description.bsd_name),
-        total_bytes,
-        used_bytes,
+        total_bytes: description.media_size,
+        used_bytes: None,
     })
+}
+
+/// Whether the description is one of the APFS volumes macOS keeps beside the
+/// volume the user sees, currently unmounted.
+///
+/// `DiskArbitration` publishes no role for an APFS volume, so the name is the
+/// only discriminator: a user volume named exactly `Recovery` disappears from
+/// the list while it is unmounted, and comes back once macOS mounts it.
+fn is_unmounted_apfs_role_volume(description: &diskarb::Description) -> bool {
+    description.media_content.as_deref() == Some(APFS_VOLUME_TYPE)
+        && description.volume_path.is_none()
+        && description
+            .volume_name
+            .as_deref()
+            .is_some_and(|name| APFS_ROLE_VOLUMES.contains(&name))
 }
 
 /// Where the described media's filesystem stands. Media whose filesystem macOS
@@ -197,8 +232,9 @@ pub(crate) async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchE
 ///
 /// A disk `DiskArbitration` reports that is no card, one of the internal disks
 /// or an APFS snapshot, reads the same as one that detached: it leaves the
-/// known set, and only a disk that was in it reports a removal. Describing the
-/// disk reads its free space, so it happens before the map is locked.
+/// known set, and only a disk that was in it reports a removal. Classifying the
+/// disk touches no filesystem, so this runs on the `DiskArbitration` callback
+/// queue without holding up the events behind it.
 fn reported(
     known: &Mutex<HashMap<String, StorageDevice>>,
     report: diskarb::Event,
@@ -241,9 +277,9 @@ pub(crate) fn mount(
 
     let description = diskarb::mount(disk).map_err(|error| match error {
         diskarb::Error::Dissented(status) => mount_error(status),
-        diskarb::Error::NoSession
-        | diskarb::Error::NoSuchDisk(_)
-        | diskarb::Error::Undescribed(_) => MountError::Failed(error.to_string()),
+        diskarb::Error::NoSession | diskarb::Error::Undescribed(_) => {
+            MountError::Failed(error.to_string())
+        }
     })?;
 
     description.volume_path.ok_or_else(|| {
@@ -254,10 +290,15 @@ pub(crate) fn mount(
 }
 
 /// `MountError` for the status `DiskArbitration` dissented a mount with.
+#[expect(
+    non_upper_case_globals,
+    reason = "the DiskArbitration statuses are matched under the names the framework exports"
+)]
 fn mount_error(status: i32) -> MountError {
     match status {
-        BUSY => MountError::AlreadyMounted,
-        NOT_PERMITTED | NOT_PRIVILEGED => MountError::PermissionDenied,
+        // A disk that is already mounted is one something else is holding.
+        kDAReturnBusy => MountError::AlreadyMounted,
+        kDAReturnNotPermitted | kDAReturnNotPrivileged => MountError::PermissionDenied,
         _ => MountError::Failed(format!(
             "DiskArbitration refused the mount with status {status}"
         )),
@@ -276,18 +317,22 @@ pub(crate) fn unmount(
     )
     .map_err(|error| match error {
         diskarb::Error::Dissented(status) => unmount_error(status),
-        diskarb::Error::NoSession
-        | diskarb::Error::NoSuchDisk(_)
-        | diskarb::Error::Undescribed(_) => UnmountError::Failed(error.to_string()),
+        diskarb::Error::NoSession | diskarb::Error::Undescribed(_) => {
+            UnmountError::Failed(error.to_string())
+        }
     })
 }
 
 /// `UnmountError` for the status `DiskArbitration` dissented an unmount with.
+#[expect(
+    non_upper_case_globals,
+    reason = "the DiskArbitration statuses are matched under the names the framework exports"
+)]
 fn unmount_error(status: i32) -> UnmountError {
     match status {
-        BUSY => UnmountError::Busy,
-        NOT_PERMITTED | NOT_PRIVILEGED => UnmountError::PermissionDenied,
-        NOT_MOUNTED => UnmountError::NotMounted,
+        kDAReturnBusy | UNIX_BUSY => UnmountError::Busy,
+        kDAReturnNotPermitted | kDAReturnNotPrivileged => UnmountError::PermissionDenied,
+        kDAReturnNotMounted => UnmountError::NotMounted,
         _ => UnmountError::Failed(format!(
             "DiskArbitration refused the unmount with status {status}"
         )),
@@ -352,6 +397,10 @@ mod tests {
             Filesystem::Mounted(PathBuf::from("/Volumes/EOS_DIGITAL"))
         );
         assert_eq!(device.device_path, PathBuf::from("/dev/disk4s1"));
+        // Classification reports the media size and reads no filesystem, so a
+        // mount point that exists nowhere still carries a total.
+        assert_eq!(device.total_bytes, Some(64_000_000_000));
+        assert_eq!(device.used_bytes, None);
     }
 
     #[test]
@@ -408,7 +457,7 @@ mod tests {
     fn efi_system_partition_yields_no_device() {
         let described = diskarb::Description {
             volume_name: Some(String::from("EFI")),
-            media_content: Some(String::from("EFI")),
+            media_content: Some(String::from("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")),
             ..description("disk4s1")
         };
 
@@ -416,7 +465,18 @@ mod tests {
     }
 
     #[test]
-    fn unmounted_apfs_volume_yields_no_device() {
+    fn microsoft_reserved_partition_yields_no_device() {
+        let described = diskarb::Description {
+            volume_name: None,
+            media_content: Some(String::from("E3C9E316-0B5C-4DB8-817D-F92DF00215AE")),
+            ..unreadable("disk4s1")
+        };
+
+        assert!(super::device(&described).is_none());
+    }
+
+    #[test]
+    fn unmounted_apfs_role_volume_yields_no_device() {
         let described = diskarb::Description {
             volume_name: Some(String::from("Recovery")),
             media_content: Some(String::from(super::APFS_VOLUME_TYPE)),
@@ -424,6 +484,20 @@ mod tests {
         };
 
         assert!(super::device(&described).is_none());
+    }
+
+    #[test]
+    fn unmounted_apfs_volume_the_user_named_is_kept() {
+        let described = diskarb::Description {
+            volume_name: Some(String::from("Backup")),
+            media_content: Some(String::from(super::APFS_VOLUME_TYPE)),
+            ..unmounted("disk4s3")
+        };
+
+        let device = super::device(&described).expect("unmounted APFS card dropped");
+
+        assert_eq!(device.name, "Backup");
+        assert_eq!(device.filesystem, Filesystem::Unmounted);
     }
 
     #[test]
@@ -500,6 +574,29 @@ mod tests {
     }
 
     #[test]
+    fn apfs_card_losing_its_mount_point_is_reported_unmounted() {
+        let known = Mutex::new(HashMap::new());
+        let apfs = |bsd_name: &str| diskarb::Description {
+            volume_name: Some(String::from("Backup")),
+            media_content: Some(String::from(super::APFS_VOLUME_TYPE)),
+            ..description(bsd_name)
+        };
+        super::reported(&known, diskarb::Event::Appeared(apfs("disk4s1")));
+
+        let unmounted = diskarb::Description {
+            volume_path: None,
+            ..apfs("disk4s1")
+        };
+        let event = super::reported(&known, diskarb::Event::Changed(unmounted))
+            .expect("unmounting APFS card reported nothing");
+
+        assert!(matches!(
+            event,
+            DeviceEvent::Unmounted { device_path } if device_path == Path::new("/dev/disk4s1")
+        ));
+    }
+
+    #[test]
     fn detached_card_is_reported_removed_and_leaves_the_known_set() {
         let known = Mutex::new(HashMap::new());
         super::reported(&known, diskarb::Event::Appeared(unmounted("disk4s1")));
@@ -557,6 +654,10 @@ mod tests {
     fn dissented_unmount_statuses_map_to_unmount_errors() {
         assert!(matches!(
             super::unmount_error(kDAReturnBusy),
+            UnmountError::Busy
+        ));
+        assert!(matches!(
+            super::unmount_error(super::UNIX_BUSY),
             UnmountError::Busy
         ));
         assert!(matches!(

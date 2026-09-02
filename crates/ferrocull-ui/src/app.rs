@@ -12,6 +12,7 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::Arc,
+    time::Duration,
 };
 
 use ferrocull_core::{
@@ -1140,7 +1141,7 @@ fn subscription(_state: &Ferrocull) -> Subscription<Message> {
         KeyboardEvent::ModifiersChanged(modifiers) => Some(Message::ModifiersChanged(modifiers)),
         KeyboardEvent::KeyReleased { .. } => None,
     });
-    let tick = iced::time::every(std::time::Duration::from_mins(1)).map(|_| Message::Tick);
+    let tick = iced::time::every(Duration::from_mins(1)).map(|_| Message::Tick);
     let devices = Subscription::run(device_events);
     let window = iced::window::events().filter_map(|(id, event)| match event {
         iced::window::Event::Opened { .. } => Some(Message::WindowOpened(id)),
@@ -1150,9 +1151,13 @@ fn subscription(_state: &Ferrocull) -> Subscription<Message> {
     Subscription::batch([keys, tick, devices, window])
 }
 
+/// How long the device stream waits for another event before taking a burst as
+/// over.
+const DEVICE_EVENT_QUIET_WINDOW: Duration = Duration::from_millis(200);
+
 /// Subscription that turns storage hotplug events into source rescans,
 /// replacing the periodic poll. The device watcher emits an event on every
-/// plug, unplug, mount, or unmount; each collapses into a single
+/// plug, unplug, mount, or unmount, and a burst of them collapses into a single
 /// `RefreshSources`. The rescan reads the authoritative, per-drive-deduped
 /// device list, so the event payload itself is unused — only the
 /// "something changed" signal matters.
@@ -1170,6 +1175,8 @@ fn device_events() -> impl iced::futures::Stream<Item = Message> {
             });
 
             while rx.recv().await.is_some() {
+                absorb_burst(&mut rx).await;
+
                 if output
                     .send(Message::Sources(sources_msg::Message::RefreshSources))
                     .await
@@ -1180,6 +1187,20 @@ fn device_events() -> impl iced::futures::Stream<Item = Message> {
             }
         },
     )
+}
+
+/// Drops the device events that keep arriving right behind the one already
+/// received, returning once the channel has been quiet for
+/// `DEVICE_EVENT_QUIET_WINDOW` or has closed.
+///
+/// One card insertion reaches the watcher as several events, the appearance
+/// followed by the mount that settles about a hundred milliseconds later, and
+/// the watch replays every attached card when it starts. Absorbing the burst
+/// leaves one rescan instead of one per event.
+async fn absorb_burst(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<ferrocull_devices::DeviceEvent>,
+) {
+    while let Ok(Some(_)) = tokio::time::timeout(DEVICE_EVENT_QUIET_WINDOW, rx.recv()).await {}
 }
 
 fn update(state: &mut Ferrocull, message: Message) -> Task<Message> {

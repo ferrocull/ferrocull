@@ -20,7 +20,7 @@ use std::{
 
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CFURLPathStyle,
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL,
 };
 use objc2_disk_arbitration::{
     DADisk, DADissenter, DARegisterDiskAppearedCallback, DARegisterDiskDescriptionChangedCallback,
@@ -30,7 +30,7 @@ use objc2_disk_arbitration::{
     kDADiskDescriptionMediaRemovableKey, kDADiskDescriptionMediaSizeKey,
     kDADiskDescriptionVolumeMountableKey, kDADiskDescriptionVolumeNameKey,
     kDADiskDescriptionVolumePathKey, kDADiskDescriptionWatchVolumePath, kDADiskMountOptionDefault,
-    kDADiskUnmountOptionDefault, kDADiskUnmountOptionForce, kDAReturnSuccess,
+    kDADiskUnmountOptionDefault, kDADiskUnmountOptionForce,
 };
 
 /// Label of the serial queue `DiskArbitration` delivers callbacks on.
@@ -55,8 +55,6 @@ pub(crate) struct Description {
 pub(crate) enum Error {
     #[error("cannot open a DiskArbitration session")]
     NoSession,
-    #[error("DiskArbitration does not know a disk named {0}")]
-    NoSuchDisk(String),
     #[error("DiskArbitration completed the request on {0} but described nothing")]
     Undescribed(String),
     #[error("DiskArbitration refused with status {0}")]
@@ -76,9 +74,9 @@ pub(crate) enum Event {
 /// The boxed closure a running watch dispatches its events to.
 type Handler = Box<dyn Fn(Event) + Send>;
 
-/// What a mount request reports: the description of the disk once the mount
-/// landed, or the status `DiskArbitration` dissented the request with.
-type MountCompletion = Result<Option<Description>, i32>;
+/// What a mount or an unmount request reports: the description of the disk once
+/// the request landed, or the status `DiskArbitration` dissented it with.
+type Completion = Result<Option<Description>, i32>;
 
 /// Descriptions of the named BSD disks, skipping any DA cannot describe.
 ///
@@ -92,8 +90,7 @@ pub(crate) fn describe(bsd_names: &[String]) -> Result<Vec<Description>, Error> 
 
     Ok(bsd_names
         .iter()
-        .filter_map(|bsd_name| disk(&session, bsd_name))
-        .filter_map(|disk| description(&disk))
+        .filter_map(|bsd_name| description(&disk(&session, bsd_name)))
         .collect())
 }
 
@@ -102,24 +99,15 @@ pub(crate) fn describe(bsd_names: &[String]) -> Result<Vec<Description>, Error> 
 /// `DiskArbitration` picks the mount point and the filesystem driver itself.
 pub(crate) fn mount(bsd_name: &str) -> Result<Description, Error> {
     let issue = |disk: &DADisk, context: *mut c_void| {
-        // SAFETY: `mount_completed` has the signature DADiskMountCallback
-        // requires, and `context` addresses the sender it expects, which
-        // outlives the request.
+        // SAFETY: `completed` has the signature DADiskMountCallback requires,
+        // reads its context back as the `mpsc::Sender<Completion>` `request`
+        // hands it, and that sender outlives the request.
         unsafe {
-            disk.mount(
-                None,
-                kDADiskMountOptionDefault,
-                Some(mount_completed),
-                context,
-            );
+            disk.mount(None, kDADiskMountOptionDefault, Some(completed), context);
         }
     };
 
-    // SAFETY: `mount_completed` reads its context back as a
-    // `mpsc::Sender<MountCompletion>`, the answer type of this request.
-    let completion: MountCompletion = unsafe { request(bsd_name, issue) }?;
-
-    match completion {
+    match request(bsd_name, issue)? {
         Ok(Some(description)) => Ok(description),
         Ok(None) => Err(Error::Undescribed(bsd_name.to_owned())),
         Err(status) => Err(Error::Dissented(status)),
@@ -135,20 +123,16 @@ pub(crate) fn unmount(bsd_name: &str, force: bool) -> Result<(), Error> {
     };
 
     let issue = |disk: &DADisk, context: *mut c_void| {
-        // SAFETY: `unmount_completed` has the signature DADiskUnmountCallback
-        // requires, and `context` addresses the sender it expects, which
-        // outlives the request.
-        unsafe { disk.unmount(options, Some(unmount_completed), context) };
+        // SAFETY: `completed` has the signature DADiskUnmountCallback requires,
+        // reads its context back as the `mpsc::Sender<Completion>` `request`
+        // hands it, and that sender outlives the request.
+        unsafe { disk.unmount(options, Some(completed), context) };
     };
 
-    // SAFETY: `unmount_completed` reads its context back as a
-    // `mpsc::Sender<i32>`, the answer type of this request.
-    let status: i32 = unsafe { request(bsd_name, issue) }?;
-
-    if status == kDAReturnSuccess {
-        Ok(())
-    } else {
-        Err(Error::Dissented(status))
+    // An unmount leaves nothing to describe, so only the status matters.
+    match request(bsd_name, issue)? {
+        Ok(_) => Ok(()),
+        Err(status) => Err(Error::Dissented(status)),
     }
 }
 
@@ -337,20 +321,21 @@ unsafe extern "C-unwind" fn disk_changed(
     handler(Event::Changed(description));
 }
 
-/// Answers a [`mount`] request with the description of the disk it landed on,
-/// or with the status `DiskArbitration` dissented the request with.
+/// Answers a [`mount`] or an [`unmount`] request with the description of the
+/// disk the request landed on, or with the status `DiskArbitration` dissented
+/// the request with.
 ///
 /// # Safety
 ///
 /// `context` must address the [`mpsc::Sender`] the request was issued with.
-unsafe extern "C-unwind" fn mount_completed(
+unsafe extern "C-unwind" fn completed(
     disk: NonNull<DADisk>,
     dissenter: *const DADissenter,
     context: *mut c_void,
 ) {
     // SAFETY: `context` addresses the sender on the requesting thread's stack,
     // which stays there until this answer arrives.
-    let sender = unsafe { &*context.cast::<mpsc::Sender<MountCompletion>>() };
+    let sender = unsafe { &*context.cast::<mpsc::Sender<Completion>>() };
 
     let completion = if dissenter.is_null() {
         // SAFETY: DiskArbitration hands the callback a live disk for the
@@ -367,34 +352,6 @@ unsafe extern "C-unwind" fn mount_completed(
     // A closed channel means the requesting thread is gone, leaving nothing to
     // answer.
     sender.send(completion).ok();
-}
-
-/// Answers an [`unmount`] request with the status `DiskArbitration` completed it
-/// with.
-///
-/// # Safety
-///
-/// `context` must address the [`mpsc::Sender`] the request was issued with.
-unsafe extern "C-unwind" fn unmount_completed(
-    _disk: NonNull<DADisk>,
-    dissenter: *const DADissenter,
-    context: *mut c_void,
-) {
-    // SAFETY: `context` addresses the sender on the requesting thread's stack,
-    // which stays there until this answer arrives.
-    let sender = unsafe { &*context.cast::<mpsc::Sender<i32>>() };
-
-    let completed = if dissenter.is_null() {
-        kDAReturnSuccess
-    } else {
-        // SAFETY: a non-null dissenter is the one DiskArbitration hands the
-        // callback, live for the duration of the call.
-        unsafe { status(dissenter) }
-    };
-
-    // A closed channel means the requesting thread is gone, leaving nothing to
-    // answer.
-    sender.send(completed).ok();
 }
 
 /// The status a non-null dissenter carries.
@@ -418,26 +375,21 @@ unsafe fn status(dissenter: *const DADissenter) -> i32 {
 /// request runs against a session carrying a serial queue of its own. `issue`
 /// receives the disk and a context pointer addressing the sending half of the
 /// answer channel, which lives on this thread's stack until the answer arrives.
-///
-/// # Safety
-///
-/// The callback `issue` registers must read its context back as an
-/// `mpsc::Sender<T>`, the type this call sends the answer through.
-unsafe fn request<T: Send>(
-    bsd_name: &str,
-    issue: impl FnOnce(&DADisk, *mut c_void),
-) -> Result<T, Error> {
+/// Registering a callback against that pointer is itself an unsafe call, so the
+/// obligation to read it back as an `mpsc::Sender<Completion>` is discharged
+/// where `issue` is written.
+fn request(bsd_name: &str, issue: impl FnOnce(&DADisk, *mut c_void)) -> Result<Completion, Error> {
     // SAFETY: the call takes only an allocator, and `None` asks for the
     // default one.
     let session = unsafe { DASession::new(None) }.ok_or(Error::NoSession)?;
-    let disk = disk(&session, bsd_name).ok_or_else(|| Error::NoSuchDisk(bsd_name.to_owned()))?;
+    let disk = disk(&session, bsd_name);
 
     let queue = DispatchQueue::new(QUEUE_LABEL, None);
     // SAFETY: `queue` is a serial queue this call owns and keeps alive for as
     // long as the session is scheduled on it.
     unsafe { session.set_dispatch_queue(Some(&queue)) };
 
-    let (sender, receiver) = mpsc::channel::<T>();
+    let (sender, receiver) = mpsc::channel::<Completion>();
     issue(&disk, (&raw const sender).cast::<c_void>().cast_mut());
 
     let answer = receiver
@@ -456,9 +408,11 @@ unsafe fn request<T: Send>(
     Ok(answer)
 }
 
-/// The disk `DiskArbitration` knows under `bsd_name`, or `None` when it knows
-/// none.
-fn disk(session: &DASession, bsd_name: &str) -> Option<CFRetained<DADisk>> {
+/// The disk `DiskArbitration` knows under `bsd_name`.
+///
+/// `DADiskCreateFromBSDName` answers for any name; a name no medium carries
+/// yields a disk that describes nothing.
+fn disk(session: &DASession, bsd_name: &str) -> CFRetained<DADisk> {
     let name = CString::new(bsd_name).expect("BSD disk name with an interior NUL");
     let pointer: NonNull<c_char> =
         NonNull::new(name.as_ptr().cast_mut()).expect("null pointer from a CString");
@@ -466,6 +420,7 @@ fn disk(session: &DASession, bsd_name: &str) -> Option<CFRetained<DADisk>> {
     // SAFETY: `pointer` addresses `name`, a NUL-terminated C string that
     // outlives the call, which only reads through it.
     unsafe { DADisk::from_bsd_name(None, session, pointer) }
+        .expect("DADiskCreateFromBSDName returned null")
 }
 
 /// The `DiskArbitration` description of `disk`, or `None` when DA describes it
@@ -473,18 +428,23 @@ fn disk(session: &DASession, bsd_name: &str) -> Option<CFRetained<DADisk>> {
 fn description(disk: &DADisk) -> Option<Description> {
     // SAFETY: `disk` is a live DADisk, the only state the call reads.
     let dictionary = unsafe { disk.description() }?;
+
+    // SAFETY: DiskArbitration builds its descriptions with CFString keys, and
+    // every value is a Core Foundation object.
+    let dictionary = unsafe { dictionary.cast_unchecked::<CFString, CFType>() };
+
     let keys = Keys::new();
 
     Some(Description {
-        bsd_name: string_value(&dictionary, keys.bsd_name).or_else(|| bsd_name(disk))?,
-        volume_name: string_value(&dictionary, keys.volume_name),
-        volume_path: path_value(&dictionary, keys.volume_path),
-        volume_mountable: bool_value(&dictionary, keys.volume_mountable),
-        media_removable: bool_value(&dictionary, keys.media_removable),
-        media_ejectable: bool_value(&dictionary, keys.media_ejectable),
-        media_leaf: bool_value(&dictionary, keys.media_leaf),
-        media_content: string_value(&dictionary, keys.media_content),
-        media_size: u64_value(&dictionary, keys.media_size),
+        bsd_name: string_value(dictionary, keys.bsd_name).or_else(|| bsd_name(disk))?,
+        volume_name: string_value(dictionary, keys.volume_name),
+        volume_path: path_value(dictionary, keys.volume_path),
+        volume_mountable: bool_value(dictionary, keys.volume_mountable),
+        media_removable: bool_value(dictionary, keys.media_removable),
+        media_ejectable: bool_value(dictionary, keys.media_ejectable),
+        media_leaf: bool_value(dictionary, keys.media_leaf),
+        media_content: string_value(dictionary, keys.media_content),
+        media_size: u64_value(dictionary, keys.media_size),
     })
 }
 
@@ -538,40 +498,25 @@ impl Keys {
     }
 }
 
-/// The value a description holds under `key`, or `None` when it holds none.
-fn value<'a>(description: &'a CFDictionary, key: &CFString) -> Option<&'a CFType> {
-    let key = std::ptr::from_ref(key).cast::<c_void>();
-
-    // SAFETY: DiskArbitration builds its descriptions with CFString keys and
-    // the matching key callbacks, so the dictionary can hash and compare `key`.
-    let value = unsafe { description.value(key) };
-
-    if value.is_null() {
-        return None;
-    }
-
-    // SAFETY: a non-null value out of a description is a live Core Foundation
-    // object the dictionary owns, so it lives as long as `description` does.
-    Some(unsafe { &*value.cast::<CFType>() })
-}
-
 /// The string a description holds under `key`.
-fn string_value(description: &CFDictionary, key: &CFString) -> Option<String> {
-    value(description, key)?
-        .downcast_ref::<CFString>()
-        .map(ToString::to_string)
+fn string_value(description: &CFDictionary<CFString, CFType>, key: &CFString) -> Option<String> {
+    let value = description.get(key)?;
+
+    value.downcast_ref::<CFString>().map(ToString::to_string)
 }
 
 /// The boolean a description holds under `key`.
-fn bool_value(description: &CFDictionary, key: &CFString) -> Option<bool> {
-    value(description, key)?
-        .downcast_ref::<CFBoolean>()
-        .map(CFBoolean::as_bool)
+fn bool_value(description: &CFDictionary<CFString, CFType>, key: &CFString) -> Option<bool> {
+    let value = description.get(key)?;
+
+    value.downcast_ref::<CFBoolean>().map(CFBoolean::as_bool)
 }
 
 /// The unsigned number a description holds under `key`.
-fn u64_value(description: &CFDictionary, key: &CFString) -> Option<u64> {
-    value(description, key)?
+fn u64_value(description: &CFDictionary<CFString, CFType>, key: &CFString) -> Option<u64> {
+    let value = description.get(key)?;
+
+    value
         .downcast_ref::<CFNumber>()?
         .as_i64()
         .and_then(|size| u64::try_from(size).ok())
@@ -579,11 +524,10 @@ fn u64_value(description: &CFDictionary, key: &CFString) -> Option<u64> {
 
 /// The POSIX path of the URL a description holds under `key`, which comes back
 /// without a trailing separator.
-fn path_value(description: &CFDictionary, key: &CFString) -> Option<PathBuf> {
-    value(description, key)?
-        .downcast_ref::<CFURL>()?
-        .file_system_path(CFURLPathStyle::CFURLPOSIXPathStyle)
-        .map(|path| PathBuf::from(path.to_string()))
+fn path_value(description: &CFDictionary<CFString, CFType>, key: &CFString) -> Option<PathBuf> {
+    let value = description.get(key)?;
+
+    value.downcast_ref::<CFURL>()?.to_file_path()
 }
 
 /// Smoke tests against the running framework. No fixture can stand in for
