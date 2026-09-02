@@ -16,8 +16,8 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
-    UnmountOptions, diff, win32,
+    Camera, DeviceEvent, Filesystem, MountError, MountOptions, ScanError, StorageDevice,
+    UnmountError, UnmountOptions, diff, win32,
 };
 
 /// Delay between two polls of the removable drive list.
@@ -42,36 +42,29 @@ pub(crate) fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
 /// card is present.
 ///
 /// Media whose filesystem Windows cannot read carries no mount point, since it
-/// offers no usable filesystem path.
+/// offers no usable filesystem path. A volume query that fails for any other
+/// reason says nothing about the media, so the drive is dropped for this poll
+/// and the next one picks it up again.
 fn device(letter: char, volume: win32::Volume) -> Option<StorageDevice> {
     match volume {
         win32::Volume::Empty => None,
+        win32::Volume::Failed { code } => {
+            tracing::warn!(%letter, code, "volume query failed; skipping drive this poll");
+            None
+        }
         win32::Volume::Unreadable => Some(StorageDevice {
             name: unlabelled_name(letter),
-            mount_point: None,
+            filesystem: Filesystem::Unreadable,
             device_path: device_path(letter),
             total_bytes: None,
             used_bytes: None,
         }),
-        win32::Volume::Readable {
-            label,
-            total_bytes,
-            used_bytes,
-        } => {
-            // A zero total is the size query having failed, so the sizes read
-            // as unknown rather than as a card holding nothing.
-            let (total_bytes, used_bytes) = match total_bytes {
-                0 => (None, None),
-                total => (Some(total), Some(used_bytes)),
-            };
+        win32::Volume::Readable { label, disk_space } => {
+            let (total_bytes, used_bytes) = disk_space.unzip();
 
             Some(StorageDevice {
-                name: if label.is_empty() {
-                    unlabelled_name(letter)
-                } else {
-                    label
-                },
-                mount_point: Some(PathBuf::from(format!("{letter}:\\"))),
+                name: label.unwrap_or_else(|| unlabelled_name(letter)),
+                filesystem: Filesystem::Mounted(PathBuf::from(format!("{letter}:\\"))),
                 device_path: device_path(letter),
                 total_bytes,
                 used_bytes,
@@ -104,7 +97,9 @@ pub const fn scan_cameras() -> Vec<Camera> {
 /// A scan that loses the whole drive-letter enumeration is reported as an error
 /// and skipped, so the previous drive set stands. A card whose filesystem
 /// Windows cannot read is reported with no mount point, so reformatting it in
-/// the same slot arrives as a `Mounted`.
+/// the same slot arrives as a `Mounted`. A drive whose own volume query fails
+/// is left out of the scan, so a transient failure on a working card reads as a
+/// `Removed` followed by an `Inserted`.
 ///
 /// The future stays pending for as long as the watch lasts, and dropping it
 /// tears the watch down.
@@ -213,20 +208,22 @@ fn parse_unmount_error(stderr: &str) -> UnmountError {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::win32::Volume;
+    use crate::{Filesystem, win32::Volume};
 
     #[test]
     fn labelled_volume_keeps_its_label_and_sizes() {
         let volume = Volume::Readable {
-            label: String::from("EOS_DIGITAL"),
-            total_bytes: 64_000_000_000,
-            used_bytes: 1_000_000,
+            label: Some(String::from("EOS_DIGITAL")),
+            disk_space: Some((64_000_000_000, 1_000_000)),
         };
 
         let device = super::device('E', volume).expect("readable volume dropped");
 
         assert_eq!(device.name, "EOS_DIGITAL");
-        assert_eq!(device.mount_point, Some(PathBuf::from(r"E:\")));
+        assert_eq!(
+            device.filesystem,
+            Filesystem::Mounted(PathBuf::from(r"E:\"))
+        );
         assert_eq!(device.device_path, PathBuf::from(r"\\.\E:"));
         assert_eq!(device.total_bytes, Some(64_000_000_000));
         assert_eq!(device.used_bytes, Some(1_000_000));
@@ -235,9 +232,8 @@ mod tests {
     #[test]
     fn unlabelled_volume_is_named_after_its_drive_letter() {
         let volume = Volume::Readable {
-            label: String::new(),
-            total_bytes: 64_000_000_000,
-            used_bytes: 1_000_000,
+            label: None,
+            disk_space: Some((64_000_000_000, 1_000_000)),
         };
 
         let device = super::device('E', volume).expect("readable volume dropped");
@@ -246,26 +242,28 @@ mod tests {
     }
 
     #[test]
-    fn zero_total_reads_as_unknown_sizes() {
+    fn volume_without_a_size_query_reads_as_unknown_sizes() {
         let volume = Volume::Readable {
-            label: String::from("EOS_DIGITAL"),
-            total_bytes: 0,
-            used_bytes: 0,
+            label: Some(String::from("EOS_DIGITAL")),
+            disk_space: None,
         };
 
         let device = super::device('E', volume).expect("readable volume dropped");
 
         assert_eq!(device.total_bytes, None);
         assert_eq!(device.used_bytes, None);
-        assert_eq!(device.mount_point, Some(PathBuf::from(r"E:\")));
+        assert_eq!(
+            device.filesystem,
+            Filesystem::Mounted(PathBuf::from(r"E:\"))
+        );
     }
 
     #[test]
-    fn media_windows_cannot_read_is_surfaced_without_a_mount_point() {
+    fn media_windows_cannot_read_is_surfaced_as_unreadable() {
         let device = super::device('E', Volume::Unreadable).expect("unreadable media dropped");
 
         assert_eq!(device.name, "Removable (E:)");
-        assert_eq!(device.mount_point, None);
+        assert_eq!(device.filesystem, Filesystem::Unreadable);
         assert_eq!(device.device_path, PathBuf::from(r"\\.\E:"));
         assert_eq!(device.total_bytes, None);
         assert_eq!(device.used_bytes, None);
@@ -274,5 +272,18 @@ mod tests {
     #[test]
     fn empty_slot_yields_no_device() {
         assert!(super::device('E', Volume::Empty).is_none());
+    }
+
+    #[test]
+    fn failed_volume_query_yields_no_device() {
+        assert!(
+            super::device(
+                'E',
+                Volume::Failed {
+                    code: -2_147_024_891
+                }
+            )
+            .is_none()
+        );
     }
 }

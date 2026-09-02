@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeSet, path::PathBuf};
 
-use ferrocull_devices::Source;
+use ferrocull_devices::{Filesystem, Source};
 use iced::{
     Center, Element, Fill, Length,
     widget::{Space, button, checkbox, column, container, progress_bar, row, text},
@@ -27,12 +27,22 @@ pub(crate) fn sources_panel(
         column(sources.iter().map(|source| {
             let path = source.path();
             let (toggle_msg, action) = match source {
-                Source::Storage(s) if s.mount_point.is_none() => (
+                Source::Storage(s) if s.filesystem == Filesystem::Unmounted => (
                     None,
                     Some(Action {
                         label: "Mount",
                         message: Message::MountStorage(s.device_path.clone()),
                         style: styles::primary_button,
+                    }),
+                ),
+                // Media the OS cannot read offers nothing to scan and cannot be
+                // mounted, so unmounting it is the only action left.
+                Source::Storage(s) if s.filesystem == Filesystem::Unreadable => (
+                    None,
+                    Some(Action {
+                        label: "Unmount",
+                        message: Message::UnmountStorage(s.device_path.clone()),
+                        style: styles::secondary_button,
                     }),
                 ),
                 Source::Storage(s) => (
@@ -91,7 +101,7 @@ fn source_row(
         Source::Storage(s) => (
             icons::storage_source(),
             s.name.clone(),
-            s.mount_point.as_ref().map_or_else(
+            s.mount_point().map_or_else(
                 || s.device_path.display().to_string(),
                 |mp| mp.display().to_string(),
             ),

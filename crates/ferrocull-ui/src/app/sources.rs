@@ -5,7 +5,7 @@ use ferrocull_core::{
     xmp::Metadata,
 };
 use ferrocull_devices::{
-    MountOptions, ScanError, ScannedFile, Source, StorageDevice, UnmountOptions, mount,
+    Filesystem, MountOptions, ScanError, ScannedFile, Source, StorageDevice, UnmountOptions, mount,
     scan_directory, scan_storage, unmount,
 };
 use iced::Task;
@@ -103,7 +103,7 @@ impl Ferrocull {
         }
 
         let already_exists = self.sources.iter().any(|s| match s {
-            Source::Storage(d) => d.mount_point.as_ref().is_some_and(|mp| *mp == folder_path),
+            Source::Storage(d) => d.mount_point().is_some_and(|mp| mp == folder_path),
             Source::Directory(p) => *p == folder_path,
             Source::Camera(_) => false,
         });
@@ -165,7 +165,7 @@ impl Ferrocull {
                     if let Source::Storage(s) = source
                         && s.device_path == device_path
                     {
-                        s.mount_point = Some(mount_point);
+                        s.filesystem = Filesystem::Mounted(mount_point);
                         break;
                     }
                 }
@@ -182,8 +182,13 @@ impl Ferrocull {
                     if let Source::Storage(s) = source
                         && s.device_path == device_path
                     {
-                        if let Some(mp) = s.mount_point.take() {
-                            self.config.selected_sources.remove(&mp);
+                        // Only a mounted filesystem has a mount point to drop
+                        // from the selection. Media the OS cannot read keeps
+                        // its state, since presenting it as unmounted would
+                        // offer a mount action that always fails.
+                        if let Filesystem::Mounted(mount_point) = &s.filesystem {
+                            self.config.selected_sources.remove(mount_point);
+                            s.filesystem = Filesystem::Unmounted;
                         }
                         break;
                     }

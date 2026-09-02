@@ -244,7 +244,8 @@ pub(crate) async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
         let priority = block_priority(mount_point.is_some(), has_fs);
         let candidate = StorageDevice {
             name,
-            mount_point,
+            filesystem: mount_point
+                .map_or(crate::Filesystem::Unmounted, crate::Filesystem::Mounted),
             device_path,
             total_bytes,
             used_bytes,
@@ -405,7 +406,7 @@ fn register_block(
     );
     Some(StorageDevice {
         name,
-        mount_point: None,
+        filesystem: crate::Filesystem::Unmounted,
         device_path,
         total_bytes: None,
         used_bytes: None,

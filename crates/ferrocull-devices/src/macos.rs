@@ -9,8 +9,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::{
-    Camera, DeviceEvent, MountError, MountOptions, ScanError, StorageDevice, UnmountError,
-    UnmountOptions, WatchError, diff,
+    Camera, DeviceEvent, Filesystem, MountError, MountOptions, ScanError, StorageDevice,
+    UnmountError, UnmountOptions, WatchError, diff,
 };
 
 /// Directory macOS mounts removable volumes under, one child per volume.
@@ -82,7 +82,7 @@ fn mounted_volumes() -> Result<Vec<StorageDevice>, ScanError> {
 
             Some(StorageDevice {
                 name,
-                mount_point: Some(mount_point),
+                filesystem: Filesystem::Mounted(mount_point),
                 device_path,
                 total_bytes,
                 used_bytes,
@@ -148,7 +148,7 @@ fn unmounted_device(candidate: &ListedDisk) -> Option<StorageDevice> {
 
     Some(StorageDevice {
         name,
-        mount_point: None,
+        filesystem: Filesystem::Unmounted,
         device_path,
         total_bytes: candidate.size,
         used_bytes: None,
@@ -267,7 +267,7 @@ pub const fn scan_cameras() -> Vec<Camera> {
 /// while mounted, its `/dev` node otherwise. Both disappear when the disk is
 /// detached.
 fn existence_probe(device: &StorageDevice) -> &Path {
-    device.mount_point.as_deref().unwrap_or(&device.device_path)
+    device.mount_point().unwrap_or(&device.device_path)
 }
 
 /// Devices from `known` to keep in the current scan, with `misses` advanced to
@@ -513,12 +513,12 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use crate::StorageDevice;
+    use crate::{Filesystem, StorageDevice};
 
     fn device(name: &str) -> StorageDevice {
         StorageDevice {
             name: name.to_owned(),
-            mount_point: Some(PathBuf::from(format!("/Volumes/{name}"))),
+            filesystem: Filesystem::Mounted(PathBuf::from(format!("/Volumes/{name}"))),
             device_path: PathBuf::from(format!("/dev/disk-{name}")),
             total_bytes: Some(64_000_000_000),
             used_bytes: Some(1_000_000),
@@ -527,7 +527,7 @@ mod tests {
 
     fn unmounted(name: &str) -> StorageDevice {
         StorageDevice {
-            mount_point: None,
+            filesystem: Filesystem::Unmounted,
             total_bytes: None,
             used_bytes: None,
             ..device(name)

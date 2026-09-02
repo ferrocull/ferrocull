@@ -16,7 +16,10 @@
 
 use windows::{
     Win32::{
-        Foundation::{ERROR_NO_MEDIA_IN_DRIVE, ERROR_NOT_READY, MAX_PATH},
+        Foundation::{
+            ERROR_NO_MEDIA_IN_DRIVE, ERROR_NOT_READY, ERROR_UNRECOGNIZED_MEDIA,
+            ERROR_UNRECOGNIZED_VOLUME, MAX_PATH,
+        },
         Storage::FileSystem::{
             GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
         },
@@ -33,23 +36,34 @@ const LETTER_COUNT: u8 = 26;
 /// Windows error codes for a removable drive whose slot holds no media. Readers
 /// disagree on which one they report, so both stand for an empty slot.
 const EMPTY_SLOT_ERRORS: [HRESULT; 2] = [
-    HRESULT::from_win32(ERROR_NOT_READY.0),
-    HRESULT::from_win32(ERROR_NO_MEDIA_IN_DRIVE.0),
+    ERROR_NOT_READY.to_hresult(),
+    ERROR_NO_MEDIA_IN_DRIVE.to_hresult(),
+];
+
+/// Windows error codes for media carrying a filesystem Windows does not
+/// recognize. Any other code says nothing about the media behind the letter.
+const UNREADABLE_MEDIA_ERRORS: [HRESULT; 2] = [
+    ERROR_UNRECOGNIZED_VOLUME.to_hresult(),
+    ERROR_UNRECOGNIZED_MEDIA.to_hresult(),
 ];
 
 /// What reading a drive root found.
 pub(crate) enum Volume {
-    /// A filesystem Windows can read. `label` is empty when the volume is
-    /// unlabelled.
+    /// A filesystem Windows can read. `label` is `None` when the volume is
+    /// unlabelled, `disk_space` the total and used bytes when the size query
+    /// answered.
     Readable {
-        label: String,
-        total_bytes: u64,
-        used_bytes: u64,
+        label: Option<String>,
+        disk_space: Option<(u64, u64)>,
     },
     /// Media whose filesystem Windows does not recognize.
     Unreadable,
     /// No media in the drive.
     Empty,
+    /// The volume query failed with a code that says nothing about the media,
+    /// as it does when the reader is yanked between the letter enumeration and
+    /// the read.
+    Failed { code: i32 },
 }
 
 /// Drive letters, uppercased, of every removable drive Windows has a letter
@@ -95,16 +109,15 @@ pub(crate) fn read_volume(letter: char) -> Volume {
     };
 
     match volume_information {
-        Ok(()) => {
-            let (total_bytes, free_bytes) = disk_space(&root);
-            Volume::Readable {
-                label: label(&name),
-                total_bytes,
-                used_bytes: total_bytes.saturating_sub(free_bytes),
-            }
-        }
+        Ok(()) => Volume::Readable {
+            label: label(&name),
+            disk_space: disk_space(&root),
+        },
         Err(error) if EMPTY_SLOT_ERRORS.contains(&error.code()) => Volume::Empty,
-        Err(_) => Volume::Unreadable,
+        Err(error) if UNREADABLE_MEDIA_ERRORS.contains(&error.code()) => Volume::Unreadable,
+        Err(error) => Volume::Failed {
+            code: error.code().0,
+        },
     }
 }
 
@@ -122,9 +135,9 @@ fn is_removable(letter: char) -> bool {
     drive_type == DRIVE_REMOVABLE
 }
 
-/// Total and free bytes of the volume rooted at `root`, both zero when the
+/// Total and used bytes of the volume rooted at `root`, or `None` when the
 /// query fails.
-fn disk_space(root: &[u16]) -> (u64, u64) {
+fn disk_space(root: &[u16]) -> Option<(u64, u64)> {
     let mut total_bytes = 0u64;
     let mut free_bytes = 0u64;
 
@@ -140,10 +153,12 @@ fn disk_space(root: &[u16]) -> (u64, u64) {
         )
     };
 
-    match query {
-        Ok(()) => (total_bytes, free_bytes),
-        Err(_) => (0, 0),
-    }
+    query
+        .inspect_err(|error| {
+            tracing::debug!(code = error.code().0, "disk space query failed");
+        })
+        .ok()
+        .map(|()| (total_bytes, total_bytes.saturating_sub(free_bytes)))
 }
 
 /// NUL-terminated wide `X:\` root path for `letter`, the form both
@@ -154,12 +169,13 @@ fn root_path(letter: char) -> [u16; 4] {
     [u16::from(ascii), u16::from(b':'), u16::from(b'\\'), 0]
 }
 
-/// Volume label held in a filled volume name buffer, up to its NUL terminator.
-fn label(buffer: &[u16]) -> String {
+/// Volume label held in a filled volume name buffer, up to its NUL terminator,
+/// or `None` when the volume carries no label.
+fn label(buffer: &[u16]) -> Option<String> {
     let end = buffer
         .iter()
         .position(|unit| *unit == 0)
         .expect("volume name buffer without a NUL terminator");
 
-    String::from_utf16_lossy(&buffer[..end])
+    Some(String::from_utf16_lossy(&buffer[..end])).filter(|label| !label.is_empty())
 }
