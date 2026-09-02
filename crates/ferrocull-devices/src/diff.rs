@@ -10,7 +10,7 @@
 
 use std::{collections::HashMap, path::Path};
 
-use crate::{DeviceEvent, StorageDevice};
+use crate::{DeviceEvent, Filesystem, StorageDevice};
 
 fn by_device_path(devices: &[StorageDevice]) -> HashMap<&Path, &StorageDevice> {
     devices
@@ -25,7 +25,9 @@ fn by_device_path(devices: &[StorageDevice]) -> HashMap<&Path, &StorageDevice> {
 /// survives once the device is gone. A device present in both sets reports a
 /// mount or an unmount when its mount point appears or disappears, and a mount
 /// at the new path when it moves, as it does when a card remounts beside the
-/// leftover directory of an abnormal unmount.
+/// leftover directory of an abnormal unmount. Media the OS cannot read carries
+/// no mount point either, so reformatting a card in the same slot reports a
+/// mount.
 pub(crate) fn events(known: &[StorageDevice], current: &[StorageDevice]) -> Vec<DeviceEvent> {
     let known_by_path = by_device_path(known);
     let current_by_path = by_device_path(current);
@@ -35,17 +37,21 @@ pub(crate) fn events(known: &[StorageDevice], current: &[StorageDevice]) -> Vec<
             return Some(DeviceEvent::Inserted(device.clone()));
         };
 
-        match (&previous.mount_point, &device.mount_point) {
-            (Some(_), None) => Some(DeviceEvent::Unmounted {
-                device_path: device.device_path.clone(),
-            }),
-            (None, Some(mount_point)) => Some(DeviceEvent::Mounted {
-                device_path: device.device_path.clone(),
-                mount_point: mount_point.clone(),
-                total_bytes: device.total_bytes,
-                used_bytes: device.used_bytes,
-            }),
-            (Some(previous_mount_point), Some(mount_point))
+        match (&previous.filesystem, &device.filesystem) {
+            (Filesystem::Mounted(_), Filesystem::Unmounted | Filesystem::Unreadable) => {
+                Some(DeviceEvent::Unmounted {
+                    device_path: device.device_path.clone(),
+                })
+            }
+            (Filesystem::Unmounted | Filesystem::Unreadable, Filesystem::Mounted(mount_point)) => {
+                Some(DeviceEvent::Mounted {
+                    device_path: device.device_path.clone(),
+                    mount_point: mount_point.clone(),
+                    total_bytes: device.total_bytes,
+                    used_bytes: device.used_bytes,
+                })
+            }
+            (Filesystem::Mounted(previous_mount_point), Filesystem::Mounted(mount_point))
                 if previous_mount_point != mount_point =>
             {
                 Some(DeviceEvent::Mounted {
@@ -73,12 +79,12 @@ pub(crate) fn events(known: &[StorageDevice], current: &[StorageDevice]) -> Vec<
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use crate::{DeviceEvent, StorageDevice};
+    use crate::{DeviceEvent, Filesystem, StorageDevice};
 
     fn device(name: &str) -> StorageDevice {
         StorageDevice {
             name: name.to_owned(),
-            mount_point: Some(PathBuf::from(format!("/Volumes/{name}"))),
+            filesystem: Filesystem::Mounted(PathBuf::from(format!("/Volumes/{name}"))),
             device_path: PathBuf::from(format!("/dev/disk-{name}")),
             total_bytes: Some(64_000_000_000),
             used_bytes: Some(1_000_000),
@@ -94,10 +100,17 @@ mod tests {
 
     fn unmounted(name: &str) -> StorageDevice {
         StorageDevice {
-            mount_point: None,
+            filesystem: Filesystem::Unmounted,
             total_bytes: None,
             used_bytes: None,
             ..device(name)
+        }
+    }
+
+    fn unreadable(name: &str) -> StorageDevice {
+        StorageDevice {
+            filesystem: Filesystem::Unreadable,
+            ..unmounted(name)
         }
     }
 
@@ -205,7 +218,7 @@ mod tests {
     fn volume_remounted_elsewhere_is_reported_as_mounted_at_the_new_path() {
         let known = [device("EOS_DIGITAL")];
         let current = [StorageDevice {
-            mount_point: Some(PathBuf::from("/Volumes/EOS_DIGITAL 1")),
+            filesystem: Filesystem::Mounted(PathBuf::from("/Volumes/EOS_DIGITAL 1")),
             ..device("EOS_DIGITAL")
         }];
 
@@ -221,6 +234,25 @@ mod tests {
                 used_bytes,
             } if device_path == Path::new("/dev/disk-EOS_DIGITAL")
                 && mount_point == Path::new("/Volumes/EOS_DIGITAL 1")
+                && *total_bytes == Some(64_000_000_000)
+                && *used_bytes == Some(1_000_000)
+        ));
+    }
+
+    #[test]
+    fn reformatted_card_in_the_same_slot_is_reported_as_mounted() {
+        let events = super::events(&[unreadable("EOS_DIGITAL")], &[device("EOS_DIGITAL")]);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            DeviceEvent::Mounted {
+                device_path,
+                mount_point,
+                total_bytes,
+                used_bytes,
+            } if device_path == Path::new("/dev/disk-EOS_DIGITAL")
+                && mount_point == Path::new("/Volumes/EOS_DIGITAL")
                 && *total_bytes == Some(64_000_000_000)
                 && *used_bytes == Some(1_000_000)
         ));

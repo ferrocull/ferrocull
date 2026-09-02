@@ -79,6 +79,11 @@ get_unwrap = "warn"
 exit = "warn"
 str_to_string = "warn"
 
+# -- Unsafe carve-out gates --
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+missing_safety_doc = "warn"
+
 [workspace.lints.rust]
 exported_private_dependencies = "deny"
 unused_crate_dependencies = "warn"

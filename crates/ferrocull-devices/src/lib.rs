@@ -13,6 +13,8 @@ pub mod scanner;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod statvfs;
 #[cfg(target_os = "windows")]
+mod win32;
+#[cfg(target_os = "windows")]
 mod windows;
 
 use std::{
@@ -52,15 +54,38 @@ impl From<io::Error> for WatchError {
     }
 }
 
+/// Where a storage device's filesystem stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Filesystem {
+    /// Mounted at this path.
+    Mounted(PathBuf),
+    /// Attached but not mounted, and mountable on request.
+    Unmounted,
+    /// Media whose filesystem the OS cannot read, so it never carries a mount
+    /// point and mounting it cannot succeed.
+    Unreadable,
+}
+
 #[derive(Debug, Clone)]
 pub struct StorageDevice {
     pub name: String,
-    pub mount_point: Option<PathBuf>,
+    pub filesystem: Filesystem,
     pub device_path: PathBuf,
     pub total_bytes: Option<u64>,
     pub used_bytes: Option<u64>,
     #[cfg(target_os = "linux")]
     pub object_path: String,
+}
+
+impl StorageDevice {
+    /// Path the filesystem is mounted at, or `None` when it is not mounted.
+    #[must_use]
+    pub fn mount_point(&self) -> Option<&Path> {
+        match &self.filesystem {
+            Filesystem::Mounted(mount_point) => Some(mount_point),
+            Filesystem::Unmounted | Filesystem::Unreadable => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +109,7 @@ impl Source {
     #[must_use]
     pub fn path(&self) -> &Path {
         match self {
-            Self::Storage(s) => s.mount_point.as_deref().unwrap_or(&s.device_path),
+            Self::Storage(s) => s.mount_point().unwrap_or(&s.device_path),
             Self::Camera(c) => Path::new(&c.port),
             Self::Directory(p) => p,
         }
