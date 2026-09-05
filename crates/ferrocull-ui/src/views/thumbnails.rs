@@ -24,6 +24,7 @@ use crate::{
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
     views::{burst, status},
+    widgets::WheelArea,
 };
 
 /// What happened inside a thumbnail card (no idx, no path — parent enriches).
@@ -673,9 +674,10 @@ pub(crate) fn thumbnail_grid<'a>(
     // to the left edge. The gutter exists only while the content overflows, so
     // at an exact-fit height the measured width can flip between passes.
     //
-    // The `mouse_area` inside the scrollable steals the wheel from the
-    // scrollable's own handler (children see wheel events first), so the parent
-    // can snap row-by-row; scrollbar drag and keyboard scrolling still reach the
+    // The `WheelArea` wrapping the scrollable owns every wheel over the panel,
+    // rail included, so row snapping and `Ctrl+Wheel` sizing are the only
+    // responses to a notch and do not depend on the scrollable's own wheel
+    // handling. Scrollbar drag and keyboard scrolling still reach the
     // scrollable and report back through `on_scroll`.
     //
     // `on_scroll` doubles as the grid-width channel: it re-fires on any redraw
@@ -685,18 +687,21 @@ pub(crate) fn thumbnail_grid<'a>(
     // wrapping `sensor` cannot do this job: iced gates `on_resize` on the
     // distance from the viewport to the sensor's *corners*, so a sensor the
     // size of the grid goes silent once the user scrolls off the top.
-    scrollable(mouse_area(container(grid).padding(spacing::MD).width(Fill)).on_scroll(Event::Wheel))
-        .id(GRID_SCROLLABLE_ID)
-        .on_scroll(|vp| Event::Scrolled {
-            offset: vp.absolute_offset().y,
-            grid_width: vp.content_bounds().width - 2.0 * spacing::MD,
-            viewport_height: vp.bounds().height,
-            content_height: vp.content_bounds().height,
-        })
-        .spacing(0)
-        .width(Fill)
-        .height(Fill)
-        .into()
+    WheelArea::new(
+        scrollable(container(grid).padding(spacing::MD).width(Fill))
+            .id(GRID_SCROLLABLE_ID)
+            .on_scroll(|vp| Event::Scrolled {
+                offset: vp.absolute_offset().y,
+                grid_width: vp.content_bounds().width - 2.0 * spacing::MD,
+                viewport_height: vp.bounds().height,
+                content_height: vp.content_bounds().height,
+            })
+            .spacing(0)
+            .width(Fill)
+            .height(Fill),
+    )
+    .on_scroll(Event::Wheel)
+    .into()
 }
 
 /// Split display order into contiguous `(start, count)` runs sharing a capture
