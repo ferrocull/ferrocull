@@ -53,7 +53,7 @@ The full-size single-photo view opened from the grid, navigating the same displa
 _Avoid_: Loupe, Viewer.
 
 **Thumbnail size**:
-The edge length of a grid cell, chosen by the user with a slider. It sets how large each photo is drawn and therefore how many columns fit, and it applies to the grid only. It is not the resolution of the cached thumbnail image, which is a storage preference.
+The edge length of a grid cell, chosen by the user. Each step of the control changes the number of columns by one; the chosen size is kept across window sizes and maps to the nearest column count. It applies to the grid only. It is not the resolution of the cached thumbnail image, which is a storage preference.
 _Avoid_: Grid zoom, Cell size, Zoom (zoom means the [[preview]] zoom).
 
 **Source**:

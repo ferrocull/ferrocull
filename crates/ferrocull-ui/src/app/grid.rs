@@ -220,10 +220,10 @@ impl Ferrocull {
         }
     }
 
-    /// Step the thumbnail size one notch per wheel notch, resizing the grid
-    /// around the card the photographer is looking at. Touchpads report pixel
-    /// deltas rather than lines, so `PIXELS_PER_NOTCH` turns a two-finger swipe
-    /// into a few steps instead of dozens.
+    /// Step the thumbnail size one column count per wheel notch, resizing the
+    /// grid around the card the photographer is looking at. Touchpads report
+    /// pixel deltas rather than lines, so `PIXELS_PER_NOTCH` turns a two-finger
+    /// swipe into a few steps instead of dozens.
     pub(super) fn handle_thumbnail_size_wheel(
         &mut self,
         delta: iced::mouse::ScrollDelta,
@@ -247,11 +247,32 @@ impl Ferrocull {
         } else {
             filters::SizeStep::Smaller
         };
+        self.step_thumbnail_columns(direction, steps.unsigned_abs() as usize)
+    }
+
+    /// Move the thumbnail size `count` column counts in `direction` and keep the
+    /// photographer's place.
+    ///
+    /// The column count is what shows on screen, so a step that lands on the one
+    /// already rendered is dropped rather than restarting the settle window for
+    /// an invisible change: at the ends of the range, and from a persisted size
+    /// that is not the canonical nominal for its count, the stepped nominal
+    /// differs from the current one while the grid does not. No-op until the
+    /// grid width is known: without it there are no column counts to step
+    /// through.
+    pub(super) fn step_thumbnail_columns(
+        &mut self,
+        direction: filters::SizeStep,
+        count: usize,
+    ) -> Task<Message> {
+        let Some(width) = self.grid_area_width else {
+            return Task::none();
+        };
         let current = self.config.view.thumbnail_size;
-        let stepped = (0..steps.abs()).fold(current, |size, _| {
-            views::thumbnails::step_thumbnail_size(size, direction)
+        let stepped = (0..count).fold(current, |size, _| {
+            views::thumbnails::step_columns(width, self.window_scale, size, direction)
         });
-        if stepped == current {
+        if self.columns_for(width, stepped) == self.columns_for(width, current) {
             return Task::none();
         }
         self.set_thumbnail_size(stepped)
@@ -446,6 +467,15 @@ impl Ferrocull {
     fn grid_metrics(&self, grid_width: f32) -> (usize, f32) {
         let nominal = self.config.view.thumbnail_size as f32;
         views::thumbnails::grid_metrics(grid_width, nominal, self.window_scale)
+    }
+
+    /// Column count a grid of `grid_width` shows at the given nominal size.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "thumbnail sizes are three-digit integers, exact in f32"
+    )]
+    fn columns_for(&self, grid_width: f32, nominal: u32) -> usize {
+        views::thumbnails::grid_metrics(grid_width, nominal as f32, self.window_scale).0
     }
 
     /// Rendered width of one grid cell at the current geometry.

@@ -4,10 +4,7 @@ use ferrocull_core::media::SortOrder;
 use iced::Task;
 
 use super::{Ferrocull, toggle_set};
-use crate::{
-    messages::{Message, filters},
-    views,
-};
+use crate::messages::{Message, filters};
 
 /// How long a thumbnail size change waits for another one before counting as
 /// settled. The slider's release settles it sooner; the timer covers every input
@@ -118,12 +115,7 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
             return state.handle_thumbnail_size_wheel(delta);
         }
         filters::Message::ThumbnailSizeStepped(direction) => {
-            let stepped =
-                views::thumbnails::step_thumbnail_size(state.config.view.thumbnail_size, direction);
-            if stepped == state.config.view.thumbnail_size {
-                return Task::none();
-            }
-            return state.set_thumbnail_size(stepped);
+            return state.step_thumbnail_columns(direction, 1);
         }
     }
     state.rebuild_view();

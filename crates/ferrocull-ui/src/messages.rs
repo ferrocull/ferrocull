@@ -208,11 +208,12 @@ pub(crate) mod filters {
         /// change's generation. A later change supersedes it, and its own timer
         /// settles the size instead.
         ThumbnailSizeSettled(u64),
-        /// One keyboard or wheel notch of thumbnail size. The grid reflows at
-        /// once and the size settles like a slider change.
+        /// One keyboard or wheel notch of thumbnail size, worth one column
+        /// count. The grid reflows at once and the size settles like a slider
+        /// change.
         ThumbnailSizeStepped(SizeStep),
-        /// Wheel over the slider: each notch is one thumbnail size step, the
-        /// same step a notch over the grid takes.
+        /// Wheel over the slider: each notch moves the grid by one column
+        /// count, the same step a notch over the grid takes.
         ThumbnailSizeWheel(iced::mouse::ScrollDelta),
     }
 }

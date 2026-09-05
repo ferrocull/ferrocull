@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
+    ops::RangeInclusive,
     path::PathBuf,
 };
 
@@ -66,15 +67,19 @@ pub(crate) enum Event {
     },
 }
 
-/// Smallest thumbnail size the photographer can choose, in logical pixels.
+/// Smallest nominal thumbnail size, in logical pixels. It bounds the chosen
+/// size, and through it the densest grid the controls reach: [`column_range`]
+/// ends at the column count this size produces.
 ///
 /// A card draws its info bar, star row, and badges at fixed text sizes, and the
-/// floor keeps all three readable on the smallest cards the slider can produce.
+/// floor keeps all three readable on the smallest cards the controls produce.
 /// Those are narrower than the chosen size: [`grid_metrics`] fits a whole number
 /// of columns, so a rendered cell runs up to one column-share below it. Nothing
 /// hides at any size.
 pub(crate) const THUMBNAIL_SIZE_MIN: u32 = 150;
-/// Largest thumbnail size the photographer can choose, in logical pixels.
+/// Largest nominal thumbnail size, in logical pixels. It bounds the chosen size,
+/// and through it the sparsest grid the controls reach: [`column_range`] starts
+/// at the column count this size produces.
 pub(crate) const THUMBNAIL_SIZE_MAX: u32 = 448;
 /// Widget ID for the thumbnail scrollable — used by `snap_to` to scroll to items.
 pub(crate) const GRID_SCROLLABLE_ID: &str = "thumbnail-grid";
@@ -106,34 +111,65 @@ pub(crate) fn grid_metrics(available: f32, nominal: f32, scale: f32) -> (usize, 
     (cols, cell_width)
 }
 
-/// The thumbnail size one notch away from `current`, clamped to the range.
-///
-/// The step is multiplicative (about 10 percent) so a notch feels the same at
-/// either end of the range. Ten percent of even the smallest size the range
-/// offers is well over a pixel, so every notch inside the range changes the
-/// chosen size; the grid shows the change once the column count crosses a
-/// threshold.
+/// The column counts a grid of `width` can show, fewest first: the count at
+/// [`THUMBNAIL_SIZE_MAX`] through the count at [`THUMBNAIL_SIZE_MIN`]. Never
+/// empty: the two limits give the same count on a narrow grid.
 #[expect(
     clippy::cast_precision_loss,
     reason = "thumbnail sizes are three-digit integers, exact in f32"
 )]
+pub(crate) fn column_range(width: f32, scale: f32) -> RangeInclusive<usize> {
+    let fewest = grid_metrics(width, THUMBNAIL_SIZE_MAX as f32, scale).0;
+    let most = grid_metrics(width, THUMBNAIL_SIZE_MIN as f32, scale).0;
+    fewest..=most
+}
+
+/// The nominal size that lays a grid of `width` out in `cols` columns: the cell
+/// width that count renders at, rounded up to a whole logical pixel so the
+/// ceil-fit in [`grid_metrics`] cannot read it as one column more.
+///
+/// The clamp only bites at the ends of [`column_range`], where the limit itself
+/// is the size that selects the count, so the result always selects `cols`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "column count is far below f32's 2^23 exact-integer range"
+)]
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "the scaled size is positive and stays within the u32 range"
+    reason = "a reachable column count leaves a positive cell width, well within u32"
 )]
-pub(crate) fn step_thumbnail_size(current: u32, direction: SizeStep) -> u32 {
-    const FACTOR: f32 = 1.1;
-    let stepped = match direction {
-        SizeStep::Larger => (current as f32 * FACTOR).round() as u32,
-        SizeStep::Smaller => (current as f32 / FACTOR).round() as u32,
-    };
-    clamp_thumbnail_size(stepped)
+pub(crate) fn nominal_for_columns(width: f32, cols: usize) -> u32 {
+    let exact = (width - spacing::SM * (cols - 1) as f32) / cols as f32;
+    clamp_thumbnail_size(exact.ceil() as u32)
 }
 
-/// Bring a thumbnail size into the range the slider offers. Applied where a
-/// persisted preference enters the app, so a hand-edited value cannot produce a
-/// grid of one enormous column or of unreadable cards.
+/// The nominal size one column count away from `current` on a grid of `width`.
+///
+/// `Larger` takes a column off the row, `Smaller` adds one, within
+/// [`column_range`]. At either end the target is the count `current` already
+/// selects, so stepping past the end is idempotent: it returns the canonical
+/// nominal for that count and stepping again returns it unchanged. A persisted
+/// `current` is any size in the preference range, not that canonical nominal,
+/// so callers compare column counts rather than nominals to tell a step that
+/// changed the grid from one that did not.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "thumbnail sizes are three-digit integers, exact in f32"
+)]
+pub(crate) fn step_columns(width: f32, scale: f32, current: u32, direction: SizeStep) -> u32 {
+    let range = column_range(width, scale);
+    let cols = grid_metrics(width, current as f32, scale).0;
+    let target = match direction {
+        SizeStep::Larger => cols.saturating_sub(1).max(*range.start()),
+        SizeStep::Smaller => (cols + 1).min(*range.end()),
+    };
+    nominal_for_columns(width, target)
+}
+
+/// Bring a thumbnail size into the nominal range the preference allows.
+/// Applied where a persisted preference enters the app, so a hand-edited value
+/// cannot produce a grid of one enormous column or of unreadable cards.
 pub(crate) fn clamp_thumbnail_size(size: u32) -> u32 {
     size.clamp(THUMBNAIL_SIZE_MIN, THUMBNAIL_SIZE_MAX)
 }
@@ -1069,11 +1105,37 @@ fn preview_icon() -> Element<'static, CellEvent> {
 mod tests {
     use super::{
         DATE_HEADER_HEIGHT, RowStart, THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN, anchor_row,
-        clamp_thumbnail_size, grid_metrics, grid_width, header_block, keep_row_in_view, row_bounds,
-        row_for_ordinal, row_in_view, row_run_spacers, row_starts, step_row, step_thumbnail_size,
-        take_whole_notches, visible_row_window,
+        clamp_thumbnail_size, column_range, grid_metrics, grid_width, header_block,
+        keep_row_in_view, nominal_for_columns, row_bounds, row_for_ordinal, row_in_view,
+        row_run_spacers, row_starts, step_columns, step_row, take_whole_notches,
+        visible_row_window,
     };
     use crate::{messages::filters::SizeStep, theme::spacing};
+
+    /// Logical grid widths and scale factors the column tests sweep. `w` is a
+    /// physical width, so the logical widths handed to the layout are
+    /// fractional at every scale above 1.0, exactly what a real window
+    /// reports.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "sweep bounds are far below f32's exact-integer range"
+    )]
+    fn width_sweep() -> impl Iterator<Item = (f32, f32)> {
+        [1.0_f32, 1.25, 1.5, 2.0].into_iter().flat_map(|scale| {
+            (300..=3000)
+                .step_by(7)
+                .map(move |w| (w as f32 / scale, scale))
+        })
+    }
+
+    /// Column count `nominal` lays a grid of `width` out in.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "thumbnail sizes are three-digit integers, exact in f32"
+    )]
+    fn columns_at(width: f32, scale: f32, nominal: u32) -> usize {
+        grid_metrics(width, nominal as f32, scale).0
+    }
 
     // A round cell width keeps the expected offsets easy to read.
     const CW: f32 = 100.0;
@@ -1525,36 +1587,96 @@ mod tests {
         }
     }
 
+    /// The contract the controls rest on: every column count the grid can show
+    /// has a nominal size that selects it, so one notch of the slider, the
+    /// wheel, or the keyboard lands on exactly the next count.
     #[test]
-    fn thumbnail_size_steps_stay_in_range() {
-        assert_eq!(
-            step_thumbnail_size(THUMBNAIL_SIZE_MIN, SizeStep::Smaller),
-            THUMBNAIL_SIZE_MIN
-        );
-        assert_eq!(
-            step_thumbnail_size(THUMBNAIL_SIZE_MAX, SizeStep::Larger),
-            THUMBNAIL_SIZE_MAX
-        );
-        assert!(step_thumbnail_size(THUMBNAIL_SIZE_MIN, SizeStep::Larger) > THUMBNAIL_SIZE_MIN);
-        assert!(step_thumbnail_size(THUMBNAIL_SIZE_MAX, SizeStep::Smaller) < THUMBNAIL_SIZE_MAX);
-    }
-
-    #[test]
-    fn thumbnail_size_steps_move_by_at_least_one_pixel() {
-        for size in THUMBNAIL_SIZE_MIN..THUMBNAIL_SIZE_MAX {
-            let larger = step_thumbnail_size(size, SizeStep::Larger);
-            assert!(larger > size, "{size} did not grow (got {larger})");
-        }
-        for size in (THUMBNAIL_SIZE_MIN + 1)..=THUMBNAIL_SIZE_MAX {
-            let smaller = step_thumbnail_size(size, SizeStep::Smaller);
-            assert!(smaller < size, "{size} did not shrink (got {smaller})");
+    fn every_reachable_column_count_has_a_nominal() {
+        for (width, scale) in width_sweep() {
+            for cols in column_range(width, scale) {
+                let nominal = nominal_for_columns(width, cols);
+                assert_eq!(
+                    columns_at(width, scale, nominal),
+                    cols,
+                    "width {width} ×{scale}: nominal {nominal} does not select {cols} columns"
+                );
+                assert!(
+                    (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).contains(&nominal),
+                    "width {width} ×{scale}: nominal {nominal} outside the preference range"
+                );
+            }
         }
     }
 
     #[test]
-    fn thumbnail_size_step_round_trips_from_the_default() {
-        let larger = step_thumbnail_size(224, SizeStep::Larger);
-        assert_eq!(step_thumbnail_size(larger, SizeStep::Smaller), 224);
+    fn column_range_ends_are_the_counts_the_size_limits_produce() {
+        for (width, scale) in width_sweep() {
+            let range = column_range(width, scale);
+            assert!(
+                range.start() <= range.end(),
+                "width {width} ×{scale}: empty column range"
+            );
+            assert_eq!(*range.start(), columns_at(width, scale, THUMBNAIL_SIZE_MAX));
+            assert_eq!(*range.end(), columns_at(width, scale, THUMBNAIL_SIZE_MIN));
+        }
+    }
+
+    #[test]
+    fn step_columns_moves_one_column_in_each_direction() {
+        for (width, scale) in width_sweep() {
+            let range = column_range(width, scale);
+            for size in (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).step_by(13) {
+                let cols = columns_at(width, scale, size);
+                if cols > *range.start() {
+                    let larger = step_columns(width, scale, size, SizeStep::Larger);
+                    assert_eq!(
+                        columns_at(width, scale, larger),
+                        cols - 1,
+                        "width {width} ×{scale}: growing from {size} ({cols} columns)"
+                    );
+                }
+                if cols < *range.end() {
+                    let smaller = step_columns(width, scale, size, SizeStep::Smaller);
+                    assert_eq!(
+                        columns_at(width, scale, smaller),
+                        cols + 1,
+                        "width {width} ×{scale}: shrinking from {size} ({cols} columns)"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn step_columns_holds_at_both_ends() {
+        for (width, scale) in width_sweep() {
+            let range = column_range(width, scale);
+            let fewest = nominal_for_columns(width, *range.start());
+            let most = nominal_for_columns(width, *range.end());
+            assert_eq!(step_columns(width, scale, fewest, SizeStep::Larger), fewest);
+            assert_eq!(step_columns(width, scale, most, SizeStep::Smaller), most);
+        }
+    }
+
+    /// A persisted size is any value in the range, not the canonical nominal
+    /// for the count it selects. At an end the step still lands on that same
+    /// count, which is what the callers compare.
+    #[test]
+    fn step_columns_from_a_non_canonical_size_holds_at_the_ends() {
+        for (width, scale) in width_sweep() {
+            let range = column_range(width, scale);
+            for size in (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).step_by(13) {
+                let cols = columns_at(width, scale, size);
+                if cols == *range.start() {
+                    let stepped = step_columns(width, scale, size, SizeStep::Larger);
+                    assert_eq!(columns_at(width, scale, stepped), cols);
+                }
+                if cols == *range.end() {
+                    let stepped = step_columns(width, scale, size, SizeStep::Smaller);
+                    assert_eq!(columns_at(width, scale, stepped), cols);
+                }
+            }
+        }
     }
 
     /// Three rows of the round-width grid, pitch 108 apart from a zero top.

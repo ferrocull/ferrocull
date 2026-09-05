@@ -2429,8 +2429,11 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
         .gap(4)
         .snap_within_viewport(true);
 
-    let size_control =
-        views::thumbnail_size::control(state.config.view.thumbnail_size).map(Message::Filters);
+    let size_control = views::thumbnail_size::control(
+        state.config.view.thumbnail_size,
+        state.grid_area_width.map(|w| (w, state.window_scale)),
+    )
+    .map(Message::Filters);
 
     container(
         row![
