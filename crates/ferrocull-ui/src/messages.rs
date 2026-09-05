@@ -211,6 +211,9 @@ pub(crate) mod filters {
         /// One keyboard or wheel notch of thumbnail size. The grid reflows at
         /// once and the size settles like a slider change.
         ThumbnailSizeStepped(SizeStep),
+        /// Wheel over the slider: each notch is one thumbnail size step, the
+        /// same step a notch over the grid takes.
+        ThumbnailSizeWheel(iced::mouse::ScrollDelta),
     }
 }
 

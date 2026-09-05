@@ -18,6 +18,7 @@ use crate::{
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
     views::thumbnails::{THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN},
+    widgets::WheelArea,
 };
 
 /// Visual divider between filter groups.
@@ -183,6 +184,10 @@ pub(crate) fn thumbnail_size_control(size: u32) -> Element<'static, Message> {
     ]
     .spacing(spacing::XS)
     .align_y(iced::Alignment::Center);
+
+    // The slider itself answers a wheel only with Ctrl held; the wrapper takes
+    // every notch first, so a bare wheel over the control steps the size.
+    let control = WheelArea::new(control).on_scroll(Message::ThumbnailSizeWheel);
 
     tooltip(
         control,

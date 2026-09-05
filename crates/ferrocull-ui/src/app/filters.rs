@@ -114,6 +114,9 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
             }
             return Task::none();
         }
+        filters::Message::ThumbnailSizeWheel(delta) => {
+            return state.handle_thumbnail_size_wheel(delta);
+        }
         filters::Message::ThumbnailSizeStepped(direction) => {
             let stepped =
                 views::thumbnails::step_thumbnail_size(state.config.view.thumbnail_size, direction);

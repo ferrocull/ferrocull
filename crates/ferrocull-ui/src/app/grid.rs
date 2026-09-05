@@ -224,7 +224,10 @@ impl Ferrocull {
     /// around the card the photographer is looking at. Touchpads report pixel
     /// deltas rather than lines, so `PIXELS_PER_NOTCH` turns a two-finger swipe
     /// into a few steps instead of dozens.
-    fn handle_thumbnail_size_wheel(&mut self, delta: iced::mouse::ScrollDelta) -> Task<Message> {
+    pub(super) fn handle_thumbnail_size_wheel(
+        &mut self,
+        delta: iced::mouse::ScrollDelta,
+    ) -> Task<Message> {
         /// Pixel delta one wheel notch is worth on a touchpad.
         const PIXELS_PER_NOTCH: f32 = 40.0;
 
