@@ -1,5 +1,4 @@
-//! Filter bar with sort, type, grouping, rating, color label, and thumbnail
-//! size controls.
+//! Filter bar with sort, type, grouping, rating, and color label controls.
 //!
 
 use std::collections::BTreeSet;
@@ -10,15 +9,13 @@ use ferrocull_core::{
 };
 use iced::{
     Border, Color, Element,
-    widget::{Space, button, checkbox, container, pick_list, row, slider, text, tooltip},
+    widget::{Space, button, checkbox, container, pick_list, row, text},
 };
 
 use crate::{
     messages::filters::Message,
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
-    views::thumbnails::{THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN},
-    widgets::WheelArea,
 };
 
 /// Visual divider between filter groups.
@@ -168,37 +165,6 @@ pub(crate) fn color_label_filter(selected: &BTreeSet<Option<ColorLabel>>) -> Ele
     .into()
 }
 
-/// Thumbnail size slider, flanked by the grid densities its two ends produce.
-pub(crate) fn thumbnail_size_control(size: u32) -> Element<'static, Message> {
-    let control = row![
-        crate::icons::thumbnails_small().size(12),
-        slider(
-            THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX,
-            size,
-            Message::ThumbnailSizeChanged
-        )
-        .on_release(Message::ThumbnailSizeReleased)
-        .width(90)
-        .style(styles::thumbnail_size_slider),
-        crate::icons::thumbnails_large().size(12),
-    ]
-    .spacing(spacing::XS)
-    .align_y(iced::Alignment::Center);
-
-    // The slider itself answers a wheel only with Ctrl held; the wrapper takes
-    // every notch first, so a bare wheel over the control steps the size.
-    let control = WheelArea::new(control).on_scroll(Message::ThumbnailSizeWheel);
-
-    tooltip(
-        control,
-        text("Thumbnail size").size(11),
-        tooltip::Position::Bottom,
-    )
-    .gap(4)
-    .snap_within_viewport(true)
-    .into()
-}
-
 pub(crate) fn filter_bar<'a>(
     sort: Element<'a, Message>,
     filter_mode: Element<'a, Message>,
@@ -206,7 +172,6 @@ pub(crate) fn filter_bar<'a>(
     grouping: Element<'a, Message>,
     rating: Element<'a, Message>,
     color_label: Element<'a, Message>,
-    thumbnail_size: Element<'a, Message>,
 ) -> Element<'a, Message> {
     row![
         sort,
@@ -220,8 +185,6 @@ pub(crate) fn filter_bar<'a>(
         rating,
         divider(),
         color_label,
-        divider(),
-        thumbnail_size,
     ]
     .spacing(spacing::MD)
     .align_y(iced::Alignment::Center)

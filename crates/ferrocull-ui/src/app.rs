@@ -2037,7 +2037,6 @@ fn thumbnails_panel(state: &Ferrocull) -> Element<'_, Message> {
         ),
         views::filters::rating_filter(&state.config.selected_ratings),
         views::filters::color_label_filter(&state.config.selected_color_labels),
-        views::filters::thumbnail_size_control(state.config.view.thumbnail_size),
     )
     .map(Message::Filters);
 
@@ -2430,12 +2429,17 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
         .gap(4)
         .snap_within_viewport(true);
 
+    let size_control =
+        views::thumbnail_size::control(state.config.view.thumbnail_size).map(Message::Filters);
+
     container(
         row![
             left,
             Space::new().width(Fill),
             center,
             Space::new().width(Fill),
+            size_control,
+            Space::new().width(spacing::LG),
             ingest_with_tip,
         ]
         .align_y(iced::Alignment::Center),
