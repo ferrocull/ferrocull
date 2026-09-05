@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
+    ops::RangeInclusive,
     path::PathBuf,
 };
 
@@ -20,9 +21,11 @@ use iced::{
 use super::rating::{StarEvent, star_rating_row};
 use crate::{
     media_view::{BurstStatus, TagState},
+    messages::filters::SizeStep,
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
     views::{burst, status},
+    widgets::WheelArea,
 };
 
 /// What happened inside a thumbnail card (no idx, no path — parent enriches).
@@ -64,12 +67,25 @@ pub(crate) enum Event {
     },
 }
 
-/// Total cell width including padding for controls.
-pub(crate) const CELL_WIDTH: f32 = 224.0;
+/// Smallest nominal thumbnail size, in logical pixels. It bounds the chosen
+/// size, and through it the densest grid the controls reach: [`column_range`]
+/// ends at the column count this size produces.
+///
+/// A card draws its info bar, star row, and badges at fixed text sizes, and the
+/// floor keeps all three readable on the smallest cards the controls produce.
+/// Those are narrower than the chosen size: [`grid_metrics`] fits a whole number
+/// of columns, so a rendered cell runs up to one column-share below it. Nothing
+/// hides at any size.
+pub(crate) const THUMBNAIL_SIZE_MIN: u32 = 150;
+/// Largest nominal thumbnail size, in logical pixels. It bounds the chosen size,
+/// and through it the sparsest grid the controls reach: [`column_range`] starts
+/// at the column count this size produces.
+pub(crate) const THUMBNAIL_SIZE_MAX: u32 = 448;
 /// Widget ID for the thumbnail scrollable — used by `snap_to` to scroll to items.
 pub(crate) const GRID_SCROLLABLE_ID: &str = "thumbnail-grid";
 
-/// Column count and cell width for a given available content width.
+/// Column count and cell width for a given available content width and
+/// `nominal` cell width (the chosen thumbnail size).
 ///
 /// Mirrors iced's fluid column count (`ceil`) but floors the cell width to a
 /// whole *physical* pixel (logical × `scale`) so every card edge lands on the
@@ -88,11 +104,74 @@ pub(crate) const GRID_SCROLLABLE_ID: &str = "thumbnail-grid";
     clippy::cast_precision_loss,
     reason = "column count is far below f32's 2^23 exact-integer range"
 )]
-pub(crate) fn grid_metrics(available: f32, scale: f32) -> (usize, f32) {
-    let cols = (((available + spacing::SM) / (CELL_WIDTH + spacing::SM)).ceil() as usize).max(1);
+pub(crate) fn grid_metrics(available: f32, nominal: f32, scale: f32) -> (usize, f32) {
+    let cols = (((available + spacing::SM) / (nominal + spacing::SM)).ceil() as usize).max(1);
     let exact = (available - spacing::SM * (cols - 1) as f32) / cols as f32;
     let cell_width = (exact * scale).floor() / scale;
     (cols, cell_width)
+}
+
+/// The column counts a grid of `width` can show, fewest first: the count at
+/// [`THUMBNAIL_SIZE_MAX`] through the count at [`THUMBNAIL_SIZE_MIN`]. Never
+/// empty: the two limits give the same count on a narrow grid.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "thumbnail sizes are three-digit integers, exact in f32"
+)]
+pub(crate) fn column_range(width: f32, scale: f32) -> RangeInclusive<usize> {
+    let fewest = grid_metrics(width, THUMBNAIL_SIZE_MAX as f32, scale).0;
+    let most = grid_metrics(width, THUMBNAIL_SIZE_MIN as f32, scale).0;
+    fewest..=most
+}
+
+/// The nominal size that lays a grid of `width` out in `cols` columns: the cell
+/// width that count renders at, rounded up to a whole logical pixel so the
+/// ceil-fit in [`grid_metrics`] cannot read it as one column more.
+///
+/// The clamp only bites at the ends of [`column_range`], where the limit itself
+/// is the size that selects the count, so the result always selects `cols`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "column count is far below f32's 2^23 exact-integer range"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a reachable column count leaves a positive cell width, well within u32"
+)]
+pub(crate) fn nominal_for_columns(width: f32, cols: usize) -> u32 {
+    let exact = (width - spacing::SM * (cols - 1) as f32) / cols as f32;
+    clamp_thumbnail_size(exact.ceil() as u32)
+}
+
+/// The nominal size one column count away from `current` on a grid of `width`.
+///
+/// `Larger` takes a column off the row, `Smaller` adds one, within
+/// [`column_range`]. At either end the target is the count `current` already
+/// selects, so stepping past the end is idempotent: it returns the canonical
+/// nominal for that count and stepping again returns it unchanged. A persisted
+/// `current` is any size in the preference range, not that canonical nominal,
+/// so callers compare column counts rather than nominals to tell a step that
+/// changed the grid from one that did not.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "thumbnail sizes are three-digit integers, exact in f32"
+)]
+pub(crate) fn step_columns(width: f32, scale: f32, current: u32, direction: SizeStep) -> u32 {
+    let range = column_range(width, scale);
+    let cols = grid_metrics(width, current as f32, scale).0;
+    let target = match direction {
+        SizeStep::Larger => cols.saturating_sub(1).max(*range.start()),
+        SizeStep::Smaller => (cols + 1).min(*range.end()),
+    };
+    nominal_for_columns(width, target)
+}
+
+/// Bring a thumbnail size into the nominal range the preference allows.
+/// Applied where a persisted preference enters the app, so a hand-edited value
+/// cannot produce a grid of one enormous column or of unreadable cards.
+pub(crate) fn clamp_thumbnail_size(size: u32) -> u32 {
+    size.clamp(THUMBNAIL_SIZE_MIN, THUMBNAIL_SIZE_MAX)
 }
 
 /// Total pinned width of the `cols` cells produced by [`grid_metrics`],
@@ -184,6 +263,68 @@ pub(crate) fn row_starts(
         y = grid_top + grid_height + spacing::LG;
     }
     rows
+}
+
+/// Content-space top and bottom of row `row`. Row anchors are monotonic and sit
+/// within a gap of each row's content top, so the next row's anchor doubles as
+/// this row's bottom; the last row has no successor and spans one pitch
+/// (`cell_width + spacing::SM`) instead.
+pub(crate) fn row_bounds(rows: &[RowStart], row: usize, cell_width: f32) -> (f32, f32) {
+    let top = rows[row].offset;
+    let bottom = rows
+        .get(row + 1)
+        .map_or(top + cell_width + spacing::SM, |next| next.offset);
+    (top, bottom)
+}
+
+/// Whether any part of row `row` shows in the viewport at `scroll_y`.
+pub(crate) fn row_in_view(
+    rows: &[RowStart],
+    row: usize,
+    scroll_y: f32,
+    viewport_height: f32,
+    cell_width: f32,
+) -> bool {
+    let (top, bottom) = row_bounds(rows, row, cell_width);
+    top < scroll_y + viewport_height && bottom > scroll_y
+}
+
+/// `y` moved by the smallest amount that brings the row spanning
+/// `row_top..row_bottom` into a viewport of `viewport_height`. A row above the
+/// viewport aligns to its top, one below aligns to its bottom, and a row taller
+/// than the viewport aligns to its top rather than pushing its start off screen.
+pub(crate) fn keep_row_in_view(y: f32, row_top: f32, row_bottom: f32, viewport_height: f32) -> f32 {
+    if row_top < y {
+        row_top
+    } else if row_bottom > y + viewport_height {
+        (row_bottom - viewport_height).min(row_top)
+    } else {
+        y
+    }
+}
+
+/// Whole wheel notches in `delta` plus whatever `carry` already held, leaving
+/// the fraction in `carry` for the next event.
+///
+/// A direction reversal discards the fractional carry: hi-res wheels would
+/// otherwise swallow the first notch of the new direction paying off the old
+/// remainder.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "wheel notch accumulation stays far within i32"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the carried remainder is a small whole notch count"
+)]
+pub(crate) fn take_whole_notches(carry: &mut f32, delta: f32) -> i32 {
+    if *carry * delta < 0.0 {
+        *carry = 0.0;
+    }
+    *carry += delta;
+    let notches = carry.trunc() as i32;
+    *carry -= notches as f32;
+    notches
 }
 
 /// Display-order `(start, count)` runs: one per date section under Time sort,
@@ -428,8 +569,9 @@ struct CellState {
 /// the caller owns burst grouping and pair hiding, so this view never re-derives
 /// them, and both queries run for visible cells only. Click always emits
 /// `Event::CellClicked(path)`; the caller decides focus vs. selection based on
-/// modifier state. `window_scale` pins cell widths to whole physical pixels
-/// (see [`grid_metrics`]). `scroll_y`/`viewport_height` are the tracked scroll
+/// modifier state. `thumbnail_size` is the nominal cell width the columns are
+/// laid out against, and `window_scale` pins cell widths to whole physical
+/// pixels (see [`grid_metrics`]). `scroll_y`/`viewport_height` are the tracked scroll
 /// window; `viewport_height` is `0.0` until the first scroll report, which
 /// means "unknown" — the grid then renders every row.
 #[expect(
@@ -443,6 +585,7 @@ pub(crate) fn thumbnail_grid<'a>(
     burst_status: impl Fn(usize) -> Option<BurstStatus> + 'a,
     loaded_thumbs: &'a HashMap<PathBuf, image::Handle>,
     today: NaiveDate,
+    thumbnail_size: u32,
     window_scale: f32,
     sort_order: SortOrder,
     ascending: bool,
@@ -473,8 +616,14 @@ pub(crate) fn thumbnail_grid<'a>(
     // `responsive` runs at layout time, so `size.width` is the true grid area:
     // iced has already subtracted the container's `MD` padding and, when the
     // content overflows, the embedded scrollbar's gutter.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "thumbnail sizes are three-digit integers, exact in f32"
+    )]
+    let nominal = thumbnail_size as f32;
+
     let grid = responsive(move |size| {
-        let (cols, cell_width) = grid_metrics(size.width, window_scale);
+        let (cols, cell_width) = grid_metrics(size.width, nominal, window_scale);
 
         // Center the grid by splitting the leftover into a side margin floored
         // to the physical-pixel grid — a fractional offset would shift every
@@ -561,9 +710,10 @@ pub(crate) fn thumbnail_grid<'a>(
     // to the left edge. The gutter exists only while the content overflows, so
     // at an exact-fit height the measured width can flip between passes.
     //
-    // The `mouse_area` inside the scrollable steals the wheel from the
-    // scrollable's own handler (children see wheel events first), so the parent
-    // can snap row-by-row; scrollbar drag and keyboard scrolling still reach the
+    // The `WheelArea` wrapping the scrollable owns every wheel over the panel,
+    // rail included, so row snapping and `Ctrl+Wheel` sizing are the only
+    // responses to a notch and do not depend on the scrollable's own wheel
+    // handling. Scrollbar drag and keyboard scrolling still reach the
     // scrollable and report back through `on_scroll`.
     //
     // `on_scroll` doubles as the grid-width channel: it re-fires on any redraw
@@ -573,18 +723,21 @@ pub(crate) fn thumbnail_grid<'a>(
     // wrapping `sensor` cannot do this job: iced gates `on_resize` on the
     // distance from the viewport to the sensor's *corners*, so a sensor the
     // size of the grid goes silent once the user scrolls off the top.
-    scrollable(mouse_area(container(grid).padding(spacing::MD).width(Fill)).on_scroll(Event::Wheel))
-        .id(GRID_SCROLLABLE_ID)
-        .on_scroll(|vp| Event::Scrolled {
-            offset: vp.absolute_offset().y,
-            grid_width: vp.content_bounds().width - 2.0 * spacing::MD,
-            viewport_height: vp.bounds().height,
-            content_height: vp.content_bounds().height,
-        })
-        .spacing(0)
-        .width(Fill)
-        .height(Fill)
-        .into()
+    WheelArea::new(
+        scrollable(container(grid).padding(spacing::MD).width(Fill))
+            .id(GRID_SCROLLABLE_ID)
+            .on_scroll(|vp| Event::Scrolled {
+                offset: vp.absolute_offset().y,
+                grid_width: vp.content_bounds().width - 2.0 * spacing::MD,
+                viewport_height: vp.bounds().height,
+                content_height: vp.content_bounds().height,
+            })
+            .spacing(0)
+            .width(Fill)
+            .height(Fill),
+    )
+    .on_scroll(Event::Wheel)
+    .into()
 }
 
 /// Split display order into contiguous `(start, count)` runs sharing a capture
@@ -951,10 +1104,38 @@ fn preview_icon() -> Element<'static, CellEvent> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CELL_WIDTH, DATE_HEADER_HEIGHT, RowStart, anchor_row, grid_metrics, grid_width,
-        header_block, row_for_ordinal, row_run_spacers, row_starts, step_row, visible_row_window,
+        DATE_HEADER_HEIGHT, RowStart, THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN, anchor_row,
+        clamp_thumbnail_size, column_range, grid_metrics, grid_width, header_block,
+        keep_row_in_view, nominal_for_columns, row_bounds, row_for_ordinal, row_in_view,
+        row_run_spacers, row_starts, step_columns, step_row, take_whole_notches,
+        visible_row_window,
     };
-    use crate::theme::spacing;
+    use crate::{messages::filters::SizeStep, theme::spacing};
+
+    /// Logical grid widths and scale factors the column tests sweep. `w` is a
+    /// physical width, so the logical widths handed to the layout are
+    /// fractional at every scale above 1.0, exactly what a real window
+    /// reports.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "sweep bounds are far below f32's exact-integer range"
+    )]
+    fn width_sweep() -> impl Iterator<Item = (f32, f32)> {
+        [1.0_f32, 1.25, 1.5, 2.0].into_iter().flat_map(|scale| {
+            (300..=3000)
+                .step_by(7)
+                .map(move |w| (w as f32 / scale, scale))
+        })
+    }
+
+    /// Column count `nominal` lays a grid of `width` out in.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "thumbnail sizes are three-digit integers, exact in f32"
+    )]
+    fn columns_at(width: f32, scale: f32, nominal: u32) -> usize {
+        grid_metrics(width, nominal as f32, scale).0
+    }
 
     // A round cell width keeps the expected offsets easy to read.
     const CW: f32 = 100.0;
@@ -1360,47 +1541,239 @@ mod tests {
         reason = "sweep bounds and column counts are far below f32's exact-integer range"
     )]
     fn grid_cells_are_pixel_aligned() {
-        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0] {
-            for w in 200..=6000 {
-                let available = w as f32 / scale;
-                let (cols, cell_width) = grid_metrics(available, scale);
+        for nominal in [THUMBNAIL_SIZE_MIN as f32, 224.0, THUMBNAIL_SIZE_MAX as f32] {
+            for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0] {
+                for w in 200..=6000 {
+                    let available = w as f32 / scale;
+                    let (cols, cell_width) = grid_metrics(available, nominal, scale);
 
-                assert!(cols >= 1, "width {available} ×{scale}: at least one column");
+                    assert!(cols >= 1, "width {available} ×{scale}: at least one column");
 
-                // The cell width and the column stride (cell + spacing) must
-                // both be whole physical pixels — column edges are
-                // `k * stride`, so this puts every card edge on the pixel
-                // grid. Tolerance covers f32 round-trips through the logical
-                // representation; the GPU sees the same values.
-                let cell_phys = cell_width * scale;
-                assert!(
-                    (cell_phys - cell_phys.round()).abs() < 1e-3,
-                    "width {available} ×{scale}: cell {cell_width} is {cell_phys} physical px"
-                );
-                let stride_phys = (cell_width + spacing::SM) * scale;
-                assert!(
-                    (stride_phys - stride_phys.round()).abs() < 1e-3,
-                    "width {available} ×{scale}: stride is {stride_phys} physical px"
-                );
+                    // The cell width and the column stride (cell + spacing) must
+                    // both be whole physical pixels — column edges are
+                    // `k * stride`, so this puts every card edge on the pixel
+                    // grid. Tolerance covers f32 round-trips through the logical
+                    // representation; the GPU sees the same values.
+                    let cell_phys = cell_width * scale;
+                    assert!(
+                        (cell_phys - cell_phys.round()).abs() < 1e-3,
+                        "width {available} ×{scale}: cell {cell_width} is {cell_phys} physical px"
+                    );
+                    let stride_phys = (cell_width + spacing::SM) * scale;
+                    assert!(
+                        (stride_phys - stride_phys.round()).abs() < 1e-3,
+                        "width {available} ×{scale}: stride is {stride_phys} physical px"
+                    );
 
-                let total = grid_width(cols, cell_width);
-                assert!(
-                    total <= available + 1e-3,
-                    "width {available} ×{scale}: grid {total} must fit"
+                    let total = grid_width(cols, cell_width);
+                    assert!(
+                        total <= available + 1e-3,
+                        "width {available} ×{scale}: grid {total} must fit"
+                    );
+                    // Flooring drops less than one physical pixel per column, so
+                    // the trailing margin is bounded by the column count.
+                    assert!(
+                        available - total < cols as f32 / scale + 1e-3,
+                        "width {available} ×{scale}: leftover {} too large",
+                        available - total
+                    );
+                    // Cells never exceed the intended maximum card width.
+                    assert!(
+                        cell_width <= nominal,
+                        "width {available} ×{scale}: cell {cell_width} exceeds max {nominal}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The contract the controls rest on: every column count the grid can show
+    /// has a nominal size that selects it, so one notch of the slider, the
+    /// wheel, or the keyboard lands on exactly the next count.
+    #[test]
+    fn every_reachable_column_count_has_a_nominal() {
+        for (width, scale) in width_sweep() {
+            for cols in column_range(width, scale) {
+                let nominal = nominal_for_columns(width, cols);
+                assert_eq!(
+                    columns_at(width, scale, nominal),
+                    cols,
+                    "width {width} ×{scale}: nominal {nominal} does not select {cols} columns"
                 );
-                // Flooring drops less than one physical pixel per column, so
-                // the trailing margin is bounded by the column count.
                 assert!(
-                    available - total < cols as f32 / scale + 1e-3,
-                    "width {available} ×{scale}: leftover {} too large",
-                    available - total
-                );
-                // Cells never exceed the intended maximum card width.
-                assert!(
-                    cell_width <= CELL_WIDTH,
-                    "width {available} ×{scale}: cell {cell_width} exceeds max {CELL_WIDTH}"
+                    (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).contains(&nominal),
+                    "width {width} ×{scale}: nominal {nominal} outside the preference range"
                 );
             }
         }
+    }
+
+    #[test]
+    fn column_range_ends_are_the_counts_the_size_limits_produce() {
+        for (width, scale) in width_sweep() {
+            let range = column_range(width, scale);
+            assert!(
+                range.start() <= range.end(),
+                "width {width} ×{scale}: empty column range"
+            );
+            assert_eq!(*range.start(), columns_at(width, scale, THUMBNAIL_SIZE_MAX));
+            assert_eq!(*range.end(), columns_at(width, scale, THUMBNAIL_SIZE_MIN));
+        }
+    }
+
+    #[test]
+    fn step_columns_moves_one_column_in_each_direction() {
+        for (width, scale) in width_sweep() {
+            let range = column_range(width, scale);
+            for size in (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).step_by(13) {
+                let cols = columns_at(width, scale, size);
+                if cols > *range.start() {
+                    let larger = step_columns(width, scale, size, SizeStep::Larger);
+                    assert_eq!(
+                        columns_at(width, scale, larger),
+                        cols - 1,
+                        "width {width} ×{scale}: growing from {size} ({cols} columns)"
+                    );
+                }
+                if cols < *range.end() {
+                    let smaller = step_columns(width, scale, size, SizeStep::Smaller);
+                    assert_eq!(
+                        columns_at(width, scale, smaller),
+                        cols + 1,
+                        "width {width} ×{scale}: shrinking from {size} ({cols} columns)"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn step_columns_holds_at_both_ends() {
+        for (width, scale) in width_sweep() {
+            let range = column_range(width, scale);
+            let fewest = nominal_for_columns(width, *range.start());
+            let most = nominal_for_columns(width, *range.end());
+            assert_eq!(step_columns(width, scale, fewest, SizeStep::Larger), fewest);
+            assert_eq!(step_columns(width, scale, most, SizeStep::Smaller), most);
+        }
+    }
+
+    /// A persisted size is any value in the range, not the canonical nominal
+    /// for the count it selects. At an end the step still lands on that same
+    /// count, which is what the callers compare.
+    #[test]
+    fn step_columns_from_a_non_canonical_size_holds_at_the_ends() {
+        for (width, scale) in width_sweep() {
+            let range = column_range(width, scale);
+            for size in (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).step_by(13) {
+                let cols = columns_at(width, scale, size);
+                if cols == *range.start() {
+                    let stepped = step_columns(width, scale, size, SizeStep::Larger);
+                    assert_eq!(columns_at(width, scale, stepped), cols);
+                }
+                if cols == *range.end() {
+                    let stepped = step_columns(width, scale, size, SizeStep::Smaller);
+                    assert_eq!(columns_at(width, scale, stepped), cols);
+                }
+            }
+        }
+    }
+
+    /// Three rows of the round-width grid, pitch 108 apart from a zero top.
+    fn three_rows() -> Vec<RowStart> {
+        vec![
+            RowStart {
+                offset: 0.0,
+                ordinal: 0,
+            },
+            RowStart {
+                offset: PITCH,
+                ordinal: 3,
+            },
+            RowStart {
+                offset: 2.0 * PITCH,
+                ordinal: 6,
+            },
+        ]
+    }
+
+    #[test]
+    fn row_bounds_span_to_the_next_row() {
+        let rows = three_rows();
+        assert_eq!(row_bounds(&rows, 0, CW), (0.0, PITCH));
+        assert_eq!(row_bounds(&rows, 1, CW), (PITCH, 2.0 * PITCH));
+    }
+
+    #[test]
+    fn row_bounds_of_the_last_row_span_one_pitch() {
+        let rows = three_rows();
+        assert_eq!(row_bounds(&rows, 2, CW), (2.0 * PITCH, 3.0 * PITCH));
+    }
+
+    #[test]
+    fn row_in_view_covers_any_overlap_with_the_viewport() {
+        let rows = three_rows();
+        // A viewport holding row 0 whole and clipping into row 1.
+        let (scroll_y, viewport) = (0.0, PITCH + 1.0);
+        assert!(row_in_view(&rows, 0, scroll_y, viewport, CW));
+        assert!(row_in_view(&rows, 1, scroll_y, viewport, CW));
+        assert!(!row_in_view(&rows, 2, scroll_y, viewport, CW));
+        // Scrolled past row 0 entirely.
+        assert!(!row_in_view(&rows, 0, 2.0 * PITCH, PITCH, CW));
+    }
+
+    #[test]
+    fn keep_row_in_view_pulls_the_offset_to_the_nearer_edge() {
+        // Above the viewport: align the row's top.
+        assert_eq!(keep_row_in_view(500.0, 100.0, 208.0, 300.0), 100.0);
+        // Below: align the row's bottom, so the offset lands a viewport above it.
+        assert_eq!(keep_row_in_view(0.0, 400.0, 508.0, 300.0), 208.0);
+        // Already inside: the offset is left alone.
+        assert_eq!(keep_row_in_view(100.0, 150.0, 258.0, 300.0), 100.0);
+    }
+
+    #[test]
+    fn keep_row_in_view_never_scrolls_a_tall_row_past_its_top() {
+        // A row taller than the viewport aligns to its top rather than its
+        // bottom, which would push the row's start off screen.
+        assert_eq!(keep_row_in_view(0.0, 400.0, 900.0, 300.0), 400.0);
+    }
+
+    #[test]
+    fn whole_notches_accumulate_from_fractions() {
+        let mut carry = 0.0_f32;
+        assert_eq!(take_whole_notches(&mut carry, 0.4), 0);
+        assert_eq!(take_whole_notches(&mut carry, 0.4), 0);
+        assert_eq!(take_whole_notches(&mut carry, 0.4), 1);
+        assert!((carry - 0.2_f32).abs() < 1e-5, "remainder carried: {carry}");
+    }
+
+    #[test]
+    fn whole_notches_count_down_on_negative_deltas() {
+        let mut carry = 0.0_f32;
+        assert_eq!(take_whole_notches(&mut carry, -1.5), -1);
+        assert!((carry + 0.5_f32).abs() < 1e-5, "remainder carried: {carry}");
+    }
+
+    #[test]
+    fn whole_notches_discard_the_carry_on_a_reversal() {
+        let mut carry = 0.0_f32;
+        assert_eq!(take_whole_notches(&mut carry, 0.6), 0);
+        // The first notch of the new direction must not pay off the old carry.
+        assert_eq!(take_whole_notches(&mut carry, -1.0), -1);
+        assert!(carry.abs() < 1e-5, "carry discarded: {carry}");
+    }
+
+    #[test]
+    fn thumbnail_size_clamps_to_the_range() {
+        assert_eq!(
+            clamp_thumbnail_size(THUMBNAIL_SIZE_MIN - 1),
+            THUMBNAIL_SIZE_MIN
+        );
+        assert_eq!(clamp_thumbnail_size(224), 224);
+        assert_eq!(
+            clamp_thumbnail_size(THUMBNAIL_SIZE_MAX + 1),
+            THUMBNAIL_SIZE_MAX
+        );
     }
 }

@@ -17,7 +17,7 @@ use crate::{
 };
 
 /// Selectable grid thumbnail resolutions (longest edge, in pixels).
-const THUMBNAIL_SIZES: [u32; 2] = [256, 512];
+const THUMBNAIL_RESOLUTIONS: [u32; 2] = [256, 512];
 
 /// The left category rail. Selected item carries the amber "selected frame" cue.
 pub(crate) fn rail(selected: Category) -> Element<'static, Message> {
@@ -55,34 +55,39 @@ pub(crate) fn appearance_pane(theme: ThemePreference) -> Element<'static, Messag
 /// confirmation before its destructive change commits.
 pub(crate) fn storage_pane(
     state: &SettingsState,
-    thumbnail_size: u32,
+    thumbnail_resolution: u32,
     cache_display: String,
     scan_in_flight: bool,
 ) -> Element<'static, Message> {
-    let shown_size = state.pending_thumbnail_size.unwrap_or(thumbnail_size);
-    let size_picker = pick_list(
-        THUMBNAIL_SIZES,
-        Some(shown_size),
-        Message::ThumbnailSizeSelected,
+    let shown_resolution = state
+        .pending_thumbnail_resolution
+        .unwrap_or(thumbnail_resolution);
+    let resolution_picker = pick_list(
+        THUMBNAIL_RESOLUTIONS,
+        Some(shown_resolution),
+        Message::ThumbnailResolutionSelected,
     )
     .text_size(12)
     .padding([4, 8]);
 
     let mut thumb_section = column![
         heading("THUMBNAIL RESOLUTION"),
-        control_row("Resolution (px)", size_picker.into()),
-        hint("Higher resolution sharpens the grid on high-DPI displays and uses more disk."),
+        control_row("Resolution (px)", resolution_picker.into()),
+        hint(
+            "Higher resolution sharpens the grid on high-DPI displays and at the largest \
+             thumbnail sizes, and uses more disk.",
+        ),
     ]
     .spacing(spacing::MD);
 
-    if let Some(pending) = state.pending_thumbnail_size {
+    if let Some(pending) = state.pending_thumbnail_resolution {
         thumb_section = thumb_section.push(confirm_callout(
             format!(
                 "Rebuild thumbnails at {pending} px? This clears the thumbnail cache and regenerates it."
             ),
             "Apply",
-            Message::ConfirmThumbnailSize,
-            Message::CancelThumbnailSize,
+            Message::ConfirmThumbnailResolution,
+            Message::CancelThumbnailResolution,
             scan_in_flight,
             "Waiting for the current scan to finish\u{2026}",
         ));

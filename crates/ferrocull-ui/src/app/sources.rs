@@ -224,7 +224,7 @@ impl Ferrocull {
 
         spawn_thumbnail_sipper(
             scanned_files,
-            self.thumbnail_size,
+            self.thumbnail_resolution,
             std::sync::Arc::clone(&self.thumbnail_cache),
         )
     }
