@@ -618,6 +618,7 @@ mod tests {
                 group_bursts: false,
                 expand_bursts: true,
                 date_tree_ascending: false,
+                thumbnail_size: 300,
             },
             panel_widths: PanelWidths {
                 left: 320.0,
@@ -639,6 +640,7 @@ mod tests {
         assert_eq!(loaded.view.filter_mode, FilterMode::RawOnly);
         assert!(loaded.view.hide_rejected);
         assert!(!loaded.view.group_raw_jpeg);
+        assert_eq!(loaded.view.thumbnail_size, 300);
         assert_eq!(loaded.panel_widths.left, 320.0);
         assert_eq!(loaded.panel_widths.right, 180.0);
     }

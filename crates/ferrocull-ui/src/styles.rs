@@ -5,7 +5,7 @@
 use iced::{
     Border, Color, Shadow, Theme, Vector,
     border::Radius,
-    widget::{button, container, pick_list, progress_bar, text_input},
+    widget::{button, container, pick_list, progress_bar, slider, text_input},
 };
 
 use crate::theme::{colors, radius};
@@ -576,6 +576,38 @@ pub(crate) fn keycap(theme: &Theme) -> container::Style {
             radius: radius::XS.into(),
         },
         ..Default::default()
+    }
+}
+
+/// Thumbnail size slider: neutral chrome that only warms under the pointer.
+/// The rail is a setting's track, not a state, so both halves stay neutral;
+/// amber appears on the handle while it is hovered or dragged.
+pub(crate) fn thumbnail_size_slider(theme: &Theme, status: slider::Status) -> slider::Style {
+    let palette = theme.extended_palette();
+    let handle_color = match status {
+        slider::Status::Active => palette.background.strong.color,
+        slider::Status::Hovered => colors::ACCENT_HOVER,
+        slider::Status::Dragged => colors::ACCENT,
+    };
+
+    slider::Style {
+        rail: slider::Rail {
+            backgrounds: (
+                palette.background.strong.color.into(),
+                palette.background.weaker.color.into(),
+            ),
+            width: 4.0,
+            border: Border {
+                radius: 2.0.into(),
+                ..Border::default()
+            },
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle { radius: 6.0 },
+            background: handle_color.into(),
+            border_width: 0.0,
+            border_color: Color::TRANSPARENT,
+        },
     }
 }
 

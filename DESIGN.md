@@ -167,6 +167,7 @@ Why Plex, and why statics (decided in [the typography wayfinder](https://github.
 | Undo | `arrow-counterclockwise` |
 | Burst | `stack` |
 | Storage source / Camera source / Directory source | `sd-card` / `camera` / `folder` |
+| Thumbnail size small end / large end | `grid-3x3-gap` / `grid` |
 
 Binary-size stance: the alpha ships the full font files (four Plex statics plus the icon TTF, ~1.2 MB total). Subsetting is a deferred optimization, and it must start from the `iced_fonts`-vendored TTF: upstream Bootstrap Icons distributes WOFF2 only, which this rendering stack cannot read.
 

@@ -1,8 +1,19 @@
+use std::time::Duration;
+
 use ferrocull_core::media::SortOrder;
 use iced::Task;
 
 use super::{Ferrocull, toggle_set};
-use crate::messages::{Message, filters};
+use crate::{
+    messages::{Message, filters},
+    views,
+};
+
+/// How long a thumbnail size change waits for another one before counting as
+/// settled. The slider's release settles it sooner; the timer covers every input
+/// that never reports one: the keyboard, the wheel over the grid, and the
+/// slider's own arrow keys and `Ctrl+Wheel`.
+const THUMBNAIL_SIZE_SETTLE: Duration = Duration::from_millis(200);
 
 impl Ferrocull {
     /// Move focus off an item the current visible set no longer shows, and say
@@ -19,7 +30,9 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
     // the pinned anchor is a display ordinal into the old order, so keeping it
     // would scroll to an arbitrary row after the reflow. The two burst arms are
     // exempt: they only change what is hidden, leaving the display sequence in
-    // the same order, so the photographer keeps their place.
+    // the same order, so the photographer keeps their place. So are the
+    // thumbnail size arms: resizing reflows the rows without touching the
+    // display sequence, and the anchor still names the same card.
     match msg {
         filters::Message::SortChanged(order) => return state.handle_sort_changed(order),
         filters::Message::AscendingToggled => {
@@ -85,12 +98,67 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
             state.config.clear_filters();
             state.persist_settings();
         }
+        filters::Message::ThumbnailSizeChanged(size) => {
+            return state.set_thumbnail_size(size);
+        }
+        filters::Message::ThumbnailSizeReleased => {
+            if state.thumbnail_size_pending.is_some() {
+                state.settle_thumbnail_size();
+            }
+            return Task::none();
+        }
+        filters::Message::ThumbnailSizeSettled(generation) => {
+            // A newer change owns the settle now, or the release beat the timer.
+            if state.thumbnail_size_pending == Some(generation) {
+                state.settle_thumbnail_size();
+            }
+            return Task::none();
+        }
+        filters::Message::ThumbnailSizeStepped(direction) => {
+            let stepped =
+                views::thumbnails::step_thumbnail_size(state.config.view.thumbnail_size, direction);
+            if stepped == state.config.view.thumbnail_size {
+                return Task::none();
+            }
+            return state.set_thumbnail_size(stepped);
+        }
     }
     state.rebuild_view();
     state.reset_grid_scroll()
 }
 
 impl Ferrocull {
+    /// Adopt a new thumbnail size, keep the photographer's place, and start the
+    /// settle window.
+    ///
+    /// Every input runs through here, so the slider, the keyboard, and the wheel
+    /// all defer the preference write and the thumbnail load window to the same
+    /// settle. With no measured grid width there is no geometry to re-anchor
+    /// against, so the value alone is stored.
+    pub(super) fn set_thumbnail_size(&mut self, size: u32) -> Task<Message> {
+        let reflow = self.reflow_thumbnail_size(size);
+        Task::batch([reflow, self.start_thumbnail_size_settle()])
+    }
+
+    /// Mark the thumbnail size unsettled and start the quiet-window timer for
+    /// this change. A later change supersedes the timer by bumping the
+    /// generation it carries.
+    fn start_thumbnail_size_settle(&mut self) -> Task<Message> {
+        let generation = self.thumbnail_size_generation.wrapping_add(1);
+        self.thumbnail_size_generation = generation;
+        self.thumbnail_size_pending = Some(generation);
+        Task::perform(tokio::time::sleep(THUMBNAIL_SIZE_SETTLE), move |()| {
+            Message::Filters(filters::Message::ThumbnailSizeSettled(generation))
+        })
+    }
+
+    /// Take the thumbnail size as final: write it to the preferences and let
+    /// the thumbnail load window reconcile against the settled geometry.
+    fn settle_thumbnail_size(&mut self) {
+        self.thumbnail_size_pending = None;
+        self.persist_settings();
+    }
+
     fn handle_sort_changed(&mut self, order: SortOrder) -> Task<Message> {
         if order == self.config.view.sort_order {
             return Task::none();

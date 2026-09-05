@@ -73,7 +73,10 @@ pub(crate) fn storage_pane(
     let mut thumb_section = column![
         heading("THUMBNAIL RESOLUTION"),
         control_row("Resolution (px)", resolution_picker.into()),
-        hint("Higher resolution sharpens the grid on high-DPI displays and uses more disk."),
+        hint(
+            "Higher resolution sharpens the grid on high-DPI displays and at the largest \
+             thumbnail sizes, and uses more disk.",
+        ),
     ]
     .spacing(spacing::MD);
 

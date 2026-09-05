@@ -52,6 +52,10 @@ _Avoid_: Cover, Stack top.
 The full-size single-photo view opened from the grid, navigating the same display sequence the grid shows.
 _Avoid_: Loupe, Viewer.
 
+**Thumbnail size**:
+The edge length of a grid cell, chosen by the user with a slider. It sets how large each photo is drawn and therefore how many columns fit, and it applies to the grid only. It is not the resolution of the cached thumbnail image, which is a storage preference.
+_Avoid_: Grid zoom, Cell size, Zoom (zoom means the [[preview]] zoom).
+
 **Source**:
 A thing Ferrocull can scan and ingest from. One of three subtypes:
 

@@ -125,7 +125,15 @@ pub struct ViewPrefs {
     /// session-only and never persisted.
     pub expand_bursts: bool,
     pub date_tree_ascending: bool,
+    /// Edge length of a grid cell in logical pixels, as chosen with the
+    /// thumbnail size slider. It decides how large each photo is drawn and
+    /// therefore how many columns fit; it is not the resolution of the cached
+    /// thumbnail image, which is a storage preference.
+    pub thumbnail_size: u32,
 }
+
+/// Default thumbnail size (edge length of a grid cell, in logical pixels).
+pub const DEFAULT_THUMBNAIL_SIZE: u32 = 224;
 
 impl Default for ViewPrefs {
     fn default() -> Self {
@@ -139,6 +147,7 @@ impl Default for ViewPrefs {
             group_bursts: true,
             expand_bursts: false,
             date_tree_ascending: true,
+            thumbnail_size: DEFAULT_THUMBNAIL_SIZE,
         }
     }
 }

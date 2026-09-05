@@ -9,7 +9,7 @@ use iced::{Task, widget::scrollable::AbsoluteOffset};
 
 use super::{ArrivalsWindow, Ferrocull, PreviewState, ViewMode};
 use crate::{
-    messages::{Message, grid},
+    messages::{Message, filters, grid},
     undo,
     views::{self, GRID_SCROLLABLE_ID},
 };
@@ -175,7 +175,13 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
         } => {
             return state.handle_grid_scrolled(offset, grid_width, viewport_height, content_height);
         }
-        grid::Message::Wheel(delta) => return state.handle_grid_wheel(delta),
+        grid::Message::Wheel(delta) => {
+            return if state.modifiers.command() {
+                state.handle_thumbnail_size_wheel(delta)
+            } else {
+                state.handle_grid_wheel(delta)
+            };
+        }
     }
     Task::none()
 }
@@ -193,24 +199,8 @@ impl Ferrocull {
                 AbsoluteOffset { x: 0.0, y: -y },
             ),
             iced::mouse::ScrollDelta::Lines { y: dy, .. } => {
-                // A direction reversal discards the fractional carry — hi-res
-                // wheels would otherwise swallow the first notch of the new
-                // direction paying off the old remainder.
-                if self.grid_wheel_lines * -dy < 0.0 {
-                    self.grid_wheel_lines = 0.0;
-                }
-                self.grid_wheel_lines += -dy;
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "wheel line accumulation stays far within i32"
-                )]
-                let steps = self.grid_wheel_lines.trunc() as i32;
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "the carried remainder is a small whole line count"
-                )]
-                let consumed = steps as f32;
-                self.grid_wheel_lines -= consumed;
+                // Wheel down scrolls toward later rows.
+                let steps = views::thumbnails::take_whole_notches(&mut self.grid_wheel_lines, -dy);
                 if steps == 0 {
                     return Task::none();
                 }
@@ -228,6 +218,40 @@ impl Ferrocull {
                 )
             }
         }
+    }
+
+    /// Step the thumbnail size one notch per wheel notch, resizing the grid
+    /// around the card the photographer is looking at. Touchpads report pixel
+    /// deltas rather than lines, so `PIXELS_PER_NOTCH` turns a two-finger swipe
+    /// into a few steps instead of dozens.
+    fn handle_thumbnail_size_wheel(&mut self, delta: iced::mouse::ScrollDelta) -> Task<Message> {
+        /// Pixel delta one wheel notch is worth on a touchpad.
+        const PIXELS_PER_NOTCH: f32 = 40.0;
+
+        let notches = match delta {
+            iced::mouse::ScrollDelta::Lines { y, .. } => y,
+            iced::mouse::ScrollDelta::Pixels { y, .. } => y / PIXELS_PER_NOTCH,
+        };
+        let steps =
+            views::thumbnails::take_whole_notches(&mut self.thumbnail_size_wheel_lines, notches);
+        if steps == 0 {
+            return Task::none();
+        }
+
+        // Wheel up grows the thumbnails.
+        let direction = if steps > 0 {
+            filters::SizeStep::Larger
+        } else {
+            filters::SizeStep::Smaller
+        };
+        let current = self.config.view.thumbnail_size;
+        let stepped = (0..steps.abs()).fold(current, |size, _| {
+            views::thumbnails::step_thumbnail_size(size, direction)
+        });
+        if stepped == current {
+            return Task::none();
+        }
+        self.set_thumbnail_size(stepped)
     }
 
     /// Interpret the scrollable's viewport report and keep the anchor card
@@ -279,6 +303,73 @@ impl Ferrocull {
                 Task::none()
             }
         }
+    }
+
+    /// Store `size` and scroll the reflowed grid so the photographer keeps their
+    /// place: the anchor row stays at the viewport top, and a focused card that
+    /// was on screen before the change is nudged back into view by the smallest
+    /// amount. A focused card that was already scrolled away stays away.
+    ///
+    /// The target offset is deliberately unclamped. `max_grid_offset` is derived
+    /// from the content height reported for the *previous* layout, which growing
+    /// thumbnails leave far short; iced clamps the offset itself and reports the
+    /// clamp, and that report re-anchors against the true new geometry.
+    pub(super) fn reflow_thumbnail_size(&mut self, size: u32) -> Task<Message> {
+        let Some(width) = self.grid_area_width else {
+            self.config.view.thumbnail_size = size;
+            return Task::none();
+        };
+
+        let focused_ordinal = self.focused_index.map(|idx| {
+            self.ordinal_position(idx)
+                .expect("no ordinal for focused index")
+        });
+        // Whether the focused card shows is judged against the layout the
+        // photographer is looking at, before the new size reflows it. One that
+        // was already scrolled away has no claim on where the grid lands.
+        let follow_ordinal = focused_ordinal.filter(|&ordinal| {
+            let cell_width = self.grid_cell_width(width);
+            let rows = self.grid_rows(width);
+            let row = views::thumbnails::row_for_ordinal(&rows, ordinal)
+                .expect("no row for focused ordinal");
+            views::thumbnails::row_in_view(
+                &rows,
+                row,
+                self.grid_scroll_y,
+                self.grid_viewport_height,
+                cell_width,
+            )
+        });
+
+        self.config.view.thumbnail_size = size;
+        self.grid_wheel_lines = 0.0;
+
+        let cell_width = self.grid_cell_width(width);
+        let rows = self.grid_rows(width);
+        if rows.is_empty() {
+            return Task::none();
+        }
+        let anchor = views::thumbnails::row_for_ordinal(&rows, self.grid_anchor)
+            .expect("grid anchor maps to no row");
+        let anchored = rows[anchor].offset;
+        let y = match follow_ordinal {
+            Some(ordinal) => {
+                let row = views::thumbnails::row_for_ordinal(&rows, ordinal)
+                    .expect("no row for focused ordinal");
+                let (row_top, row_bottom) = views::thumbnails::row_bounds(&rows, row, cell_width);
+                views::thumbnails::keep_row_in_view(
+                    anchored,
+                    row_top,
+                    row_bottom,
+                    self.grid_viewport_height,
+                )
+            }
+            None => anchored,
+        };
+
+        self.grid_scroll_y = y;
+        self.pin_anchor(&rows, y);
+        iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y })
     }
 
     /// Scroll so the row holding the anchor card sits at the viewport top under
@@ -343,6 +434,22 @@ impl Ferrocull {
         }
     }
 
+    /// Column count and cell width the grid lays out at, for the chosen
+    /// thumbnail size.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "thumbnail sizes are three-digit integers, exact in f32"
+    )]
+    fn grid_metrics(&self, grid_width: f32) -> (usize, f32) {
+        let nominal = self.config.view.thumbnail_size as f32;
+        views::thumbnails::grid_metrics(grid_width, nominal, self.window_scale)
+    }
+
+    /// Rendered width of one grid cell at the current geometry.
+    fn grid_cell_width(&self, grid_width: f32) -> f32 {
+        self.grid_metrics(grid_width).1
+    }
+
     /// Scroll anchors for every grid row under the current view and the
     /// geometry derived from `grid_width`. Empty when no items are visible.
     ///
@@ -358,6 +465,7 @@ impl Ferrocull {
             grouped,
             width_bits: grid_width.to_bits(),
             scale_bits: self.window_scale.to_bits(),
+            thumbnail_size: self.config.view.thumbnail_size,
         };
         if let Some((cached_key, rows)) = &self.grid_rows_cache
             && *cached_key == key
@@ -370,7 +478,7 @@ impl Ferrocull {
             self.config.view.ascending,
             grouped,
         );
-        let (cols, cell_width) = views::thumbnails::grid_metrics(grid_width, self.window_scale);
+        let (cols, cell_width) = self.grid_metrics(grid_width);
         let rows: Rc<[views::thumbnails::RowStart]> = views::thumbnails::row_starts(
             &sections,
             cols,
@@ -415,6 +523,13 @@ impl Ferrocull {
     /// can no longer host (offscreen cells are not built). Called after every
     /// `update`; cheap when the window did not move.
     pub(super) fn reconcile_thumbnail_window(&mut self) -> Task<Message> {
+        // A size change reflows the grid faster than the loads it would spawn
+        // can finish, so the window waits for the slider's release or, for the
+        // inputs that report none, for the quiet window.
+        if self.thumbnail_size_pending.is_some() {
+            return Task::none();
+        }
+
         let new_window = match self.grid_area_width {
             Some(width) => self.window_item_indices(width),
             // No scroll report yet — iced suppresses them while the content fits

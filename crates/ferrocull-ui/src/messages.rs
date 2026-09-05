@@ -172,6 +172,13 @@ pub(crate) mod filters {
         media::{DateSelection, FilterMode, SortOrder},
     };
 
+    /// Which way a keyboard or wheel notch moves the thumbnail size.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum SizeStep {
+        Larger,
+        Smaller,
+    }
+
     /// Messages for filter, sort, and grouping controls.
     #[derive(Debug, Clone, Copy)]
     pub(crate) enum Message {
@@ -190,6 +197,20 @@ pub(crate) mod filters {
         YearExpanded(i32),
         MonthExpanded(i32, u32),
         ClearAll,
+        /// Slider moved: the grid reflows to the new thumbnail size at once,
+        /// while the thumbnail load window and the stored preference wait for
+        /// the size to settle.
+        ThumbnailSizeChanged(u32),
+        /// Slider let go: the size has settled, so it is written to the
+        /// preferences and the load window catches up.
+        ThumbnailSizeReleased,
+        /// The quiet window elapsed for one slider change, carrying that
+        /// change's generation. A later change supersedes it, and its own timer
+        /// settles the size instead.
+        ThumbnailSizeSettled(u64),
+        /// One keyboard or wheel notch of thumbnail size. The grid reflows at
+        /// once and the size settles like a slider change.
+        ThumbnailSizeStepped(SizeStep),
     }
 }
 
