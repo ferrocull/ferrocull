@@ -595,7 +595,7 @@ mod tests {
         // Defaults land on the documented values, not zero/false.
         let defaults = store.settings();
         assert_eq!(defaults.preferences.theme, ThemePreference::Auto);
-        assert_eq!(defaults.preferences.thumbnail_size, 256);
+        assert_eq!(defaults.preferences.thumbnail_resolution, 256);
         assert!(defaults.preferences.cache_dir.is_none());
         assert!(defaults.view.ascending);
         assert!(defaults.view.group_raw_jpeg);
@@ -605,7 +605,7 @@ mod tests {
         let settings = AppSettings {
             preferences: Preferences {
                 theme: ThemePreference::Light,
-                thumbnail_size: 512,
+                thumbnail_resolution: 512,
                 cache_dir: Some(PathBuf::from("/tmp/ferro-cache")),
             },
             view: ViewPrefs {
@@ -629,7 +629,7 @@ mod tests {
 
         let loaded = store.settings();
         assert_eq!(loaded.preferences.theme, ThemePreference::Light);
-        assert_eq!(loaded.preferences.thumbnail_size, 512);
+        assert_eq!(loaded.preferences.thumbnail_resolution, 512);
         assert_eq!(
             loaded.preferences.cache_dir,
             Some(PathBuf::from("/tmp/ferro-cache"))

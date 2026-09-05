@@ -262,9 +262,9 @@ pub(crate) mod settings {
         ThemeChanged(ThemePreference),
         /// Stage a new thumbnail resolution awaiting confirmation (destructive:
         /// clears and regenerates the thumbnail cache).
-        ThumbnailSizeSelected(u32),
-        ConfirmThumbnailSize,
-        CancelThumbnailSize,
+        ThumbnailResolutionSelected(u32),
+        ConfirmThumbnailResolution,
+        CancelThumbnailResolution,
         /// Open the folder picker for a new cache location.
         BrowseCacheDir,
         /// Folder picker result; `Some` stages the move awaiting confirmation.

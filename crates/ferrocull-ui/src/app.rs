@@ -175,7 +175,7 @@ pub(crate) struct SettingsState {
     pub(crate) category: settings_msg::Category,
     /// Thumbnail resolution staged awaiting confirmation (destructive: clears
     /// and regenerates the thumbnail cache). `None` when nothing is staged.
-    pub(crate) pending_thumbnail_size: Option<u32>,
+    pub(crate) pending_thumbnail_resolution: Option<u32>,
     /// Cache directory staged awaiting confirmation (destructive: moves files).
     pub(crate) pending_cache_dir: Option<PathBuf>,
     /// A cache relocation is running; its confirm control stays disabled until
@@ -187,7 +187,7 @@ impl SettingsState {
     fn new() -> Self {
         Self {
             category: settings_msg::Category::default(),
-            pending_thumbnail_size: None,
+            pending_thumbnail_resolution: None,
             pending_cache_dir: None,
             cache_move_in_flight: false,
         }
@@ -296,7 +296,7 @@ struct Ferrocull {
     theme_preference: ferrocull_core::ThemePreference,
     /// Committed grid thumbnail resolution (longest edge, px), fed into the
     /// thumbnail scan.
-    thumbnail_size: u32,
+    thumbnail_resolution: u32,
     /// Committed cache root override. `None` uses the platform default
     /// (`cache::default_cache_root`); the resolved root is
     /// [`Self::cache_root`].
@@ -444,7 +444,7 @@ impl Default for Ferrocull {
         let theme_preference = settings.preferences.theme;
         crate::theme::set_preference(theme_preference);
 
-        let thumbnail_size = settings.preferences.thumbnail_size;
+        let thumbnail_resolution = settings.preferences.thumbnail_resolution;
         let cache_dir = settings.preferences.cache_dir.clone();
         let cache_root = cache_dir
             .clone()
@@ -469,7 +469,7 @@ impl Default for Ferrocull {
             config: ViewConfig::from_prefs(settings.view),
             modal: None,
             theme_preference,
-            thumbnail_size,
+            thumbnail_resolution,
             cache_dir,
             selected: BTreeSet::new(),
             sources: Vec::new(),
@@ -628,7 +628,7 @@ impl Ferrocull {
             delete_after_ingest: self.delete_after_ingest,
             preferences: Preferences {
                 theme: self.theme_preference,
-                thumbnail_size: self.thumbnail_size,
+                thumbnail_resolution: self.thumbnail_resolution,
                 cache_dir: self.cache_dir.clone(),
             },
             view: self.config.view,
@@ -1028,7 +1028,7 @@ impl scan::Input for ScanFile {
 /// thumbnails, writing them through the shared [`ThumbnailCache`].
 fn spawn_thumbnail_sipper(
     files: Vec<ScannedFile>,
-    thumbnail_size: u32,
+    thumbnail_resolution: u32,
     cache: Arc<ThumbnailCache>,
 ) -> Task<Message> {
     let thumb_sipper = sipper(move |mut sender| async move {
@@ -1036,11 +1036,16 @@ fn spawn_thumbnail_sipper(
 
         rayon::spawn(move || {
             let inputs = files.into_iter().map(ScanFile).collect();
-            scan::run(inputs, thumbnail_size, Some(cache.as_ref()), |event| {
-                // A send error means the sipper task is gone (UI closed or scan
-                // superseded), so the event has nowhere to go.
-                drop(tx.send(event));
-            });
+            scan::run(
+                inputs,
+                thumbnail_resolution,
+                Some(cache.as_ref()),
+                |event| {
+                    // A send error means the sipper task is gone (UI closed or scan
+                    // superseded), so the event has nowhere to go.
+                    drop(tx.send(event));
+                },
+            );
         });
 
         // The pipeline fires two events per file across many rayon threads.
@@ -1841,7 +1846,7 @@ fn settings_overlay<'a>(state: &'a Ferrocull, s: &'a SettingsState) -> Element<'
             Category::Appearance => views::settings::appearance_pane(state.theme_preference),
             Category::Storage => views::settings::storage_pane(
                 s,
-                state.thumbnail_size,
+                state.thumbnail_resolution,
                 state
                     .cache_root()
                     .expect("cache root unresolved")

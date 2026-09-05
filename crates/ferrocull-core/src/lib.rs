@@ -34,7 +34,7 @@ pub use hooks::Hook;
 pub use media::ColorLabel;
 pub use pattern::{Pattern, RenderContext};
 pub use persistence::{
-    AppSettings, DEFAULT_THUMBNAIL_SIZE, Preferences, ThemePreference, ViewPrefs,
+    AppSettings, DEFAULT_THUMBNAIL_RESOLUTION, Preferences, ThemePreference, ViewPrefs,
 };
 pub use profiles::{IngestConfig, NamedProfile, Profile};
 

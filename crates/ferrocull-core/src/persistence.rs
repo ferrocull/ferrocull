@@ -83,20 +83,20 @@ impl std::fmt::Display for ThemePreference {
 pub struct Preferences {
     pub theme: ThemePreference,
     /// Grid thumbnail resolution in pixels (longest edge).
-    pub thumbnail_size: u32,
+    pub thumbnail_resolution: u32,
     /// Cache root holding the `thumbnails/` and `previews/` namespaces. `None`
     /// resolves to the platform default (`cache::default_cache_root`).
     pub cache_dir: Option<PathBuf>,
 }
 
 /// Default grid thumbnail resolution (longest edge, in pixels).
-pub const DEFAULT_THUMBNAIL_SIZE: u32 = 256;
+pub const DEFAULT_THUMBNAIL_RESOLUTION: u32 = 256;
 
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             theme: ThemePreference::default(),
-            thumbnail_size: DEFAULT_THUMBNAIL_SIZE,
+            thumbnail_resolution: DEFAULT_THUMBNAIL_RESOLUTION,
             cache_dir: None,
         }
     }
