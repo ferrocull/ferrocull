@@ -835,38 +835,20 @@ impl Ferrocull {
             ViewMode::Grid => self.focused_index,
         };
 
-        // Ctrl+=/Ctrl+- step the thumbnail size, bare +/- tag and untag, both
-        // keyed on the modified key, not the base: what the press actually
-        // typed decides. On classic AZERTY the '-'/'_' base keys carry digits
-        // 6/8 under Shift, and the color-label branch below reads them as the
-        // digits they typed.
+        // +/- tag and untag, keyed on the modified key, not the base:
+        // what the press actually typed decides. On classic AZERTY the '-'/'_'
+        // base keys carry digits 6/8 under Shift, and the color-label branch
+        // below reads them as the digits they typed.
         if let Key::Character(m) = modified_key {
-            match (modifiers.command(), m.chars().next()) {
-                // The thumbnail size is grid geometry, so elsewhere the press
-                // does nothing.
-                (true, Some('+' | '=' | '-' | '_'))
-                    if !matches!(self.view_mode, ViewMode::Grid) =>
-                {
-                    return Task::none();
-                }
-                (true, Some('+' | '=')) => {
-                    return Task::done(Message::Filters(
-                        filters_msg::Message::ThumbnailSizeStepped(filters_msg::SizeStep::Larger),
-                    ));
-                }
-                (true, Some('-' | '_')) => {
-                    return Task::done(Message::Filters(
-                        filters_msg::Message::ThumbnailSizeStepped(filters_msg::SizeStep::Smaller),
-                    ));
-                }
-                (false, Some('+' | '=')) => {
+            match m.chars().next() {
+                Some('+' | '=') => {
                     return self.action_on_target(
                         target_idx,
                         |path| Message::Grid(grid_msg::Message::FileTagged(path)),
                         false,
                     );
                 }
-                (false, Some('-' | '_')) => {
+                Some('-' | '_') => {
                     return self.action_on_target(
                         target_idx,
                         |path| Message::Grid(grid_msg::Message::FileUntagged(path)),
@@ -1657,10 +1639,6 @@ fn shortcuts_overlay() -> Element<'static, Message> {
             shortcut_row(&["Home", "End"], "First / last item"),
             shortcut_row(&["Wheel"], "Scroll the grid"),
             shortcut_row(&["Ctrl", "Wheel"], "Thumbnail size"),
-            shortcut_row(
-                &["Ctrl", "+", "/", "\u{2212}"],
-                "Larger / smaller thumbnails",
-            ),
             shortcut_row(&["Space", "Enter"], "Open preview"),
         ],
     );

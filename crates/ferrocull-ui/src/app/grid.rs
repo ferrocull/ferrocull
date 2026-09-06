@@ -263,7 +263,7 @@ impl Ferrocull {
     /// differs from the current one while the grid does not. No-op until the
     /// grid width is known: without it there are no column counts to step
     /// through.
-    pub(super) fn step_thumbnail_columns(
+    fn step_thumbnail_columns(
         &mut self,
         direction: filters::SizeStep,
         count: usize,

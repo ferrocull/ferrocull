@@ -174,7 +174,7 @@ pub(crate) mod filters {
         media::{DateSelection, FilterMode, SortOrder},
     };
 
-    /// Which way a keyboard or wheel notch moves the thumbnail size.
+    /// Which way a wheel notch moves the thumbnail size.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum SizeStep {
         Larger,
@@ -210,10 +210,6 @@ pub(crate) mod filters {
         /// change's generation. A later change supersedes it, and its own timer
         /// settles the size instead.
         ThumbnailSizeSettled(u64),
-        /// One keyboard or wheel notch of thumbnail size, worth one column
-        /// count. The grid reflows at once and the size settles like a slider
-        /// change.
-        ThumbnailSizeStepped(SizeStep),
         /// Wheel over the slider: each notch moves the grid by one column
         /// count, the same step a notch over the grid takes.
         ThumbnailSizeWheel(iced::mouse::ScrollDelta),

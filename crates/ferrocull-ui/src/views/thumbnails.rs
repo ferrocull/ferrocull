@@ -1620,8 +1620,8 @@ mod tests {
     }
 
     /// The contract the controls rest on: every column count the grid can show
-    /// has a nominal size that selects it, so one notch of the slider, the
-    /// wheel, or the keyboard lands on exactly the next count.
+    /// has a nominal size that selects it, so one notch of the slider or the
+    /// wheel lands on exactly the next count.
     #[test]
     fn every_reachable_column_count_has_a_nominal() {
         for (width, scale) in width_sweep() {

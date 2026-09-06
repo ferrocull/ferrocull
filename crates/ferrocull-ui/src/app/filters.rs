@@ -7,9 +7,9 @@ use super::{Ferrocull, toggle_set};
 use crate::messages::{Message, filters};
 
 /// How long a thumbnail size change waits for another one before counting as
-/// settled. The slider's release settles it sooner; the timer covers every input
-/// that never reports one: the keyboard step, and the wheel over the grid or
-/// over the slider.
+/// settled. The slider's release settles it sooner; the timer covers the inputs
+/// that never report one: the wheel over the grid, and the wheel over the
+/// slider.
 const THUMBNAIL_SIZE_SETTLE: Duration = Duration::from_millis(200);
 
 impl Ferrocull {
@@ -114,9 +114,6 @@ pub(super) fn update(state: &mut Ferrocull, msg: filters::Message) -> Task<Messa
         filters::Message::ThumbnailSizeWheel(delta) => {
             return state.handle_thumbnail_size_wheel(delta);
         }
-        filters::Message::ThumbnailSizeStepped(direction) => {
-            return state.step_thumbnail_columns(direction, 1);
-        }
     }
     state.rebuild_view();
     state.reset_grid_scroll()
@@ -126,10 +123,10 @@ impl Ferrocull {
     /// Adopt a new thumbnail size, keep the photographer's place, and start the
     /// settle window.
     ///
-    /// Every input runs through here, so the slider, the keyboard, and the wheel
-    /// all defer the preference write and the thumbnail load window to the same
-    /// settle. With no measured grid width there is no geometry to re-anchor
-    /// against, so the value alone is stored.
+    /// Every input runs through here, so the slider and the wheel both defer
+    /// the preference write and the thumbnail load window to the same settle.
+    /// With no measured grid width there is no geometry to re-anchor against,
+    /// so the value alone is stored.
     pub(super) fn set_thumbnail_size(&mut self, size: u32) -> Task<Message> {
         let reflow = self.reflow_thumbnail_size(size);
         Task::batch([reflow, self.start_thumbnail_size_settle()])
