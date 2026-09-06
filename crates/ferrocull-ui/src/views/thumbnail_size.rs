@@ -12,7 +12,7 @@ use crate::{
     views::thumbnails::{
         THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN, column_range, grid_metrics, nominal_for_columns,
     },
-    widgets::WheelArea,
+    widgets::{keyboard_shield, wheel_area},
 };
 
 /// Width of the slider track, in logical pixels.
@@ -28,6 +28,10 @@ pub(crate) fn control(size: u32, geometry: Option<(f32, f32)>) -> Element<'stati
         None => nominal_track(size),
     };
 
+    // The slider claims the arrow keys whenever the pointer rests on its track;
+    // the shield keeps them for the application's own focus movement.
+    let track = keyboard_shield(track);
+
     let control = row![
         crate::icons::thumbnails_small().size(12),
         track,
@@ -38,7 +42,7 @@ pub(crate) fn control(size: u32, geometry: Option<(f32, f32)>) -> Element<'stati
 
     // The slider itself answers a wheel only with Ctrl held; the wrapper takes
     // every notch first, so a bare wheel over the control steps the size.
-    let control = WheelArea::new(control).on_scroll(Message::ThumbnailSizeWheel);
+    let control = wheel_area(control, Message::ThumbnailSizeWheel);
 
     tooltip(
         control,
@@ -59,10 +63,6 @@ pub(crate) fn control(size: u32, geometry: Option<(f32, f32)>) -> Element<'stati
 /// draws that as a handle at the track start and reads any drag as the value it
 /// already holds.
 #[expect(
-    clippy::cast_precision_loss,
-    reason = "thumbnail sizes are three-digit integers, exact in f32"
-)]
-#[expect(
     clippy::cast_possible_truncation,
     reason = "a column count fits a grid of screen width, far below u32::MAX"
 )]
@@ -70,7 +70,7 @@ fn column_track(size: u32, width: f32, scale: f32) -> Element<'static, Message> 
     let range = column_range(width, scale);
     let most = *range.end();
     let last_position = (most - *range.start()) as u32;
-    let position = (most - grid_metrics(width, size as f32, scale).0) as u32;
+    let position = (most - grid_metrics(width, size, scale).0) as u32;
 
     slider(0..=last_position, position, move |position| {
         Message::ThumbnailSizeChanged(nominal_for_columns(width, most - position as usize))
@@ -83,9 +83,9 @@ fn column_track(size: u32, width: f32, scale: f32) -> Element<'static, Message> 
 }
 
 /// The nominal size itself, offered while no grid width has been measured, as
-/// an empty grid reports none. There are no column counts to step through then, so
-/// the handle runs over the size range instead and the preference can still be
-/// set; the column track takes over on the first viewport report.
+/// an empty grid reports none. There are no column counts to step through then,
+/// so the handle runs over the size range instead and the preference can still
+/// be set; the column track takes over on the first layout.
 fn nominal_track(size: u32) -> Element<'static, Message> {
     slider(
         THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX,

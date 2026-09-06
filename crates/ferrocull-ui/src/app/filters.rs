@@ -8,8 +8,8 @@ use crate::messages::{Message, filters};
 
 /// How long a thumbnail size change waits for another one before counting as
 /// settled. The slider's release settles it sooner; the timer covers every input
-/// that never reports one: the keyboard, the wheel over the grid, and the
-/// slider's own arrow keys and `Ctrl+Wheel`.
+/// that never reports one: the keyboard step, and the wheel over the grid or
+/// over the slider.
 const THUMBNAIL_SIZE_SETTLE: Duration = Duration::from_millis(200);
 
 impl Ferrocull {

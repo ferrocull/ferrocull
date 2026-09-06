@@ -169,12 +169,12 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
         }
         grid::Message::Scrolled {
             offset,
-            grid_width,
             viewport_height,
             content_height,
         } => {
-            return state.handle_grid_scrolled(offset, grid_width, viewport_height, content_height);
+            return state.handle_grid_scrolled(offset, viewport_height, content_height);
         }
+        grid::Message::Resized(width) => return state.handle_grid_resized(width),
         grid::Message::Wheel(delta) => {
             return if state.modifiers.command() {
                 state.handle_thumbnail_size_wheel(delta)
@@ -209,9 +209,12 @@ impl Ferrocull {
                 else {
                     return Task::none();
                 };
-                let offset = rows[target].offset;
+                // A grid whose content fits its viewport cannot scroll, so the
+                // clamp holds the step at 0. Either way the pinned anchor is the
+                // row that actually reaches the viewport top.
+                let offset = rows[target].offset.min(self.max_grid_offset(width));
                 self.grid_scroll_y = offset;
-                self.grid_anchor = rows[target].ordinal;
+                self.pin_anchor(&rows, offset);
                 iced::widget::operation::scroll_to(
                     GRID_SCROLLABLE_ID,
                     AbsoluteOffset { x: 0.0, y: offset },
@@ -284,40 +287,33 @@ impl Ferrocull {
     /// iced funnels scrolls, window resizes, and content growth through this one
     /// channel and clamps the offset against reflowed content before reporting,
     /// so the offset alone is ambiguous. [`views::thumbnails::scroll_reaction`]
-    /// disambiguates from the geometry deltas: a reflow or a clamp re-pins the
-    /// stored anchor; only a pure offset move at unchanged geometry is a user
-    /// scroll that moves the anchor.
+    /// disambiguates from the height deltas: a clamp re-pins the stored anchor;
+    /// only a pure offset move at unchanged heights is a user scroll that moves
+    /// the anchor.
     fn handle_grid_scrolled(
         &mut self,
         offset: f32,
-        grid_width: f32,
         viewport_height: f32,
         content_height: f32,
     ) -> Task<Message> {
-        let prev = self
+        let width = self
             .grid_area_width
-            .map(|width| views::thumbnails::GridGeometry {
-                width,
-                viewport_height: self.grid_viewport_height,
-                content_height: self.grid_content_height,
-                scroll_y: self.grid_scroll_y,
-            });
-        let reaction = views::thumbnails::scroll_reaction(
-            prev,
-            offset,
-            grid_width,
-            viewport_height,
-            content_height,
-        );
+            .expect("grid viewport reported before its width");
+        let prev = views::thumbnails::GridGeometry {
+            viewport_height: self.grid_viewport_height,
+            content_height: self.grid_content_height,
+            scroll_y: self.grid_scroll_y,
+        };
+        let reaction =
+            views::thumbnails::scroll_reaction(prev, offset, viewport_height, content_height);
 
-        self.grid_area_width = Some(grid_width);
         self.grid_viewport_height = viewport_height;
         self.grid_content_height = content_height;
 
         match reaction {
-            views::thumbnails::ScrollReaction::Reanchor => self.reanchor_grid(grid_width),
+            views::thumbnails::ScrollReaction::Reanchor => self.reanchor_grid(width),
             views::thumbnails::ScrollReaction::AdoptOffset => {
-                let rows = self.grid_rows(grid_width);
+                let rows = self.grid_rows(width);
                 self.pin_anchor(&rows, offset);
                 self.grid_scroll_y = offset;
                 Task::none()
@@ -329,15 +325,31 @@ impl Ferrocull {
         }
     }
 
+    /// Adopt the width the grid just laid its columns out against and keep the
+    /// anchor card pinned to the viewport top across the reflow it implies.
+    ///
+    /// The sensor reports on every layout whose size changed, so a report whose
+    /// width matches the stored one is a content-height change and leaves the
+    /// columns alone.
+    fn handle_grid_resized(&mut self, width: f32) -> Task<Message> {
+        let Some(previous) = self.grid_area_width.replace(width) else {
+            return Task::none();
+        };
+        if (width - previous).abs() <= views::thumbnails::GEOM_EPS {
+            return Task::none();
+        }
+        let Some(y) = self.anchor_offset(width) else {
+            return Task::none();
+        };
+        let y = y.min(self.max_grid_offset(width));
+        self.grid_scroll_y = y;
+        iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y })
+    }
+
     /// Store `size` and scroll the reflowed grid so the photographer keeps their
     /// place: the anchor row stays at the viewport top, and a focused card that
     /// was on screen before the change is nudged back into view by the smallest
     /// amount. A focused card that was already scrolled away stays away.
-    ///
-    /// The target offset is deliberately unclamped. `max_grid_offset` is derived
-    /// from the content height reported for the *previous* layout, which growing
-    /// thumbnails leave far short; iced clamps the offset itself and reports the
-    /// clamp, and that report re-anchors against the true new geometry.
     pub(super) fn reflow_thumbnail_size(&mut self, size: u32) -> Task<Message> {
         let Some(width) = self.grid_area_width else {
             self.config.view.thumbnail_size = size;
@@ -376,8 +388,8 @@ impl Ferrocull {
         let anchor = views::thumbnails::row_for_ordinal(&rows, self.grid_anchor)
             .expect("grid anchor maps to no row");
         let anchored = rows[anchor].offset;
-        let y = match follow_ordinal {
-            Some(ordinal) => {
+        let y = follow_ordinal
+            .and_then(|ordinal| {
                 let row = views::thumbnails::row_for_ordinal(&rows, ordinal)
                     .expect("no row for focused ordinal");
                 let (row_top, row_bottom) = views::thumbnails::row_bounds(&rows, row, cell_width);
@@ -387,9 +399,9 @@ impl Ferrocull {
                     row_bottom,
                     self.grid_viewport_height,
                 )
-            }
-            None => anchored,
-        };
+            })
+            .unwrap_or(anchored)
+            .min(self.max_grid_offset(width));
 
         self.grid_scroll_y = y;
         self.pin_anchor(&rows, y);
@@ -403,26 +415,33 @@ impl Ferrocull {
     /// screenful its row cannot reach the very top, and matching iced's clamp
     /// here keeps the follow-up report from reading the clamp as a user scroll.
     pub(super) fn reanchor_grid(&mut self, grid_width: f32) -> Task<Message> {
+        let Some(y) = self.anchor_offset(grid_width) else {
+            return Task::none();
+        };
+        let y = y.min(self.max_grid_offset(grid_width));
+        self.grid_scroll_y = y;
+        iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y })
+    }
+
+    /// Content-space top of the row holding the anchor card, under the geometry
+    /// `grid_width` gives. `None` when the view has no rows.
+    fn anchor_offset(&mut self, grid_width: f32) -> Option<f32> {
         let rows = self.grid_rows(grid_width);
         if rows.is_empty() {
-            return Task::none();
+            return None;
         }
         let target = views::thumbnails::row_for_ordinal(&rows, self.grid_anchor)
             .expect("grid anchor maps to no row");
-        let y = rows[target].offset.min(self.max_grid_offset());
-        self.grid_scroll_y = y;
-        iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y })
+        Some(rows[target].offset)
     }
 
     /// Pin the grid's anchor to `idx`'s row and bring that row to the viewport
     /// top.
     ///
     /// The counterpart to [`Self::scroll_focus_into_view`] for a rebuild that
-    /// changes how tall the content is. That one nudges by the smallest amount
-    /// against the content height reported for the *previous* layout, which a
-    /// bulk expand leaves far short; this one pins an ordinal, so the viewport
-    /// report that follows the reflow re-anchors the same card once the true
-    /// height is known.
+    /// changes how tall the content is. That one nudges the offset by the
+    /// smallest amount that reveals the row; this one pins an ordinal, so every
+    /// later reflow re-anchors the same card.
     pub(super) fn anchor_grid_to(&mut self, idx: usize) -> Task<Message> {
         let Some(width) = self.grid_area_width else {
             return Task::none();
@@ -445,10 +464,20 @@ impl Ferrocull {
         iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y: 0.0 })
     }
 
-    /// Largest scroll offset the grid can reach: content minus viewport, floored
-    /// at zero when the content is shorter than the viewport.
-    fn max_grid_offset(&self) -> f32 {
-        (self.grid_content_height - self.grid_viewport_height).max(0.0)
+    /// Largest scroll offset the grid can reach at `grid_width`: the row model's
+    /// content height minus the viewport, floored at zero when the content is
+    /// shorter than the viewport.
+    ///
+    /// A `grid_viewport_height` of `0.0` marks the viewport as not yet reported.
+    /// The scrollable reports one the first time its content overflows, so until
+    /// then the content fits and the grid cannot scroll at all.
+    fn max_grid_offset(&mut self, grid_width: f32) -> f32 {
+        if self.grid_viewport_height <= 0.0 {
+            return 0.0;
+        }
+        let cell_width = self.grid_cell_width(grid_width);
+        let rows = self.grid_rows(grid_width);
+        (views::thumbnails::content_height(&rows, cell_width) - self.grid_viewport_height).max(0.0)
     }
 
     /// Pin the anchor to the row occupying the viewport top at `offset`.
@@ -460,22 +489,17 @@ impl Ferrocull {
 
     /// Column count and cell width the grid lays out at, for the chosen
     /// thumbnail size.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "thumbnail sizes are three-digit integers, exact in f32"
-    )]
     fn grid_metrics(&self, grid_width: f32) -> (usize, f32) {
-        let nominal = self.config.view.thumbnail_size as f32;
-        views::thumbnails::grid_metrics(grid_width, nominal, self.window_scale)
+        views::thumbnails::grid_metrics(
+            grid_width,
+            self.config.view.thumbnail_size,
+            self.window_scale,
+        )
     }
 
     /// Column count a grid of `grid_width` shows at the given nominal size.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "thumbnail sizes are three-digit integers, exact in f32"
-    )]
     fn columns_for(&self, grid_width: f32, nominal: u32) -> usize {
-        views::thumbnails::grid_metrics(grid_width, nominal as f32, self.window_scale).0
+        views::thumbnails::grid_metrics(grid_width, nominal, self.window_scale).0
     }
 
     /// Rendered width of one grid cell at the current geometry.
@@ -565,8 +589,9 @@ impl Ferrocull {
 
         let new_window = match self.grid_area_width {
             Some(width) => self.window_item_indices(width),
-            // No scroll report yet — iced suppresses them while the content fits
-            // the viewport, so the visible set is bounded: load all of it.
+            // No layout yet: the frame that first draws these items has not been
+            // painted, or the grid is empty. The set is bounded either way, so
+            // load all of it.
             None => self.media.sorted_view().values().copied().collect(),
         };
 
@@ -615,30 +640,23 @@ impl Ferrocull {
         let Some(width) = self.grid_area_width else {
             return Task::none();
         };
+        let cell_width = self.grid_cell_width(width);
         let rows = self.grid_rows(width);
         let ordinal = self
             .ordinal_position(idx)
             .expect("no ordinal for focused index");
         let target =
             views::thumbnails::row_for_ordinal(&rows, ordinal).expect("no row for focused ordinal");
-        // Row anchors double as content-space row tops (monotonic, gap-adjusted).
-        let row_top = rows[target].offset;
-        let row_bot = rows
-            .get(target + 1)
-            .map_or(self.grid_content_height, |r| r.offset);
-        let view_top = self.grid_scroll_y;
-        let view_bot = view_top + self.grid_viewport_height;
-
-        let y = if row_top < view_top {
-            row_top
-        } else if row_bot > view_bot {
-            // Align the row's bottom to the viewport, but never past its top (a
-            // row taller than the viewport aligns to the top instead).
-            (row_bot - self.grid_viewport_height).min(row_top)
-        } else {
+        let (row_top, row_bottom) = views::thumbnails::row_bounds(&rows, target, cell_width);
+        let Some(y) = views::thumbnails::keep_row_in_view(
+            self.grid_scroll_y,
+            row_top,
+            row_bottom,
+            self.grid_viewport_height,
+        ) else {
             return Task::none();
         };
-        let y = y.clamp(0.0, self.max_grid_offset());
+        let y = y.clamp(0.0, self.max_grid_offset(width));
 
         self.grid_scroll_y = y;
         self.pin_anchor(&rows, y);

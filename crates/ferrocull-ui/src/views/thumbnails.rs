@@ -14,7 +14,7 @@ use iced::{
     Color, ContentFit, Element, Fill, Shrink,
     widget::{
         Space, Stack, center, column, container, grid, image, mouse_area, responsive, row,
-        scrollable, text,
+        scrollable, sensor, text,
     },
 };
 
@@ -25,7 +25,7 @@ use crate::{
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
     views::{burst, status},
-    widgets::WheelArea,
+    widgets::wheel_area,
 };
 
 /// What happened inside a thumbnail card (no idx, no path — parent enriches).
@@ -55,16 +55,21 @@ pub(crate) enum Event {
     BurstToggle(DateTime<Utc>),
     /// Wheel scrolled over the grid — the parent snaps row-by-row.
     Wheel(iced::mouse::ScrollDelta),
-    /// Viewport report from the scrollable: absolute y offset plus the grid's
-    /// available width and the viewport/content heights (fires on scrolls,
-    /// window resizes, and item loads). The heights let the parent tell a user
-    /// scroll from an offset clamp caused by a geometry change.
+    /// Viewport report from the scrollable: absolute y offset plus the
+    /// viewport/content heights (fires on scrolls, window resizes, and item
+    /// loads). The heights let the parent tell a user scroll from an offset
+    /// clamp caused by a geometry change.
     Scrolled {
         offset: f32,
-        grid_width: f32,
         viewport_height: f32,
         content_height: f32,
     },
+    /// The grid's laid-out content width, exactly the width the `responsive`
+    /// closure lays the columns out against. Reported on the first layout and
+    /// on every layout whose size changed, so the width repeats whenever it is
+    /// the content height that moved; the scrollbar gutter appearing or
+    /// disappearing is one of the changes that does move it.
+    Resized(f32),
 }
 
 /// Smallest nominal thumbnail size, in logical pixels. It bounds the chosen
@@ -83,6 +88,10 @@ pub(crate) const THUMBNAIL_SIZE_MIN: u32 = 150;
 pub(crate) const THUMBNAIL_SIZE_MAX: u32 = 448;
 /// Widget ID for the thumbnail scrollable — used by `snap_to` to scroll to items.
 pub(crate) const GRID_SCROLLABLE_ID: &str = "thumbnail-grid";
+/// Width of the embedded scrollbar rail. With its margin and its spacing to the
+/// content both at zero, it is also the content inset the rail takes while the
+/// content overflows: iced pads by width plus twice the margin plus the spacing.
+pub(crate) const SCROLLBAR_GUTTER: f32 = 10.0;
 
 /// Column count and cell width for a given available content width and
 /// `nominal` cell width (the chosen thumbnail size).
@@ -102,10 +111,11 @@ pub(crate) const GRID_SCROLLABLE_ID: &str = "thumbnail-grid";
 )]
 #[expect(
     clippy::cast_precision_loss,
-    reason = "column count is far below f32's 2^23 exact-integer range"
+    reason = "column counts and thumbnail sizes are far below f32's 2^23 exact-integer range"
 )]
-pub(crate) fn grid_metrics(available: f32, nominal: f32, scale: f32) -> (usize, f32) {
-    let cols = (((available + spacing::SM) / (nominal + spacing::SM)).ceil() as usize).max(1);
+pub(crate) fn grid_metrics(available: f32, nominal: u32, scale: f32) -> (usize, f32) {
+    let cols =
+        (((available + spacing::SM) / (nominal as f32 + spacing::SM)).ceil() as usize).max(1);
     let exact = (available - spacing::SM * (cols - 1) as f32) / cols as f32;
     let cell_width = (exact * scale).floor() / scale;
     (cols, cell_width)
@@ -114,19 +124,24 @@ pub(crate) fn grid_metrics(available: f32, nominal: f32, scale: f32) -> (usize, 
 /// The column counts a grid of `width` can show, fewest first: the count at
 /// [`THUMBNAIL_SIZE_MAX`] through the count at [`THUMBNAIL_SIZE_MIN`]. Never
 /// empty: the two limits give the same count on a narrow grid.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "thumbnail sizes are three-digit integers, exact in f32"
-)]
 pub(crate) fn column_range(width: f32, scale: f32) -> RangeInclusive<usize> {
-    let fewest = grid_metrics(width, THUMBNAIL_SIZE_MAX as f32, scale).0;
-    let most = grid_metrics(width, THUMBNAIL_SIZE_MIN as f32, scale).0;
+    let fewest = grid_metrics(width, THUMBNAIL_SIZE_MAX, scale).0;
+    let most = grid_metrics(width, THUMBNAIL_SIZE_MIN, scale).0;
     fewest..=most
 }
 
 /// The nominal size that lays a grid of `width` out in `cols` columns: the cell
 /// width that count renders at, rounded up to a whole logical pixel so the
 /// ceil-fit in [`grid_metrics`] cannot read it as one column more.
+///
+/// The extra [`SCROLLBAR_GUTTER`] share per column keeps the count stable when
+/// the gutter appears or disappears, which it does at the exact-fit height where
+/// one more row of thumbnails starts or stops overflowing. The count holds
+/// across `width ± SCROLLBAR_GUTTER` as long as
+/// `width + SM >= SCROLLBAR_GUTTER * (2 * cols - 1) + cols * (cols - 1)`, the
+/// margin plus the rounding slack staying inside the width one more column would
+/// need; with `cols` bounded by [`column_range`] that holds past 20000 logical
+/// pixels.
 ///
 /// The clamp only bites at the ends of [`column_range`], where the limit itself
 /// is the size that selects the count, so the result always selects `cols`.
@@ -141,7 +156,7 @@ pub(crate) fn column_range(width: f32, scale: f32) -> RangeInclusive<usize> {
 )]
 pub(crate) fn nominal_for_columns(width: f32, cols: usize) -> u32 {
     let exact = (width - spacing::SM * (cols - 1) as f32) / cols as f32;
-    clamp_thumbnail_size(exact.ceil() as u32)
+    clamp_thumbnail_size((exact + SCROLLBAR_GUTTER / cols as f32).ceil() as u32)
 }
 
 /// The nominal size one column count away from `current` on a grid of `width`.
@@ -153,13 +168,9 @@ pub(crate) fn nominal_for_columns(width: f32, cols: usize) -> u32 {
 /// `current` is any size in the preference range, not that canonical nominal,
 /// so callers compare column counts rather than nominals to tell a step that
 /// changed the grid from one that did not.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "thumbnail sizes are three-digit integers, exact in f32"
-)]
 pub(crate) fn step_columns(width: f32, scale: f32, current: u32, direction: SizeStep) -> u32 {
     let range = column_range(width, scale);
-    let cols = grid_metrics(width, current as f32, scale).0;
+    let cols = grid_metrics(width, current, scale).0;
     let target = match direction {
         SizeStep::Larger => cols.saturating_sub(1).max(*range.start()),
         SizeStep::Smaller => (cols + 1).min(*range.end()),
@@ -209,15 +220,20 @@ pub(crate) const GRID_OVERSCAN: f32 = 1000.0;
 /// exactly on a row boundary despite `f32` round-trips.
 const ROW_EPS: f32 = 1.0;
 
-/// One grid row's scroll anchor: the offset that lands it at the viewport top,
-/// and the display-order index of its first card. Plain rows keep an `SM` gap
-/// above them — exactly the inter-row spacing, so the previous row ends at the
-/// viewport edge without its card bottoms bleeding in. Section-first rows
-/// anchor their header with an `MD` gap; the `LG` section spacing above absorbs
-/// it without bleed.
+/// One grid row: the offset that lands it at the viewport top, the
+/// content-space top edge of its cards, and the display-order index of its
+/// first card.
+///
+/// The anchor sits above the cards, by a gap that depends on what precedes
+/// them. Plain rows keep an `SM` gap, exactly the inter-row spacing, so the
+/// previous row ends at the viewport edge without its card bottoms bleeding in.
+/// Section-first rows anchor their header instead, an `MD` gap above it; the
+/// `LG` section spacing above absorbs that without bleed, and `top` then sits
+/// the `MD` gap plus a whole header block below the anchor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RowStart {
     pub offset: f32,
+    pub top: f32,
     pub ordinal: usize,
 }
 
@@ -255,6 +271,7 @@ pub(crate) fn row_starts(
             };
             rows.push(RowStart {
                 offset,
+                top: row_top,
                 ordinal: start + r * cols,
             });
         }
@@ -265,16 +282,26 @@ pub(crate) fn row_starts(
     rows
 }
 
-/// Content-space top and bottom of row `row`. Row anchors are monotonic and sit
-/// within a gap of each row's content top, so the next row's anchor doubles as
-/// this row's bottom; the last row has no successor and spans one pitch
-/// (`cell_width + spacing::SM`) instead.
+/// Content-space span of row `row`, from its anchor to the anchor of the row
+/// below. Row anchors are monotonic and sit within a gap of each row's cards, so
+/// the next row's anchor doubles as this row's bottom. The last row has no
+/// successor and ends at the bottom of the content: its cards plus the `MD`
+/// padding the scrollable keeps under them, which is the same padding
+/// [`row_starts`] opens its cursor with at the top.
 pub(crate) fn row_bounds(rows: &[RowStart], row: usize, cell_width: f32) -> (f32, f32) {
-    let top = rows[row].offset;
     let bottom = rows
         .get(row + 1)
-        .map_or(top + cell_width + spacing::SM, |next| next.offset);
-    (top, bottom)
+        .map_or(rows[row].top + cell_width + spacing::MD, |next| next.offset);
+    (rows[row].offset, bottom)
+}
+
+/// Height of the scrollable's content under the geometry `rows` was built for:
+/// the bottom of the last row, which is its cards plus the `MD` padding the
+/// content keeps under them. Zero for an empty grid.
+pub(crate) fn content_height(rows: &[RowStart], cell_width: f32) -> f32 {
+    rows.len()
+        .checked_sub(1)
+        .map_or(0.0, |last| row_bounds(rows, last, cell_width).1)
 }
 
 /// Whether any part of row `row` shows in the viewport at `scroll_y`.
@@ -290,16 +317,22 @@ pub(crate) fn row_in_view(
 }
 
 /// `y` moved by the smallest amount that brings the row spanning
-/// `row_top..row_bottom` into a viewport of `viewport_height`. A row above the
-/// viewport aligns to its top, one below aligns to its bottom, and a row taller
-/// than the viewport aligns to its top rather than pushing its start off screen.
-pub(crate) fn keep_row_in_view(y: f32, row_top: f32, row_bottom: f32, viewport_height: f32) -> f32 {
+/// `row_top..row_bottom` into a viewport of `viewport_height`, or `None` when
+/// the row already shows whole. A row above the viewport aligns to its top, one
+/// below aligns to its bottom, and a row taller than the viewport aligns to its
+/// top rather than pushing its start off screen.
+pub(crate) fn keep_row_in_view(
+    y: f32,
+    row_top: f32,
+    row_bottom: f32,
+    viewport_height: f32,
+) -> Option<f32> {
     if row_top < y {
-        row_top
+        Some(row_top)
     } else if row_bottom > y + viewport_height {
-        (row_bottom - viewport_height).min(row_top)
+        Some((row_bottom - viewport_height).min(row_top))
     } else {
-        y
+        None
     }
 }
 
@@ -460,7 +493,6 @@ pub(crate) fn row_run_spacers(
 /// next one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GridGeometry {
-    pub width: f32,
     pub viewport_height: f32,
     pub content_height: f32,
     pub scroll_y: f32,
@@ -479,41 +511,36 @@ pub(crate) enum ScrollReaction {
     Idle,
 }
 
-/// Below this, an offset or height delta is float noise, not a real change.
-const GEOM_EPS: f32 = 0.5;
+/// Below this, a geometry delta is float noise, not a real change.
+pub(crate) const GEOM_EPS: f32 = 0.5;
 
 /// Classify a viewport report against the previous one.
 ///
 /// iced reports scrolls, window resizes, and content growth through the same
 /// channel, and on any reflow it clamps the absolute offset against the new
-/// content *before* reporting — so a bare offset move is ambiguous. The
-/// geometry deltas disambiguate:
+/// content *before* reporting — so a bare offset move is ambiguous. The height
+/// deltas disambiguate:
 ///
-/// - **Width changed** — the column count reflowed, so every row sits at a new
-///   offset. Re-pin the anchor regardless of whether the offset moved.
 /// - **Offset moved while a height changed** — a clamp from a vertical resize
 ///   or content reflow, never a user scroll (scrolling does not resize the
 ///   viewport or the content). Re-pin; do not read the clamped offset as
 ///   intent.
-/// - **Offset moved with all geometry unchanged** — the only true user scroll
+/// - **Offset moved with the heights unchanged** — the only true user scroll
 ///   (drag, touchpad, keyboard). Adopt it.
 ///
-/// The first report (`prev` is `None`) only seeds the geometry.
+/// Width changes never reach here: [`Event::Resized`] carries them, and the
+/// parent re-anchors there. Against the zero geometry the grid starts from, the
+/// first report is idle: the heights appear while the offset stays at 0.
 pub(crate) fn scroll_reaction(
-    prev: Option<GridGeometry>,
+    prev: GridGeometry,
     offset: f32,
-    width: f32,
     viewport_height: f32,
     content_height: f32,
 ) -> ScrollReaction {
-    let Some(prev) = prev else {
-        return ScrollReaction::Idle;
-    };
     let moved = (offset - prev.scroll_y).abs() > GEOM_EPS;
-    let width_changed = (width - prev.width).abs() > GEOM_EPS;
     let heights_changed = (viewport_height - prev.viewport_height).abs() > GEOM_EPS
         || (content_height - prev.content_height).abs() > GEOM_EPS;
-    if width_changed || (moved && heights_changed) {
+    if moved && heights_changed {
         ScrollReaction::Reanchor
     } else if moved {
         ScrollReaction::AdoptOffset
@@ -616,14 +643,8 @@ pub(crate) fn thumbnail_grid<'a>(
     // `responsive` runs at layout time, so `size.width` is the true grid area:
     // iced has already subtracted the container's `MD` padding and, when the
     // content overflows, the embedded scrollbar's gutter.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "thumbnail sizes are three-digit integers, exact in f32"
-    )]
-    let nominal = thumbnail_size as f32;
-
     let grid = responsive(move |size| {
-        let (cols, cell_width) = grid_metrics(size.width, nominal, window_scale);
+        let (cols, cell_width) = grid_metrics(size.width, thumbnail_size, window_scale);
 
         // Center the grid by splitting the leftover into a side margin floored
         // to the physical-pixel grid — a fractional offset would shift every
@@ -704,39 +725,47 @@ pub(crate) fn thumbnail_grid<'a>(
     })
     .height(Shrink);
 
-    // The embedded scrollbar (`spacing`) insets the content, so the
-    // `responsive` above measures the true grid width. Zero spacing keeps the
-    // gutter to the rail itself, giving cards the same `MD` gap to the rail as
-    // to the left edge. The gutter exists only while the content overflows, so
-    // at an exact-fit height the measured width can flip between passes.
+    // Setting the scrollbar's `spacing` picks the embedded rail, which insets
+    // the content by `SCROLLBAR_GUTTER`, so the `responsive` above measures
+    // the true grid width. Zero spacing keeps the gutter to the rail itself,
+    // giving cards the same `MD` gap to the rail as to the left edge. The gutter
+    // exists only while the content overflows, so at an exact-fit height the
+    // measured width can flip between passes.
     //
-    // The `WheelArea` wrapping the scrollable owns every wheel over the panel,
+    // The wheel area wrapping the scrollable owns every wheel over the panel,
     // rail included, so row snapping and `Ctrl+Wheel` sizing are the only
     // responses to a notch and do not depend on the scrollable's own wheel
     // handling. Scrollbar drag and keyboard scrolling still reach the
     // scrollable and report back through `on_scroll`.
     //
-    // `on_scroll` doubles as the grid-width channel: it re-fires on any redraw
-    // where the viewport or content bounds changed (scrolls, window resizes,
-    // item loads), and `content_bounds` minus this container's `MD` padding is
-    // exactly the `available` the `responsive` closure receives. A content-
-    // wrapping `sensor` cannot do this job: iced gates `on_resize` on the
-    // distance from the viewport to the sensor's *corners*, so a sensor the
-    // size of the grid goes silent once the user scrolls off the top.
-    WheelArea::new(
-        scrollable(container(grid).padding(spacing::MD).width(Fill))
-            .id(GRID_SCROLLABLE_ID)
-            .on_scroll(|vp| Event::Scrolled {
-                offset: vp.absolute_offset().y,
-                grid_width: vp.content_bounds().width - 2.0 * spacing::MD,
-                viewport_height: vp.bounds().height,
-                content_height: vp.content_bounds().height,
-            })
-            .spacing(0)
-            .width(Fill)
-            .height(Fill),
+    // The `sensor` carries the grid width. `on_resize` without an `on_show` has
+    // no visibility gate, so it reports from every layout, including the ones
+    // the scrollable stays silent through because the content fits its
+    // viewport. The sensor lays out transparently around the `responsive` and
+    // sits inside the `MD` padding, so its bounds are the grid's available
+    // width to the pixel.
+    wheel_area(
+        scrollable(
+            container(sensor(grid).on_resize(|size| Event::Resized(size.width)))
+                .padding(spacing::MD)
+                .width(Fill),
+        )
+        .id(GRID_SCROLLABLE_ID)
+        .on_scroll(|vp| Event::Scrolled {
+            offset: vp.absolute_offset().y,
+            viewport_height: vp.bounds().height,
+            content_height: vp.content_bounds().height,
+        })
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::new()
+                .width(SCROLLBAR_GUTTER)
+                .scroller_width(SCROLLBAR_GUTTER)
+                .spacing(0),
+        ))
+        .width(Fill)
+        .height(Fill),
+        Event::Wheel,
     )
-    .on_scroll(Event::Wheel)
     .into()
 }
 
@@ -1104,10 +1133,10 @@ fn preview_icon() -> Element<'static, CellEvent> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DATE_HEADER_HEIGHT, RowStart, THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN, anchor_row,
-        clamp_thumbnail_size, column_range, grid_metrics, grid_width, header_block,
-        keep_row_in_view, nominal_for_columns, row_bounds, row_for_ordinal, row_in_view,
-        row_run_spacers, row_starts, step_columns, step_row, take_whole_notches,
+        DATE_HEADER_HEIGHT, RowStart, SCROLLBAR_GUTTER, THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN,
+        anchor_row, clamp_thumbnail_size, column_range, content_height, grid_metrics, grid_width,
+        header_block, keep_row_in_view, nominal_for_columns, row_bounds, row_for_ordinal,
+        row_in_view, row_run_spacers, row_starts, step_columns, step_row, take_whole_notches,
         visible_row_window,
     };
     use crate::{messages::filters::SizeStep, theme::spacing};
@@ -1129,12 +1158,8 @@ mod tests {
     }
 
     /// Column count `nominal` lays a grid of `width` out in.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "thumbnail sizes are three-digit integers, exact in f32"
-    )]
     fn columns_at(width: f32, scale: f32, nominal: u32) -> usize {
-        grid_metrics(width, nominal as f32, scale).0
+        grid_metrics(width, nominal, scale).0
     }
 
     // A round cell width keeps the expected offsets easy to read.
@@ -1143,6 +1168,10 @@ mod tests {
 
     fn offsets(rows: &[RowStart]) -> Vec<f32> {
         rows.iter().map(|r| r.offset).collect()
+    }
+
+    fn tops(rows: &[RowStart]) -> Vec<f32> {
+        rows.iter().map(|r| r.top).collect()
     }
 
     fn ordinals(rows: &[RowStart]) -> Vec<usize> {
@@ -1160,6 +1189,11 @@ mod tests {
         // edge instead of bleeding its card bottoms in.
         let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
         assert_eq!(offsets(&rows), vec![0.0, PITCH + GAP, 2.0 * PITCH + GAP]);
+        // Card tops sit a pitch apart below the content's MD top padding.
+        assert_eq!(
+            tops(&rows),
+            vec![spacing::MD, spacing::MD + PITCH, spacing::MD + 2.0 * PITCH]
+        );
         assert_eq!(ordinals(&rows), vec![0, 3, 6]);
     }
 
@@ -1180,6 +1214,13 @@ mod tests {
         let s1_r1 = s1_r0 + header_block + PITCH + GAP;
 
         assert_eq!(offsets(&rows), vec![0.0, s0_r1, s1_r0, s1_r1]);
+        // Cards start a whole header block below each section's header top.
+        let s0_top = spacing::MD + header_block;
+        let s1_top = s1_header_content_y + header_block;
+        assert_eq!(
+            tops(&rows),
+            vec![s0_top, s0_top + PITCH, s1_top, s1_top + PITCH]
+        );
         // First card ordinal per row across both sections.
         assert_eq!(ordinals(&rows), vec![0, 3, 4, 7]);
     }
@@ -1325,9 +1366,8 @@ mod tests {
 
     use super::{GridGeometry, ScrollReaction, scroll_reaction};
 
-    fn geom(width: f32, vh: f32, ch: f32, scroll_y: f32) -> GridGeometry {
+    fn geom(vh: f32, ch: f32, scroll_y: f32) -> GridGeometry {
         GridGeometry {
-            width,
             viewport_height: vh,
             content_height: ch,
             scroll_y,
@@ -1335,9 +1375,11 @@ mod tests {
     }
 
     #[test]
-    fn first_report_only_seeds_geometry() {
+    fn first_report_from_zero_geometry_is_idle() {
+        // The grid starts from a zero geometry: the first report brings the
+        // heights in at an offset still parked on 0.
         assert_eq!(
-            scroll_reaction(None, 0.0, 800.0, 600.0, 3000.0),
+            scroll_reaction(geom(0.0, 0.0, 0.0), 0.0, 600.0, 3000.0),
             ScrollReaction::Idle
         );
     }
@@ -1346,42 +1388,31 @@ mod tests {
     fn content_growth_while_parked_is_idle() {
         // Thumbnails stream in: offset pinned at the top, content_height
         // climbing. Must not touch the anchor.
-        let prev = geom(800.0, 600.0, 3000.0, 0.0);
+        let prev = geom(600.0, 3000.0, 0.0);
         assert_eq!(
-            scroll_reaction(Some(prev), 0.0, 800.0, 600.0, 3450.0),
+            scroll_reaction(prev, 0.0, 600.0, 3450.0),
             ScrollReaction::Idle
         );
     }
 
     #[test]
     fn pure_offset_move_is_a_user_scroll() {
-        let prev = geom(800.0, 600.0, 3000.0, 500.0);
+        let prev = geom(600.0, 3000.0, 500.0);
         assert_eq!(
-            scroll_reaction(Some(prev), 620.0, 800.0, 600.0, 3000.0),
+            scroll_reaction(prev, 620.0, 600.0, 3000.0),
             ScrollReaction::AdoptOffset
-        );
-    }
-
-    #[test]
-    fn width_change_reanchors_even_without_an_offset_move() {
-        // A horizontal resize reflows the columns: every row moves to a new
-        // offset even if the raw scroll value happens to stay put.
-        let prev = geom(800.0, 600.0, 3000.0, 500.0);
-        assert_eq!(
-            scroll_reaction(Some(prev), 500.0, 900.0, 600.0, 2700.0),
-            ScrollReaction::Reanchor
         );
     }
 
     #[test]
     fn vertical_resize_clamp_reanchors_not_adopts() {
         // Growing the viewport height near the bottom makes iced clamp the
-        // offset toward the start. With the width unchanged this looks exactly
-        // like a user scroll by offset alone, but the coincident height change
-        // marks it a clamp — re-pin, don't adopt.
-        let prev = geom(800.0, 600.0, 3000.0, 2400.0);
+        // offset toward the start. By offset alone that looks exactly like a
+        // user scroll, but the coincident height change marks it a clamp —
+        // re-pin, don't adopt.
+        let prev = geom(600.0, 3000.0, 2400.0);
         assert_eq!(
-            scroll_reaction(Some(prev), 2100.0, 800.0, 900.0, 3000.0),
+            scroll_reaction(prev, 2100.0, 900.0, 3000.0),
             ScrollReaction::Reanchor
         );
     }
@@ -1390,18 +1421,18 @@ mod tests {
     fn content_shrink_clamp_reanchors() {
         // A filter change shortens the content; iced clamps the offset. Height
         // (content) changed alongside the offset move → clamp, not scroll.
-        let prev = geom(800.0, 600.0, 3000.0, 2400.0);
+        let prev = geom(600.0, 3000.0, 2400.0);
         assert_eq!(
-            scroll_reaction(Some(prev), 1500.0, 800.0, 600.0, 2100.0),
+            scroll_reaction(prev, 1500.0, 600.0, 2100.0),
             ScrollReaction::Reanchor
         );
     }
 
     #[test]
     fn float_noise_is_idle() {
-        let prev = geom(800.0, 600.0, 3000.0, 500.0);
+        let prev = geom(600.0, 3000.0, 500.0);
         assert_eq!(
-            scroll_reaction(Some(prev), 500.2, 800.1, 600.1, 3000.2),
+            scroll_reaction(prev, 500.2, 600.1, 3000.2),
             ScrollReaction::Idle
         );
     }
@@ -1416,6 +1447,7 @@ mod tests {
         (0..n)
             .map(|i| RowStart {
                 offset: i as f32 * step,
+                top: i as f32 * step + spacing::SM,
                 ordinal: i * 3,
             })
             .collect()
@@ -1541,7 +1573,7 @@ mod tests {
         reason = "sweep bounds and column counts are far below f32's exact-integer range"
     )]
     fn grid_cells_are_pixel_aligned() {
-        for nominal in [THUMBNAIL_SIZE_MIN as f32, 224.0, THUMBNAIL_SIZE_MAX as f32] {
+        for nominal in [THUMBNAIL_SIZE_MIN, 224, THUMBNAIL_SIZE_MAX] {
             for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0] {
                 for w in 200..=6000 {
                     let available = w as f32 / scale;
@@ -1579,7 +1611,7 @@ mod tests {
                     );
                     // Cells never exceed the intended maximum card width.
                     assert!(
-                        cell_width <= nominal,
+                        cell_width <= nominal as f32,
                         "width {available} ×{scale}: cell {cell_width} exceeds max {nominal}"
                     );
                 }
@@ -1603,6 +1635,31 @@ mod tests {
                 assert!(
                     (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).contains(&nominal),
                     "width {width} ×{scale}: nominal {nominal} outside the preference range"
+                );
+            }
+        }
+    }
+
+    /// The gutter appears and disappears with the content overflowing, moving
+    /// the laid-out width by [`SCROLLBAR_GUTTER`]. A nominal must select the
+    /// same count on both sides of that flip, or one step at an exact-fit
+    /// height lands two counts away. The ends of the range are excluded: there
+    /// the clamp picks the nominal, not the cell width.
+    #[test]
+    fn a_nominal_holds_its_column_count_across_the_scrollbar_gutter() {
+        for (width, scale) in width_sweep() {
+            let range = column_range(width, scale);
+            for cols in (*range.start() + 1)..*range.end() {
+                let nominal = nominal_for_columns(width, cols);
+                assert_eq!(
+                    columns_at(width + SCROLLBAR_GUTTER, scale, nominal),
+                    cols,
+                    "width {width} ×{scale}: nominal {nominal} loses {cols} columns without the gutter"
+                );
+                assert_eq!(
+                    columns_at(width - SCROLLBAR_GUTTER, scale, nominal),
+                    cols,
+                    "width {width} ×{scale}: nominal {nominal} loses {cols} columns with the gutter"
                 );
             }
         }
@@ -1679,19 +1736,23 @@ mod tests {
         }
     }
 
-    /// Three rows of the round-width grid, pitch 108 apart from a zero top.
+    /// Three plain rows of the round-width grid, pitch 108 apart from a zero
+    /// anchor, each holding its cards the `SM` gap below its anchor.
     fn three_rows() -> Vec<RowStart> {
         vec![
             RowStart {
                 offset: 0.0,
+                top: spacing::SM,
                 ordinal: 0,
             },
             RowStart {
                 offset: PITCH,
+                top: PITCH + spacing::SM,
                 ordinal: 3,
             },
             RowStart {
                 offset: 2.0 * PITCH,
+                top: 2.0 * PITCH + spacing::SM,
                 ordinal: 6,
             },
         ]
@@ -1705,9 +1766,52 @@ mod tests {
     }
 
     #[test]
-    fn row_bounds_of_the_last_row_span_one_pitch() {
+    fn row_bounds_of_the_last_row_end_at_the_content_bottom() {
         let rows = three_rows();
-        assert_eq!(row_bounds(&rows, 2, CW), (2.0 * PITCH, 3.0 * PITCH));
+        assert_eq!(
+            row_bounds(&rows, 2, CW),
+            (2.0 * PITCH, rows[2].top + CW + spacing::MD)
+        );
+    }
+
+    #[test]
+    fn content_height_of_an_empty_grid_is_zero() {
+        assert_eq!(content_height(&[], CW), 0.0);
+    }
+
+    #[test]
+    fn content_height_spans_the_padding_at_both_ends() {
+        // 7 cards, 3 columns → 3 rows, no headers.
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
+        let expected = spacing::MD + 3.0 * CW + 2.0 * spacing::SM + spacing::MD;
+        assert_eq!(content_height(&rows, CW), expected);
+    }
+
+    #[test]
+    fn content_height_counts_every_section_header_and_gap() {
+        // Section 0: 4 cards / 3 cols = 2 rows. Section 1: 5 cards = 2 rows.
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true));
+        let hb = header_block(true);
+        let section = 2.0 * CW + spacing::SM;
+        let expected = spacing::MD + hb + section + spacing::LG + hb + section + spacing::MD;
+        assert_eq!(content_height(&rows, CW), expected);
+    }
+
+    #[test]
+    fn row_bounds_of_a_section_first_last_row_clear_its_header() {
+        // Section 0: 4 cards / 3 cols = 2 rows. Section 1: 2 cards = 1 row, so
+        // the last row is the one carrying section 1's header.
+        let rows = row_starts(&[(0, 4), (4, 2)], 3, CW, header_block(true));
+        let last = rows.len() - 1;
+        assert_eq!(
+            rows[last].top,
+            rows[last].offset + spacing::MD + header_block(true)
+        );
+
+        let (_, bottom) = row_bounds(&rows, last, CW);
+        assert_eq!(bottom, rows[last].top + CW + spacing::MD);
+        // Measuring from the anchor would stop short by the header it clears.
+        assert!(bottom > rows[last].offset + CW + spacing::SM);
     }
 
     #[test]
@@ -1725,18 +1829,18 @@ mod tests {
     #[test]
     fn keep_row_in_view_pulls_the_offset_to_the_nearer_edge() {
         // Above the viewport: align the row's top.
-        assert_eq!(keep_row_in_view(500.0, 100.0, 208.0, 300.0), 100.0);
+        assert_eq!(keep_row_in_view(500.0, 100.0, 208.0, 300.0), Some(100.0));
         // Below: align the row's bottom, so the offset lands a viewport above it.
-        assert_eq!(keep_row_in_view(0.0, 400.0, 508.0, 300.0), 208.0);
-        // Already inside: the offset is left alone.
-        assert_eq!(keep_row_in_view(100.0, 150.0, 258.0, 300.0), 100.0);
+        assert_eq!(keep_row_in_view(0.0, 400.0, 508.0, 300.0), Some(208.0));
+        // Already inside: nothing to scroll.
+        assert_eq!(keep_row_in_view(100.0, 150.0, 258.0, 300.0), None);
     }
 
     #[test]
     fn keep_row_in_view_never_scrolls_a_tall_row_past_its_top() {
         // A row taller than the viewport aligns to its top rather than its
         // bottom, which would push the row's start off screen.
-        assert_eq!(keep_row_in_view(0.0, 400.0, 900.0, 300.0), 400.0);
+        assert_eq!(keep_row_in_view(0.0, 400.0, 900.0, 300.0), Some(400.0));
     }
 
     #[test]

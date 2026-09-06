@@ -383,8 +383,9 @@ struct Ferrocull {
     /// Tracked absolute y offset of the thumbnail scrollable, kept in sync via
     /// the scrollable's `on_scroll` (drags, keyboard, and programmatic scrolls).
     grid_scroll_y: f32,
-    /// Last measured grid content width (`None` until the first layout). Drives
-    /// row math and resize re-anchoring.
+    /// Width the grid lays its columns out against, reported by the sensor
+    /// wrapping the grid (`None` until the first layout). Drives row math and
+    /// resize re-anchoring.
     grid_area_width: Option<f32>,
     /// Display ordinal of the card whose row is pinned at the viewport top.
     /// Updated when the user scrolls; reflows re-anchor to it unchanged, so a
@@ -834,39 +835,38 @@ impl Ferrocull {
             ViewMode::Grid => self.focused_index,
         };
 
-        // Ctrl+=/Ctrl+- step the thumbnail size, and sit above the bare
-        // +/- tag bindings that match the same characters. The size is a grid
-        // geometry, so in preview and compare the press falls through to those.
-        if matches!(self.view_mode, ViewMode::Grid)
-            && modifiers.command()
-            && let Key::Character(m) = modified_key
-        {
-            let step = match m.chars().next() {
-                Some('+' | '=') => Some(filters_msg::SizeStep::Larger),
-                Some('-' | '_') => Some(filters_msg::SizeStep::Smaller),
-                _ => None,
-            };
-            if let Some(direction) = step {
-                return Task::done(Message::Filters(
-                    filters_msg::Message::ThumbnailSizeStepped(direction),
-                ));
-            }
-        }
-
-        // Tag/untag keyed on the modified key, not the base: what the press
-        // actually typed decides. On classic AZERTY the '-'/'_' base keys carry
-        // digits 6/8 under Shift, so Ctrl+Shift there must fall through to the
-        // color-label branch below instead of silently untagging.
+        // Ctrl+=/Ctrl+- step the thumbnail size, bare +/- tag and untag, both
+        // keyed on the modified key, not the base: what the press actually
+        // typed decides. On classic AZERTY the '-'/'_' base keys carry digits
+        // 6/8 under Shift, and the color-label branch below reads them as the
+        // digits they typed.
         if let Key::Character(m) = modified_key {
-            match m.chars().next() {
-                Some('+' | '=') => {
+            match (modifiers.command(), m.chars().next()) {
+                // The thumbnail size is grid geometry, so elsewhere the press
+                // does nothing.
+                (true, Some('+' | '=' | '-' | '_'))
+                    if !matches!(self.view_mode, ViewMode::Grid) =>
+                {
+                    return Task::none();
+                }
+                (true, Some('+' | '=')) => {
+                    return Task::done(Message::Filters(
+                        filters_msg::Message::ThumbnailSizeStepped(filters_msg::SizeStep::Larger),
+                    ));
+                }
+                (true, Some('-' | '_')) => {
+                    return Task::done(Message::Filters(
+                        filters_msg::Message::ThumbnailSizeStepped(filters_msg::SizeStep::Smaller),
+                    ));
+                }
+                (false, Some('+' | '=')) => {
                     return self.action_on_target(
                         target_idx,
                         |path| Message::Grid(grid_msg::Message::FileTagged(path)),
                         false,
                     );
                 }
-                Some('-' | '_') => {
+                (false, Some('-' | '_')) => {
                     return self.action_on_target(
                         target_idx,
                         |path| Message::Grid(grid_msg::Message::FileUntagged(path)),
@@ -1505,8 +1505,10 @@ fn view(state: &Ferrocull) -> Element<'_, Message> {
     // position.
     let mut root = stack![main_content];
     match state.view_mode {
-        ViewMode::Compare(ref cmp) => root = root.push(compare_overlay(state, cmp)),
-        ViewMode::Preview(ref p) => root = root.push(preview_overlay(state, p)),
+        // Both overlays cover the whole window and own every pointer event over
+        // them, so `opaque` keeps presses and wheels off the layer beneath.
+        ViewMode::Compare(ref cmp) => root = root.push(opaque(compare_overlay(state, cmp))),
+        ViewMode::Preview(ref p) => root = root.push(opaque(preview_overlay(state, p))),
         ViewMode::Grid => {}
     }
     if let Some(ref modal) = state.modal {
@@ -2158,15 +2160,16 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         views::thumbnails::Event::Wheel(delta) => Message::Grid(grid_msg::Message::Wheel(delta)),
         views::thumbnails::Event::Scrolled {
             offset,
-            grid_width,
             viewport_height,
             content_height,
         } => Message::Grid(grid_msg::Message::Scrolled {
             offset,
-            grid_width,
             viewport_height,
             content_height,
         }),
+        views::thumbnails::Event::Resized(width) => {
+            Message::Grid(grid_msg::Message::Resized(width))
+        }
     })
 }
 
@@ -2437,13 +2440,18 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
 
     container(
         row![
-            left,
-            Space::new().width(Fill),
+            container(left).width(Fill),
             center,
-            Space::new().width(Fill),
-            size_control,
-            Space::new().width(spacing::LG),
-            ingest_with_tip,
+            container(
+                row![
+                    size_control,
+                    Space::new().width(spacing::LG),
+                    ingest_with_tip
+                ]
+                .align_y(iced::Alignment::Center)
+            )
+            .width(Fill)
+            .align_x(iced::alignment::Horizontal::Right),
         ]
         .align_y(iced::Alignment::Center),
     )

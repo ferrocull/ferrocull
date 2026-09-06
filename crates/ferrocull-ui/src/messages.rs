@@ -109,15 +109,17 @@ pub(crate) mod grid {
         OpenPreview(usize),
         /// Wheel scrolled over the grid — snap row-by-row.
         Wheel(iced::mouse::ScrollDelta),
-        /// Viewport report: absolute y offset, the grid's available width, and
-        /// the viewport/content heights. A width change re-anchors the top row;
-        /// height changes mark offset moves as clamps rather than user scrolls.
+        /// Viewport report: absolute y offset plus the viewport/content
+        /// heights. The heights tell an offset clamp apart from a user
+        /// scroll.
         Scrolled {
             offset: f32,
-            grid_width: f32,
             viewport_height: f32,
             content_height: f32,
         },
+        /// The width the grid laid its columns out against, from the first
+        /// layout on. A change re-anchors the top row.
+        Resized(f32),
     }
 }
 
