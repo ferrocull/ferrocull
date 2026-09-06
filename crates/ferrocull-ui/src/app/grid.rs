@@ -226,7 +226,9 @@ impl Ferrocull {
     /// Step the thumbnail size one column count per wheel notch, resizing the
     /// grid around the card the photographer is looking at. Touchpads report
     /// pixel deltas rather than lines, so `PIXELS_PER_NOTCH` turns a two-finger
-    /// swipe into a few steps instead of dozens.
+    /// swipe into a few steps instead of dozens. No-op until the grid width is
+    /// known: without it there are no column counts to step through, and the
+    /// notch is not carried toward a later step.
     pub(super) fn handle_thumbnail_size_wheel(
         &mut self,
         delta: iced::mouse::ScrollDelta,
@@ -234,6 +236,9 @@ impl Ferrocull {
         /// Pixel delta one wheel notch is worth on a touchpad.
         const PIXELS_PER_NOTCH: f32 = 40.0;
 
+        let Some(width) = self.grid_area_width else {
+            return Task::none();
+        };
         let notches = match delta {
             iced::mouse::ScrollDelta::Lines { y, .. } => y,
             iced::mouse::ScrollDelta::Pixels { y, .. } => y / PIXELS_PER_NOTCH,
@@ -250,7 +255,7 @@ impl Ferrocull {
         } else {
             filters::SizeStep::Smaller
         };
-        self.step_thumbnail_columns(direction, steps.unsigned_abs() as usize)
+        self.step_thumbnail_columns(width, direction, steps.unsigned_abs() as usize)
     }
 
     /// Move the thumbnail size `count` column counts in `direction` and keep the
@@ -260,17 +265,13 @@ impl Ferrocull {
     /// already rendered is dropped rather than restarting the settle window for
     /// an invisible change: at the ends of the range, and from a persisted size
     /// that is not the canonical nominal for its count, the stepped nominal
-    /// differs from the current one while the grid does not. No-op until the
-    /// grid width is known: without it there are no column counts to step
-    /// through.
+    /// differs from the current one while the grid does not.
     fn step_thumbnail_columns(
         &mut self,
+        width: f32,
         direction: filters::SizeStep,
         count: usize,
     ) -> Task<Message> {
-        let Some(width) = self.grid_area_width else {
-            return Task::none();
-        };
         let current = self.config.view.thumbnail_size;
         let stepped = (0..count).fold(current, |size, _| {
             views::thumbnails::step_columns(width, self.window_scale, size, direction)
@@ -338,12 +339,7 @@ impl Ferrocull {
         if (width - previous).abs() <= views::thumbnails::GEOM_EPS {
             return Task::none();
         }
-        let Some(y) = self.anchor_offset(width) else {
-            return Task::none();
-        };
-        let y = y.min(self.max_grid_offset(width));
-        self.grid_scroll_y = y;
-        iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y })
+        self.reanchor_grid(width)
     }
 
     /// Store `size` and scroll the reflowed grid so the photographer keeps their
