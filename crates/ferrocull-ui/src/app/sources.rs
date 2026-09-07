@@ -224,7 +224,7 @@ impl Ferrocull {
 
         spawn_thumbnail_sipper(
             scanned_files,
-            self.thumbnail_size,
+            self.thumbnail_resolution,
             std::sync::Arc::clone(&self.thumbnail_cache),
         )
     }
@@ -279,9 +279,16 @@ impl Ferrocull {
         item.rating = culling.rating;
         item.color_label = culling.color_label;
 
-        // Focus is deliberately not pruned here: a scan must never move the
-        // cursor the photographer is culling from.
+        // The cursor stays on the photo the photographer is culling from: an
+        // arrival that swallows it into a pair or a burst moves it onto the
+        // card that now shows that photo, and one that leaves nothing showing
+        // it drops it, the way a filter does.
         let idx = self.media.insert(item, &self.config.params());
+        if let Some(focused) = self.focused_index
+            && !self.media.is_visible(focused)
+        {
+            self.focused_index = self.media.shown_stand_in(focused);
+        }
         let tagged = self
             .arrivals_window
             .tag_for_arrival(culling.tagged, is_ingested);

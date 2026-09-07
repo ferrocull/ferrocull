@@ -109,15 +109,17 @@ pub(crate) mod grid {
         OpenPreview(usize),
         /// Wheel scrolled over the grid — snap row-by-row.
         Wheel(iced::mouse::ScrollDelta),
-        /// Viewport report: absolute y offset, the grid's available width, and
-        /// the viewport/content heights. A width change re-anchors the top row;
-        /// height changes mark offset moves as clamps rather than user scrolls.
+        /// Viewport report: absolute y offset plus the viewport/content
+        /// heights. The heights tell an offset clamp apart from a user
+        /// scroll.
         Scrolled {
             offset: f32,
-            grid_width: f32,
             viewport_height: f32,
             content_height: f32,
         },
+        /// The width the grid laid its columns out against, from the first
+        /// layout on. A change re-anchors the top row.
+        Resized(f32),
     }
 }
 
@@ -190,6 +192,20 @@ pub(crate) mod filters {
         YearExpanded(i32),
         MonthExpanded(i32, u32),
         ClearAll,
+        /// Slider moved: the grid reflows to the new thumbnail size at once,
+        /// while the thumbnail load window and the stored preference wait for
+        /// the size to settle.
+        ThumbnailSizeChanged(u32),
+        /// Slider let go: the size has settled, so it is written to the
+        /// preferences and the load window catches up.
+        ThumbnailSizeReleased,
+        /// The quiet window elapsed for one slider change, carrying that
+        /// change's generation. A later change supersedes it, and its own timer
+        /// settles the size instead.
+        ThumbnailSizeSettled(u64),
+        /// Wheel over the slider: each notch moves the grid by one column
+        /// count, the same step a notch over the grid takes.
+        ThumbnailSizeWheel(iced::mouse::ScrollDelta),
     }
 }
 
@@ -262,9 +278,9 @@ pub(crate) mod settings {
         ThemeChanged(ThemePreference),
         /// Stage a new thumbnail resolution awaiting confirmation (destructive:
         /// clears and regenerates the thumbnail cache).
-        ThumbnailSizeSelected(u32),
-        ConfirmThumbnailSize,
-        CancelThumbnailSize,
+        ThumbnailResolutionSelected(u32),
+        ConfirmThumbnailResolution,
+        CancelThumbnailResolution,
         /// Open the folder picker for a new cache location.
         BrowseCacheDir,
         /// Folder picker result; `Some` stages the move awaiting confirmation.

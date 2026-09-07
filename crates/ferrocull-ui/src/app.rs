@@ -175,7 +175,7 @@ pub(crate) struct SettingsState {
     pub(crate) category: settings_msg::Category,
     /// Thumbnail resolution staged awaiting confirmation (destructive: clears
     /// and regenerates the thumbnail cache). `None` when nothing is staged.
-    pub(crate) pending_thumbnail_size: Option<u32>,
+    pub(crate) pending_thumbnail_resolution: Option<u32>,
     /// Cache directory staged awaiting confirmation (destructive: moves files).
     pub(crate) pending_cache_dir: Option<PathBuf>,
     /// A cache relocation is running; its confirm control stays disabled until
@@ -187,7 +187,7 @@ impl SettingsState {
     fn new() -> Self {
         Self {
             category: settings_msg::Category::default(),
-            pending_thumbnail_size: None,
+            pending_thumbnail_resolution: None,
             pending_cache_dir: None,
             cache_move_in_flight: false,
         }
@@ -223,7 +223,8 @@ struct ViewConfig {
 impl ViewConfig {
     /// Seed the view from persisted durable prefs. Selection sets start empty —
     /// they reference session-specific content and are never persisted.
-    fn from_prefs(view: ViewPrefs) -> Self {
+    fn from_prefs(mut view: ViewPrefs) -> Self {
+        view.thumbnail_size = views::thumbnails::clamp_thumbnail_size(view.thumbnail_size);
         Self {
             view,
             selected_sources: BTreeSet::new(),
@@ -296,7 +297,7 @@ struct Ferrocull {
     theme_preference: ferrocull_core::ThemePreference,
     /// Committed grid thumbnail resolution (longest edge, px), fed into the
     /// thumbnail scan.
-    thumbnail_size: u32,
+    thumbnail_resolution: u32,
     /// Committed cache root override. `None` uses the platform default
     /// (`cache::default_cache_root`); the resolved root is
     /// [`Self::cache_root`].
@@ -382,8 +383,9 @@ struct Ferrocull {
     /// Tracked absolute y offset of the thumbnail scrollable, kept in sync via
     /// the scrollable's `on_scroll` (drags, keyboard, and programmatic scrolls).
     grid_scroll_y: f32,
-    /// Last measured grid content width (`None` until the first layout). Drives
-    /// row math and resize re-anchoring.
+    /// Width the grid lays its columns out against, reported by the sensor
+    /// wrapping the grid (`None` until the first layout). Drives row math and
+    /// resize re-anchoring.
     grid_area_width: Option<f32>,
     /// Display ordinal of the card whose row is pinned at the viewport top.
     /// Updated when the user scrolls; reflows re-anchor to it unchanged, so a
@@ -402,12 +404,22 @@ struct Ferrocull {
     /// keep a scroll frame from rebuilding it. Held behind an `Rc` so the hot path
     /// hands out a cheap refcount bump instead of cloning the row vector.
     grid_rows_cache: Option<(GridRowsKey, Rc<[views::thumbnails::RowStart]>)>,
+    /// Bumped on every thumbnail size slider change, so a settle timer can tell
+    /// whether the change it was started for is still the latest one.
+    thumbnail_size_generation: u64,
+    /// The generation of the slider change still waiting to settle, or `None`
+    /// once it has. While a change is pending, the thumbnail load window is not
+    /// reconciled and the preference is not written.
+    thumbnail_size_pending: Option<u64>,
+    /// Fractional carry for hi-res wheels stepping the thumbnail size: whole
+    /// notches resize the grid, the remainder accumulates toward the next.
+    thumbnail_size_wheel_lines: f32,
 }
 
 /// Invalidation key for [`Ferrocull::grid_rows`]'s memoized row model. Captures
 /// everything the row starts depend on: the media view (`media_version`), the
 /// section layout (`ascending`, `grouped`), and the column geometry
-/// (`width_bits`, `scale_bits`).
+/// (`width_bits`, `scale_bits`, `thumbnail_size`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GridRowsKey {
     media_version: u64,
@@ -415,6 +427,7 @@ struct GridRowsKey {
     grouped: bool,
     width_bits: u32,
     scale_bits: u32,
+    thumbnail_size: u32,
 }
 
 impl Default for Ferrocull {
@@ -444,7 +457,7 @@ impl Default for Ferrocull {
         let theme_preference = settings.preferences.theme;
         crate::theme::set_preference(theme_preference);
 
-        let thumbnail_size = settings.preferences.thumbnail_size;
+        let thumbnail_resolution = settings.preferences.thumbnail_resolution;
         let cache_dir = settings.preferences.cache_dir.clone();
         let cache_root = cache_dir
             .clone()
@@ -469,7 +482,7 @@ impl Default for Ferrocull {
             config: ViewConfig::from_prefs(settings.view),
             modal: None,
             theme_preference,
-            thumbnail_size,
+            thumbnail_resolution,
             cache_dir,
             selected: BTreeSet::new(),
             sources: Vec::new(),
@@ -525,6 +538,9 @@ impl Default for Ferrocull {
             grid_content_height: 0.0,
             grid_wheel_lines: 0.0,
             grid_rows_cache: None,
+            thumbnail_size_generation: 0,
+            thumbnail_size_pending: None,
+            thumbnail_size_wheel_lines: 0.0,
         }
     }
 }
@@ -628,7 +644,7 @@ impl Ferrocull {
             delete_after_ingest: self.delete_after_ingest,
             preferences: Preferences {
                 theme: self.theme_preference,
-                thumbnail_size: self.thumbnail_size,
+                thumbnail_resolution: self.thumbnail_resolution,
                 cache_dir: self.cache_dir.clone(),
             },
             view: self.config.view,
@@ -819,10 +835,10 @@ impl Ferrocull {
             ViewMode::Grid => self.focused_index,
         };
 
-        // Tag/untag keyed on the modified key, not the base: what the press
-        // actually typed decides. On classic AZERTY the '-'/'_' base keys carry
-        // digits 6/8 under Shift, so Ctrl+Shift there must fall through to the
-        // color-label branch below instead of silently untagging.
+        // +/- tag and untag, keyed on the modified key, not the base:
+        // what the press actually typed decides. On classic AZERTY the '-'/'_'
+        // base keys carry digits 6/8 under Shift, and the color-label branch
+        // below reads them as the digits they typed.
         if let Key::Character(m) = modified_key {
             match m.chars().next() {
                 Some('+' | '=') => {
@@ -1028,7 +1044,7 @@ impl scan::Input for ScanFile {
 /// thumbnails, writing them through the shared [`ThumbnailCache`].
 fn spawn_thumbnail_sipper(
     files: Vec<ScannedFile>,
-    thumbnail_size: u32,
+    thumbnail_resolution: u32,
     cache: Arc<ThumbnailCache>,
 ) -> Task<Message> {
     let thumb_sipper = sipper(move |mut sender| async move {
@@ -1036,11 +1052,16 @@ fn spawn_thumbnail_sipper(
 
         rayon::spawn(move || {
             let inputs = files.into_iter().map(ScanFile).collect();
-            scan::run(inputs, thumbnail_size, Some(cache.as_ref()), |event| {
-                // A send error means the sipper task is gone (UI closed or scan
-                // superseded), so the event has nowhere to go.
-                drop(tx.send(event));
-            });
+            scan::run(
+                inputs,
+                thumbnail_resolution,
+                Some(cache.as_ref()),
+                |event| {
+                    // A send error means the sipper task is gone (UI closed or scan
+                    // superseded), so the event has nowhere to go.
+                    drop(tx.send(event));
+                },
+            );
         });
 
         // The pipeline fires two events per file across many rayon threads.
@@ -1466,8 +1487,10 @@ fn view(state: &Ferrocull) -> Element<'_, Message> {
     // position.
     let mut root = stack![main_content];
     match state.view_mode {
-        ViewMode::Compare(ref cmp) => root = root.push(compare_overlay(state, cmp)),
-        ViewMode::Preview(ref p) => root = root.push(preview_overlay(state, p)),
+        // Both overlays cover the whole window and own every pointer event over
+        // them, so `opaque` keeps presses and wheels off the layer beneath.
+        ViewMode::Compare(ref cmp) => root = root.push(opaque(compare_overlay(state, cmp))),
+        ViewMode::Preview(ref p) => root = root.push(opaque(preview_overlay(state, p))),
         ViewMode::Grid => {}
     }
     if let Some(ref modal) = state.modal {
@@ -1600,7 +1623,8 @@ fn shortcut_group(
 
 /// Keyboard-shortcut reference overlay (`?` / F1). Documents the real current
 /// bindings — every key here is verified against the handlers in
-/// `handle_key_press`/`handle_character_key`.
+/// `handle_key_press`/`handle_character_key`, and the wheel rows against
+/// `handle_grid_wheel`/`handle_thumbnail_size_wheel`.
 fn shortcuts_overlay() -> Element<'static, Message> {
     let palette = crate::theme::palette();
 
@@ -1614,6 +1638,7 @@ fn shortcuts_overlay() -> Element<'static, Message> {
             shortcut_row(&["PgUp", "PgDn"], "Move focus a page"),
             shortcut_row(&["Home", "End"], "First / last item"),
             shortcut_row(&["Wheel"], "Scroll the grid"),
+            shortcut_row(&["Ctrl", "Wheel"], "Thumbnail size"),
             shortcut_row(&["Space", "Enter"], "Open preview"),
         ],
     );
@@ -1841,7 +1866,7 @@ fn settings_overlay<'a>(state: &'a Ferrocull, s: &'a SettingsState) -> Element<'
             Category::Appearance => views::settings::appearance_pane(state.theme_preference),
             Category::Storage => views::settings::storage_pane(
                 s,
-                state.thumbnail_size,
+                state.thumbnail_resolution,
                 state
                     .cache_root()
                     .expect("cache root unresolved")
@@ -2074,6 +2099,7 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         },
         &state.loaded_thumbs,
         state.today,
+        state.config.view.thumbnail_size,
         state.window_scale,
         state.config.view.sort_order,
         state.config.view.ascending,
@@ -2112,15 +2138,16 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         views::thumbnails::Event::Wheel(delta) => Message::Grid(grid_msg::Message::Wheel(delta)),
         views::thumbnails::Event::Scrolled {
             offset,
-            grid_width,
             viewport_height,
             content_height,
         } => Message::Grid(grid_msg::Message::Scrolled {
             offset,
-            grid_width,
             viewport_height,
             content_height,
         }),
+        views::thumbnails::Event::Resized(width) => {
+            Message::Grid(grid_msg::Message::Resized(width))
+        }
     })
 }
 
@@ -2383,13 +2410,27 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
         .gap(4)
         .snap_within_viewport(true);
 
+    let size_control = views::thumbnail_size::control(
+        state.config.view.thumbnail_size,
+        state.grid_area_width,
+        state.window_scale,
+    )
+    .map(Message::Filters);
+
     container(
         row![
-            left,
-            Space::new().width(Fill),
+            container(left).width(Fill),
             center,
-            Space::new().width(Fill),
-            ingest_with_tip,
+            container(
+                row![
+                    size_control,
+                    Space::new().width(spacing::LG),
+                    ingest_with_tip
+                ]
+                .align_y(iced::Alignment::Center)
+            )
+            .width(Fill)
+            .align_x(iced::alignment::Horizontal::Right),
         ]
         .align_y(iced::Alignment::Center),
     )

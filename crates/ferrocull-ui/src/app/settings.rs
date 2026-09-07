@@ -33,19 +33,19 @@ pub(super) fn update(state: &mut Ferrocull, msg: settings::Message) -> Task<Mess
             crate::theme::set_preference(preference);
             state.persist_settings();
         }
-        settings::Message::ThumbnailSizeSelected(size) => {
-            let current = state.thumbnail_size;
+        settings::Message::ThumbnailResolutionSelected(resolution) => {
+            let current = state.thumbnail_resolution;
             if let Some(s) = state.settings_mut() {
-                // Re-selecting the committed size clears the staged change.
-                s.pending_thumbnail_size = (size != current).then_some(size);
+                // Re-selecting the committed resolution clears the staged change.
+                s.pending_thumbnail_resolution = (resolution != current).then_some(resolution);
             }
         }
-        settings::Message::ConfirmThumbnailSize => {
-            return confirm_thumbnail_size(state);
+        settings::Message::ConfirmThumbnailResolution => {
+            return confirm_thumbnail_resolution(state);
         }
-        settings::Message::CancelThumbnailSize => {
+        settings::Message::CancelThumbnailResolution => {
             if let Some(s) = state.settings_mut() {
-                s.pending_thumbnail_size = None;
+                s.pending_thumbnail_resolution = None;
             }
         }
         settings::Message::BrowseCacheDir => {
@@ -75,10 +75,13 @@ pub(super) fn update(state: &mut Ferrocull, msg: settings::Message) -> Task<Mess
 }
 
 /// Commit a staged thumbnail resolution: clear the thumbnail cache (its key
-/// carries no resolution, so stale entries would shadow the new size), then
-/// regenerate over the loaded media at the new size.
-fn confirm_thumbnail_size(state: &mut Ferrocull) -> Task<Message> {
-    let Some(size) = state.settings().and_then(|s| s.pending_thumbnail_size) else {
+/// carries no resolution, so stale entries would shadow the new resolution),
+/// then regenerate over the loaded media at the new resolution.
+fn confirm_thumbnail_resolution(state: &mut Ferrocull) -> Task<Message> {
+    let Some(resolution) = state
+        .settings()
+        .and_then(|s| s.pending_thumbnail_resolution)
+    else {
         return Task::none();
     };
     // A scan in flight holds cache handles; the confirm control is disabled
@@ -92,13 +95,13 @@ fn confirm_thumbnail_size(state: &mut Ferrocull) -> Task<Message> {
         return Task::none();
     }
 
-    state.thumbnail_size = size;
+    state.thumbnail_resolution = resolution;
     state.persist_settings();
     if let Some(s) = state.settings_mut() {
-        s.pending_thumbnail_size = None;
+        s.pending_thumbnail_resolution = None;
     }
-    // Drop decoded thumbnails so the grid reloads them at the new size once
-    // regeneration writes fresh cache entries.
+    // Drop decoded thumbnails so the grid reloads them at the new resolution
+    // once regeneration writes fresh cache entries.
     state.loaded_thumbs.clear();
 
     state.regenerate_thumbnails()
@@ -168,7 +171,7 @@ fn handle_cache_moved(
 }
 
 impl Ferrocull {
-    /// Re-run the thumbnail pipeline over the loaded media at the current size.
+    /// Re-run the thumbnail pipeline over the loaded media at the current resolution.
     /// Re-emitted `ExifLoaded` events are no-ops for items already present, so
     /// only the thumbnails regenerate.
     fn regenerate_thumbnails(&mut self) -> Task<Message> {
@@ -202,7 +205,7 @@ impl Ferrocull {
 
         spawn_thumbnail_sipper(
             files,
-            self.thumbnail_size,
+            self.thumbnail_resolution,
             Arc::clone(&self.thumbnail_cache),
         )
     }

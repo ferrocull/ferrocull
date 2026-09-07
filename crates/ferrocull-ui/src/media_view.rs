@@ -326,6 +326,29 @@ impl MediaView {
         Some(self.burst_map[key][0])
     }
 
+    /// The item on screen that shows `idx`: the RAW whose pair hides it, the
+    /// [representative](Self::folded_burst_representative) of the collapsed
+    /// burst it belongs to, or both in turn when the RAW is itself a folded
+    /// member.
+    ///
+    /// `None` when `idx` is on screen already, and when nothing shows it: a
+    /// filter hid it, or hid the RAW that would have stood in.
+    #[must_use]
+    pub(crate) fn shown_stand_in(&self, idx: usize) -> Option<usize> {
+        if self.is_visible(idx) {
+            return None;
+        }
+        let owner = self
+            .hidden_jpeg_paths
+            .get(&self.items[idx].path)
+            .copied()
+            .unwrap_or(idx);
+        if self.is_visible(owner) {
+            return Some(owner);
+        }
+        self.folded_burst_representative(owner)
+    }
+
     /// The deduplicated logical unit an action fans out over: `idx` plus its
     /// collapsed-burst members (an expanded burst does not fan out) plus each
     /// member's hidden JPEG sibling.
@@ -556,10 +579,11 @@ impl MediaView {
     /// (including bursts and burst expansion) incrementally. Returns the index
     /// the item now lives at.
     ///
-    /// The caller guarantees the path is fresh. Focus is deliberately *not*
-    /// pruned here: a scan streams items in and must never move the cursor the
-    /// photographer is culling from. Filter/sort changes go through
-    /// [`Self::rebuild`], which does prune.
+    /// The caller guarantees the path is fresh. Focus is not touched here: the
+    /// caller reconciles it against the new visible set, with
+    /// [`Self::shown_stand_in`] for an arrival that hides the focused item.
+    /// Filter/sort changes go through [`Self::rebuild`], which pairs with
+    /// [`Self::prune_hidden_focus`].
     pub(crate) fn insert(&mut self, item: Item, params: &ViewParams) -> usize {
         debug_assert!(
             !self.item_index.contains_key(&item.path),
@@ -2055,6 +2079,112 @@ mod tests {
 
         assert!(!view.is_visible(stranger), "the other burst hides it");
         assert_eq!(view.burst_repair_target(stranger, first), None);
+    }
+
+    /// A RAW paired with the JPEG sibling `/src/{name}.jpg`, captured `secs`
+    /// (+`subsec_nanos`) after `base_time`.
+    fn paired_raw(name: &str, secs: i64, subsec_nanos: u32) -> Item {
+        Item {
+            jpeg_pair: Some(PathBuf::from(format!("/src/{name}.jpg"))),
+            ..item_at(&format!("{name}.raw"), secs, subsec_nanos)
+        }
+    }
+
+    #[test]
+    fn an_arriving_raw_stands_in_for_the_jpeg_it_hides() {
+        let params = Params::new();
+        let mut view = MediaView::new();
+        view.insert(item_at("photo.jpg", 0, 0), &params.view());
+        let jpeg = view.index_of(Path::new("/src/photo.jpg")).unwrap();
+        assert!(view.is_visible(jpeg), "the jpeg shows until its raw lands");
+
+        view.insert(paired_raw("photo", 0, 0), &params.view());
+        let raw = view.index_of(Path::new("/src/photo.raw")).unwrap();
+
+        assert!(!view.is_visible(jpeg));
+        assert_eq!(view.shown_stand_in(jpeg), Some(raw));
+    }
+
+    #[test]
+    fn a_frame_folded_into_an_arriving_burst_stands_behind_the_representative() {
+        let params = Params::new();
+        let mut view = MediaView::new();
+        view.insert(item_at("a.raw", 0, 0), &params.view());
+        view.insert(item_at("b.raw", 0, 300_000_000), &params.view());
+        let representative = view.index_of(Path::new("/src/a.raw")).unwrap();
+        let member = view.index_of(Path::new("/src/b.raw")).unwrap();
+        assert!(view.is_visible(member), "two shots form no burst");
+
+        view.insert(item_at("c.raw", 0, 600_000_000), &params.view());
+
+        assert!(!view.is_visible(member), "the third shot folds the burst");
+        assert_eq!(view.shown_stand_in(member), Some(representative));
+        assert_eq!(
+            view.shown_stand_in(representative),
+            None,
+            "the face of the burst is on screen"
+        );
+    }
+
+    #[test]
+    fn a_jpeg_follows_its_raw_into_a_folded_burst() {
+        let params = Params::new();
+        let mut view = MediaView::new();
+        view.insert(item_at("photo.jpg", 0, 600_000_000), &params.view());
+        view.insert(paired_raw("photo", 0, 600_000_000), &params.view());
+        view.insert(item_at("a.raw", 0, 0), &params.view());
+        view.insert(item_at("b.raw", 0, 300_000_000), &params.view());
+        let jpeg = view.index_of(Path::new("/src/photo.jpg")).unwrap();
+        let raw = view.index_of(Path::new("/src/photo.raw")).unwrap();
+        let representative = view.index_of(Path::new("/src/a.raw")).unwrap();
+
+        assert!(!view.is_visible(raw), "the raw is a folded burst member");
+        assert_eq!(view.shown_stand_in(jpeg), Some(representative));
+    }
+
+    #[test]
+    fn a_filtered_out_frame_has_no_stand_in() {
+        let params = Params::new();
+        let items = [
+            item_at("a.raw", 0, 0),
+            Item {
+                rating: -1,
+                ..item_at("rejected.raw", 100, 0)
+            },
+        ];
+        let mut view = build_incremental(&items, &params);
+        let rejected = view.index_of(Path::new("/src/rejected.raw")).unwrap();
+
+        let mut hidden = params.view();
+        hidden.hide_rejected = true;
+        view.rebuild(&hidden);
+
+        assert!(!view.is_visible(rejected));
+        assert_eq!(view.shown_stand_in(rejected), None);
+    }
+
+    #[test]
+    fn a_jpeg_whose_raw_a_filter_hides_has_no_stand_in() {
+        let params = Params::new();
+        let mut hidden = params.view();
+        hidden.hide_rejected = true;
+        let mut view = MediaView::new();
+        view.insert(item_at("photo.jpg", 0, 0), &hidden);
+        let jpeg = view.index_of(Path::new("/src/photo.jpg")).unwrap();
+
+        view.insert(
+            Item {
+                rating: -1,
+                ..paired_raw("photo", 0, 0)
+            },
+            &hidden,
+        );
+
+        assert!(
+            !view.is_visible(jpeg),
+            "pairing hides the jpeg whether or not the raw shows"
+        );
+        assert_eq!(view.shown_stand_in(jpeg), None);
     }
 
     #[test]

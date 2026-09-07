@@ -6,7 +6,6 @@
 //! thumbnail cache, printing throughput. Evict the page cache first for a
 //! cold-storage measurement.
 
-#![expect(unused_crate_dependencies, reason = "example uses few crate deps")]
 #![expect(
     clippy::print_stdout,
     clippy::print_stderr,

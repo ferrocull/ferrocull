@@ -114,3 +114,13 @@ pub(crate) fn camera_source<'a>() -> Text<'a> {
 pub(crate) fn directory_source<'a>() -> Text<'a> {
     bootstrap::folder()
 }
+
+/// The small end of the thumbnail size slider: many small cells.
+pub(crate) fn thumbnails_small<'a>() -> Text<'a> {
+    bootstrap::grid_threexthree_gap()
+}
+
+/// The large end of the thumbnail size slider: few big cells.
+pub(crate) fn thumbnails_large<'a>() -> Text<'a> {
+    bootstrap::grid()
+}

@@ -102,8 +102,12 @@ struct ReadFile {
 /// caches. Splitting the stages keeps disk access limited to a few
 /// near-sequential streams while decode still uses every core; `on_event`
 /// fires from both pools. Blocks until every file is processed.
-pub fn run<T, F>(files: Vec<T>, thumbnail_size: u32, cache: Option<&ThumbnailCache>, on_event: F)
-where
+pub fn run<T, F>(
+    files: Vec<T>,
+    thumbnail_resolution: u32,
+    cache: Option<&ThumbnailCache>,
+    on_event: F,
+) where
     T: Input + Send,
     F: Fn(Event<T>) + Sync + Send,
 {
@@ -134,7 +138,7 @@ where
         drop(tx);
 
         rx.into_iter().par_bridge().for_each(|read| {
-            decode_stage(read, thumbnail_size, cache, &on_event);
+            decode_stage(read, thumbnail_resolution, cache, &on_event);
         });
     });
 }
@@ -251,7 +255,7 @@ where
 /// it, and emit [`Event::ThumbnailReady`].
 fn decode_stage<T, F>(
     read: ReadFile,
-    thumbnail_size: u32,
+    thumbnail_resolution: u32,
     cache: Option<&ThumbnailCache>,
     on_event: &F,
 ) where
@@ -269,9 +273,9 @@ fn decode_stage<T, F>(
     } = read;
 
     let thumb_result = match category {
-        FileCategory::Photo => generate_photo_thumbnail(&data, orientation, thumbnail_size),
+        FileCategory::Photo => generate_photo_thumbnail(&data, orientation, thumbnail_resolution),
         FileCategory::Raw => {
-            generate_raw_with_preread(data, &mut handle, orientation, thumbnail_size, &path)
+            generate_raw_with_preread(data, &mut handle, orientation, thumbnail_resolution, &path)
         }
         _ => Err(thumbnail::Error::UnsupportedFormat { path: path.clone() }),
     };

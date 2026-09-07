@@ -1,7 +1,3 @@
-// An integration test exercises the crate's public API; the package's other
-// dependencies are linked but never imported here.
-#![expect(unused_crate_dependencies)]
-
 //! Filesystem-level tests of the ingest contract: sources are only deleted
 //! after every copy verifies, backup failures are reported rather than
 //! swallowed, and a re-run repairs a partially failed ingest in place
