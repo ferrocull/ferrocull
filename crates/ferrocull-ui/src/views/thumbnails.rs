@@ -768,8 +768,11 @@ pub(crate) fn thumbnail_grid<'a>(
         scrollable(
             container(
                 column![
-                    sensor(Space::new().width(Fill).height(0))
-                        .on_resize(|size| Event::Resized(size.width)),
+                    // The space's zero height comes from its default `Shrink`,
+                    // which resolves to zero at layout time. `column!` drops a
+                    // child with a `Fixed(0.0)` dimension as void, and a
+                    // dropped sensor reports nothing.
+                    sensor(Space::new().width(Fill)).on_resize(|size| Event::Resized(size.width)),
                     grid,
                 ]
                 .width(Fill),
