@@ -300,11 +300,6 @@ impl Ferrocull {
                 let rows = self.grid_rows(width);
                 self.pin_anchor(&rows, offset);
                 self.grid_scroll_y = offset;
-                // The star preview belongs to the star row under a resting
-                // cursor. A scroll carries that row away, and the slot it held
-                // in the virtualized grid can go to another cell, whose
-                // rebuilt widget state has no exit to report.
-                self.hovered_star = None;
                 Task::none()
             }
             views::thumbnails::ScrollReaction::Idle => {
@@ -539,9 +534,7 @@ impl Ferrocull {
             return HashSet::new();
         };
         let start = rows[first].ordinal;
-        let end = rows
-            .get(last + 1)
-            .map_or_else(|| self.media.visible_len(), |r| r.ordinal);
+        let end = views::thumbnails::row_end(&rows, last, self.media.visible_len());
         self.media
             .indices_in_ordinal_range(start, end - start, self.config.view.ascending)
             .into_iter()
@@ -703,9 +696,7 @@ impl Ferrocull {
         let (row, ordinal) = self.focused_row(&rows, current);
         let target = target_row(&rows, row)?;
         let col = ordinal - rows[row].ordinal;
-        let row_end = rows
-            .get(target + 1)
-            .map_or_else(|| self.media.visible_len(), |r| r.ordinal);
+        let row_end = views::thumbnails::row_end(&rows, target, self.media.visible_len());
         let target_ordinal = (rows[target].ordinal + col).min(row_end - 1);
         Some(
             self.media
