@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
-dark-light = "2.0"
+dark-light = "3.0"
 dirs.workspace = true
 iced = { workspace = true, features = [
   "advanced",
@@ -22,7 +22,7 @@ rayon = "1.12"
 rfd = "0.17"
 ferrocull-core.workspace = true
 ferrocull-devices.workspace = true
-sipper = "0.1"
+sipper = "0.2"
 tokio.workspace = true
 tracing.workspace = true
 

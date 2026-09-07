@@ -1047,7 +1047,7 @@ fn spawn_thumbnail_sipper(
     thumbnail_resolution: u32,
     cache: Arc<ThumbnailCache>,
 ) -> Task<Message> {
-    let thumb_sipper = sipper(move |mut sender| async move {
+    let thumb_sipper = sipper(async move |mut sender| {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         rayon::spawn(move || {
