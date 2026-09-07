@@ -334,7 +334,7 @@ impl Ferrocull {
         // photographer is looking at, before the new size reflows it. One that
         // was already scrolled away has no claim on where the grid lands.
         let follow = self.focused_index.filter(|&idx| {
-            let cell_width = self.grid_cell_width(width);
+            let cell = self.grid_cell(width);
             let rows = self.grid_rows(width);
             let (row, _) = self.focused_row(&rows, idx);
             views::thumbnails::row_in_view(
@@ -342,7 +342,7 @@ impl Ferrocull {
                 row,
                 self.grid_scroll_y,
                 self.grid_viewport_height,
-                cell_width,
+                cell,
             )
         });
 
@@ -352,12 +352,12 @@ impl Ferrocull {
         let Some(anchored) = self.anchor_offset(width) else {
             return Task::none();
         };
-        let cell_width = self.grid_cell_width(width);
+        let cell = self.grid_cell(width);
         let rows = self.grid_rows(width);
         let y = follow
             .and_then(|idx| {
                 let (row, _) = self.focused_row(&rows, idx);
-                let (row_top, row_bottom) = views::thumbnails::row_bounds(&rows, row, cell_width);
+                let (row_top, row_bottom) = views::thumbnails::row_bounds(&rows, row, cell);
                 views::thumbnails::keep_row_in_view(
                     anchored,
                     row_top,
@@ -375,11 +375,11 @@ impl Ferrocull {
     /// scrollable's own clamp here keeps the follow-up viewport report from
     /// reading it as a user scroll.
     fn scroll_grid_to(&mut self, width: f32, y: f32) -> Task<Message> {
-        let cell_width = self.grid_cell_width(width);
+        let cell = self.grid_cell(width);
         let rows = self.grid_rows(width);
         let y = y.clamp(
             0.0,
-            views::thumbnails::max_offset(&rows, cell_width, self.grid_viewport_height),
+            views::thumbnails::max_offset(&rows, cell, self.grid_viewport_height),
         );
         self.grid_scroll_y = y;
         self.pin_anchor(&rows, y);
@@ -396,11 +396,11 @@ impl Ferrocull {
         let Some(y) = self.anchor_offset(grid_width) else {
             return Task::none();
         };
-        let cell_width = self.grid_cell_width(grid_width);
+        let cell = self.grid_cell(grid_width);
         let rows = self.grid_rows(grid_width);
         let y = y.min(views::thumbnails::max_offset(
             &rows,
-            cell_width,
+            cell,
             self.grid_viewport_height,
         ));
         self.grid_scroll_y = y;
@@ -466,9 +466,9 @@ impl Ferrocull {
         }
     }
 
-    /// Column count and cell width the grid lays out at, for the chosen
+    /// Column count and cell geometry the grid lays out at, for the chosen
     /// thumbnail size.
-    fn grid_metrics(&self, grid_width: f32) -> (usize, f32) {
+    fn grid_metrics(&self, grid_width: f32) -> (usize, views::thumbnails::CellGeometry) {
         views::thumbnails::grid_metrics(
             grid_width,
             self.config.view.thumbnail_size,
@@ -476,8 +476,8 @@ impl Ferrocull {
         )
     }
 
-    /// Rendered width of one grid cell at the current geometry.
-    fn grid_cell_width(&self, grid_width: f32) -> f32 {
+    /// Geometry of one grid cell when the grid lays out at `grid_width`.
+    fn grid_cell(&self, grid_width: f32) -> views::thumbnails::CellGeometry {
         self.grid_metrics(grid_width).1
     }
 
@@ -509,11 +509,11 @@ impl Ferrocull {
             self.config.view.ascending,
             grouped,
         );
-        let (cols, cell_width) = self.grid_metrics(grid_width);
+        let (cols, cell) = self.grid_metrics(grid_width);
         let rows: Rc<[views::thumbnails::RowStart]> = views::thumbnails::row_starts(
             &sections,
             cols,
-            cell_width,
+            cell,
             views::thumbnails::header_block(grouped),
         )
         .into();
@@ -612,10 +612,10 @@ impl Ferrocull {
         let Some(width) = self.grid_area_width else {
             return Task::none();
         };
-        let cell_width = self.grid_cell_width(width);
+        let cell = self.grid_cell(width);
         let rows = self.grid_rows(width);
         let (target, _) = self.focused_row(&rows, idx);
-        let (row_top, row_bottom) = views::thumbnails::row_bounds(&rows, target, cell_width);
+        let (row_top, row_bottom) = views::thumbnails::row_bounds(&rows, target, cell);
         let Some(y) = views::thumbnails::keep_row_in_view(
             self.grid_scroll_y,
             row_top,

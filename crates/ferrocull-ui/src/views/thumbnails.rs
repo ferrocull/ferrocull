@@ -91,17 +91,50 @@ pub(crate) const GRID_SCROLLABLE_ID: &str = "thumbnail-grid";
 /// content overflows: iced pads by width plus twice the margin plus the spacing.
 pub(crate) const SCROLLBAR_GUTTER: f32 = 10.0;
 
-/// Column count and cell width for a given available content width and
+/// Rendered geometry of one grid cell: its width and the gap to the next cell,
+/// across and down alike. Both are whole physical pixels at the window scale,
+/// so every column stride `width + gap` lands on the device pixel grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CellGeometry {
+    pub width: f32,
+    pub gap: f32,
+}
+
+impl CellGeometry {
+    /// Distance from one card's edge to the next, across and down alike: rows
+    /// and columns share one gap, so square cells make one pitch serve both.
+    pub(crate) fn pitch(self) -> f32 {
+        self.width + self.gap
+    }
+
+    /// Extent of `count` consecutive cells, including the gaps between them.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "cell counts are far below f32's 2^23 exact-integer range"
+    )]
+    pub(crate) fn span(self, count: usize) -> f32 {
+        self.width * count as f32 + self.gap * count.saturating_sub(1) as f32
+    }
+}
+
+/// Column count and cell geometry for a given available content width and
 /// `nominal` cell width (the chosen thumbnail size).
 ///
-/// Mirrors iced's fluid column count (`ceil`) but floors the cell width to a
-/// whole *physical* pixel (logical × `scale`) so every card edge lands on the
-/// device pixel grid. iced's `crisp` snapping rounds each quad independently in
-/// physical pixels at draw time; with fractional cell widths the card background
-/// and the centered, `Contain`-fit image round to different edges, so photos
-/// appear to drift ~1px at specific window widths. Whole-physical-pixel cells
-/// make the snapping a no-op. Leftover space (under one logical pixel per
-/// column) becomes a trailing margin.
+/// Mirrors iced's fluid column count (`ceil`) but floors both the cell width and
+/// the inter-cell gap to whole *physical* pixels (logical × `scale`) so every
+/// card edge lands on the device pixel grid. iced's `crisp` snapping rounds each
+/// quad independently in physical pixels at draw time; a fractional cell width
+/// rounds the card background and its centered, `Contain`-fit image to different
+/// edges, and a fractional gap carries that error into every column origin
+/// through the stride, so photos appear to drift ~1px at specific window widths
+/// and scale factors. Whole-physical-pixel widths and gaps make the snapping a
+/// no-op.
+///
+/// The column count and the cell width both divide the row by the raw
+/// [`spacing::SM`] gap. That is the formula [`nominal_for_columns`] inverts.
+/// Quantizing only ever narrows the gap, so the row still fits. What the two
+/// floors give up (under one physical pixel per column, under one per gutter)
+/// becomes a trailing margin.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -111,12 +144,15 @@ pub(crate) const SCROLLBAR_GUTTER: f32 = 10.0;
     clippy::cast_precision_loss,
     reason = "column counts and thumbnail sizes are far below f32's 2^23 exact-integer range"
 )]
-pub(crate) fn grid_metrics(available: f32, nominal: u32, scale: f32) -> (usize, f32) {
+pub(crate) fn grid_metrics(available: f32, nominal: u32, scale: f32) -> (usize, CellGeometry) {
     let cols =
         (((available + spacing::SM) / (nominal as f32 + spacing::SM)).ceil() as usize).max(1);
     let exact = (available - spacing::SM * (cols - 1) as f32) / cols as f32;
-    let cell_width = (exact * scale).floor() / scale;
-    (cols, cell_width)
+    let cell = CellGeometry {
+        width: (exact * scale).floor() / scale,
+        gap: (spacing::SM * scale).floor() / scale,
+    };
+    (cols, cell)
 }
 
 /// Column count `nominal` lays a grid of `width` out in.
@@ -191,13 +227,9 @@ pub(crate) fn clamp_thumbnail_size(size: u32) -> u32 {
 }
 
 /// Total pinned width of the `cols` cells produced by [`grid_metrics`],
-/// including inter-cell spacing.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "column count is far below f32's 2^23 exact-integer range"
-)]
-fn grid_width(cols: usize, cell_width: f32) -> f32 {
-    cell_width * cols as f32 + spacing::SM * (cols - 1) as f32
+/// including the inter-cell gaps.
+fn grid_width(cols: usize, cell: CellGeometry) -> f32 {
+    cell.span(cols)
 }
 
 /// Fixed height of a date section header, so the update-side row model does not
@@ -230,8 +262,9 @@ const ROW_EPS: f32 = 1.0;
 /// first card.
 ///
 /// The anchor sits above the cards, by a gap that depends on what precedes
-/// them. Plain rows keep an `SM` gap, exactly the inter-row spacing, so the
-/// previous row ends at the viewport edge without its card bottoms bleeding in.
+/// them. Plain rows keep one [`CellGeometry::gap`], exactly the inter-row
+/// spacing, so the previous row ends at the viewport edge without its card
+/// bottoms bleeding in.
 /// Section-first rows anchor their header instead, an `MD` gap above it; the
 /// `LG` section spacing above absorbs that without bleed, and `top` then sits
 /// the `MD` gap plus a whole header block below the anchor.
@@ -248,7 +281,7 @@ pub(crate) struct RowStart {
 /// `header_block` the space each section's header takes above its grid. The
 /// first row of each section anchors to the section top so its header stays
 /// visible; later rows anchor to the row itself. Rows step by one
-/// [`cell_pitch`].
+/// [`CellGeometry::pitch`].
 #[expect(
     clippy::cast_precision_loss,
     reason = "row and column counts are far below f32's exact-integer range"
@@ -256,10 +289,10 @@ pub(crate) struct RowStart {
 pub(crate) fn row_starts(
     sections: &[(usize, usize)],
     cols: usize,
-    cell_width: f32,
+    cell: CellGeometry,
     header_block: f32,
 ) -> Vec<RowStart> {
-    let pitch = cell_pitch(cell_width);
+    let pitch = cell.pitch();
     let mut rows = Vec::new();
     // Content-y cursor; starts at the scrollable content's MD top padding.
     let mut y = spacing::MD;
@@ -272,7 +305,7 @@ pub(crate) fn row_starts(
             let offset = if r == 0 {
                 header_top - spacing::MD
             } else {
-                row_top - spacing::SM
+                row_top - cell.gap
             };
             rows.push(RowStart {
                 offset,
@@ -280,9 +313,7 @@ pub(crate) fn row_starts(
                 ordinal: start + r * cols,
             });
         }
-        let grid_height =
-            num_rows as f32 * cell_width + num_rows.saturating_sub(1) as f32 * spacing::SM;
-        y = grid_top + grid_height + spacing::LG;
+        y = grid_top + cell.span(num_rows) + spacing::LG;
     }
     rows
 }
@@ -293,17 +324,11 @@ pub(crate) fn row_starts(
 /// successor and ends at the bottom of the content: its cards plus the `MD`
 /// padding the scrollable keeps under them, which is the same padding
 /// [`row_starts`] opens its cursor with at the top.
-pub(crate) fn row_bounds(rows: &[RowStart], row: usize, cell_width: f32) -> (f32, f32) {
+pub(crate) fn row_bounds(rows: &[RowStart], row: usize, cell: CellGeometry) -> (f32, f32) {
     let bottom = rows
         .get(row + 1)
-        .map_or(rows[row].top + cell_width + spacing::MD, |next| next.offset);
+        .map_or(rows[row].top + cell.width + spacing::MD, |next| next.offset);
     (rows[row].offset, bottom)
-}
-
-/// Distance from one card's edge to the next, across and down alike: rows and
-/// columns share the `SM` gap, so square cells make one pitch serve both.
-fn cell_pitch(cell_width: f32) -> f32 {
-    cell_width + spacing::SM
 }
 
 /// Display-order item under `point`, or `None` where the cursor sits in a gap
@@ -312,7 +337,7 @@ fn cell_pitch(cell_width: f32) -> f32 {
 /// `point` is relative to the section column, whose left edge is the left edge
 /// of the first card and whose top edge is the `MD` content padding
 /// [`row_starts`] opens its y cursor with, so content space is `point.y` plus
-/// that padding. `cell_width` is the geometry `rows` was built with, and
+/// that padding. `cell` is the geometry `rows` was built with, and
 /// `order` the display-order item indices that geometry lays out.
 #[expect(
     clippy::cast_possible_truncation,
@@ -322,23 +347,23 @@ fn cell_pitch(cell_width: f32) -> f32 {
 pub(crate) fn item_at(
     point: Point,
     rows: &[RowStart],
-    cell_width: f32,
+    cell: CellGeometry,
     order: &[usize],
 ) -> Option<usize> {
     let content_y = point.y + spacing::MD;
 
-    // Rows are square, so a row's cards span `cell_width` below its top; the
+    // Rows are square, so a row's cards span `cell.width` below its top; the
     // rest of the span up to the next row is inter-row spacing, a section gap
     // or a header block.
     let row = rows
         .partition_point(|r| r.top <= content_y)
         .checked_sub(1)?;
-    if content_y - rows[row].top >= cell_width {
+    if content_y - rows[row].top >= cell.width {
         return None;
     }
 
-    let pitch = cell_pitch(cell_width);
-    if point.x % pitch >= cell_width {
+    let pitch = cell.pitch();
+    if point.x % pitch >= cell.width {
         return None;
     }
 
@@ -351,10 +376,10 @@ pub(crate) fn item_at(
 /// Height of the scrollable's content under the geometry `rows` was built for:
 /// the bottom of the last row, which is its cards plus the `MD` padding the
 /// content keeps under them. Zero for an empty grid.
-pub(crate) fn content_height(rows: &[RowStart], cell_width: f32) -> f32 {
+pub(crate) fn content_height(rows: &[RowStart], cell: CellGeometry) -> f32 {
     rows.len()
         .checked_sub(1)
-        .map_or(0.0, |last| row_bounds(rows, last, cell_width).1)
+        .map_or(0.0, |last| row_bounds(rows, last, cell).1)
 }
 
 /// Largest scroll offset a grid of `rows` can reach: the content height minus
@@ -363,11 +388,11 @@ pub(crate) fn content_height(rows: &[RowStart], cell_width: f32) -> f32 {
 /// A `viewport_height` of `0.0` marks the viewport as not yet reported. The
 /// scrollable reports one the first time its content overflows, so until then
 /// the content fits and the grid cannot scroll at all.
-pub(crate) fn max_offset(rows: &[RowStart], cell_width: f32, viewport_height: f32) -> f32 {
+pub(crate) fn max_offset(rows: &[RowStart], cell: CellGeometry, viewport_height: f32) -> f32 {
     if viewport_height <= 0.0 {
         return 0.0;
     }
-    (content_height(rows, cell_width) - viewport_height).max(0.0)
+    (content_height(rows, cell) - viewport_height).max(0.0)
 }
 
 /// Whether any part of row `row` shows in the viewport at `scroll_y`.
@@ -376,9 +401,9 @@ pub(crate) fn row_in_view(
     row: usize,
     scroll_y: f32,
     viewport_height: f32,
-    cell_width: f32,
+    cell: CellGeometry,
 ) -> bool {
-    let (top, bottom) = row_bounds(rows, row, cell_width);
+    let (top, bottom) = row_bounds(rows, row, cell);
     top < scroll_y + viewport_height && bottom > scroll_y
 }
 
@@ -543,15 +568,14 @@ pub(crate) fn visible_row_window(
 )]
 pub(crate) fn row_run_spacers(
     num_rows: usize,
-    cell_width: f32,
+    cell: CellGeometry,
     first: usize,
     last: usize,
 ) -> (f32, f32) {
-    let pitch = cell_pitch(cell_width);
-    let grid_height =
-        num_rows as f32 * cell_width + (num_rows.saturating_sub(1)) as f32 * spacing::SM;
+    let pitch = cell.pitch();
+    let grid_height = cell.span(num_rows);
     let top = first as f32 * pitch;
-    let visible = (last - first + 1) as f32 * cell_width + (last - first) as f32 * spacing::SM;
+    let visible = cell.span(last - first + 1);
     (top, grid_height - top - visible)
 }
 
@@ -716,12 +740,12 @@ pub(crate) fn thumbnail_grid<'a>(
     // iced has already subtracted the container's `MD` padding and, when the
     // content overflows, the embedded scrollbar's gutter.
     let grid = responsive(move |size| {
-        let (cols, cell_width) = grid_metrics(size.width, thumbnail_size, window_scale);
+        let (cols, cell) = grid_metrics(size.width, thumbnail_size, window_scale);
 
         // Center the grid by splitting the leftover into a side margin floored
         // to the physical-pixel grid — a fractional offset would shift every
         // card off the pixel grid and reintroduce sub-pixel drift.
-        let side_margin = (((size.width - grid_width(cols, cell_width)) / 2.0) * window_scale)
+        let side_margin = (((size.width - grid_width(cols, cell)) / 2.0) * window_scale)
             .floor()
             .max(0.0)
             / window_scale;
@@ -742,7 +766,7 @@ pub(crate) fn thumbnail_grid<'a>(
             let burst = burst_status(idx);
 
             let path = item.path.clone();
-            let cell = thumbnail_card(
+            let card = thumbnail_card(
                 loaded_thumbs.get(&item.path),
                 item,
                 state,
@@ -751,7 +775,7 @@ pub(crate) fn thumbnail_grid<'a>(
                 cell_hovered_star,
             );
 
-            cell.map(move |e| match e {
+            card.map(move |e| match e {
                 CellEvent::Clicked => Event::CellClicked(path.clone()),
                 CellEvent::DoubleClicked => Event::CellDoubleClicked(idx),
                 CellEvent::Rated(r) => Event::Rated(path.clone(), r),
@@ -772,7 +796,7 @@ pub(crate) fn thumbnail_grid<'a>(
         // The same row model and window function the update side uses to decide
         // which thumbnails to load (`window_item_indices`), so the rendered
         // rows and the loaded thumbnails cannot drift apart.
-        let rows = row_starts(&sections, cols, cell_width, header_block(group_by_date));
+        let rows = row_starts(&sections, cols, cell, header_block(group_by_date));
         let row_window = visible_row_window(&rows, scroll_y, viewport_height, GRID_OVERSCAN)
             .expect("a non-empty sorted view yields rows");
 
@@ -781,7 +805,7 @@ pub(crate) fn thumbnail_grid<'a>(
             &order,
             &sections,
             cols,
-            cell_width,
+            cell,
             group_by_date,
             today,
             row_window,
@@ -796,7 +820,7 @@ pub(crate) fn thumbnail_grid<'a>(
         container(hover_tracker(
             cells,
             hovered_thumbnail,
-            move |point| point.and_then(|p| item_at(p, &rows, cell_width, &order)),
+            move |point| point.and_then(|p| item_at(p, &rows, cell, &order)),
             Event::Hover,
         ))
         .padding(iced::padding::horizontal(side_margin))
@@ -888,16 +912,12 @@ fn date_sections(items: &[Item], order: impl IntoIterator<Item = usize>) -> Vec<
     clippy::too_many_arguments,
     reason = "layout inputs that a param bag would only relocate"
 )]
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "row counts are far below f32's exact-integer range"
-)]
 fn build_sections<'a>(
     items: &'a [Item],
     order: &[usize],
     sections: &[(usize, usize)],
     cols: usize,
-    cell_width: f32,
+    cell: CellGeometry,
     grouped: bool,
     today: NaiveDate,
     row_window: (usize, usize),
@@ -911,9 +931,7 @@ fn build_sections<'a>(
 
     for &(start, count) in sections {
         let num_rows = count.div_ceil(cols);
-        let grid_height =
-            num_rows as f32 * cell_width + (num_rows.saturating_sub(1)) as f32 * spacing::SM;
-        let section_height = header_block + grid_height;
+        let section_height = header_block + cell.span(num_rows);
         let base = row_base;
         row_base += num_rows;
 
@@ -926,7 +944,7 @@ fn build_sections<'a>(
             continue;
         }
         let (first_row, last_row) = (sec_first - base, sec_last - base);
-        let (top_sp, bottom_sp) = row_run_spacers(num_rows, cell_width, first_row, last_row);
+        let (top_sp, bottom_sp) = row_run_spacers(num_rows, cell, first_row, last_row);
         let slice_start = start + first_row * cols;
         let slice_end = (start + (last_row + 1) * cols).min(start + count);
         let cells = grid(
@@ -934,9 +952,9 @@ fn build_sections<'a>(
                 .iter()
                 .map(|&idx| build_cell(idx)),
         )
-        .spacing(spacing::SM)
+        .spacing(cell.gap)
         .columns(cols)
-        .width(grid_width(cols, cell_width));
+        .width(grid_width(cols, cell));
         let body = column![
             Space::new().height(top_sp),
             cells,
@@ -1222,7 +1240,7 @@ fn preview_icon() -> Element<'static, CellEvent> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DATE_HEADER_HEIGHT, Point, RowStart, SCROLLBAR_GUTTER, THUMBNAIL_SIZE_MAX,
+        CellGeometry, DATE_HEADER_HEIGHT, Point, RowStart, SCROLLBAR_GUTTER, THUMBNAIL_SIZE_MAX,
         THUMBNAIL_SIZE_MIN, anchor_row, column_range, columns_for, content_height, grid_metrics,
         grid_width, header_block, item_at, keep_row_in_view, nominal_for_columns, row_bounds,
         row_for_ordinal, row_in_view, row_run_spacers, row_starts, step_columns, step_row,
@@ -1246,9 +1264,15 @@ mod tests {
         })
     }
 
-    // A round cell width keeps the expected offsets easy to read.
+    // A round cell width keeps the expected offsets easy to read. At scale 1.0
+    // the quantized gap is the raw `SM` spacing, so `CELL` is the geometry
+    // `grid_metrics` produces there.
     const CW: f32 = 100.0;
-    const PITCH: f32 = CW + spacing::SM; // 108
+    const CELL: CellGeometry = CellGeometry {
+        width: CW,
+        gap: spacing::SM,
+    };
+    const PITCH: f32 = CELL.width + CELL.gap; // 108
 
     fn offsets(rows: &[RowStart]) -> Vec<f32> {
         rows.iter().map(|r| r.offset).collect()
@@ -1262,16 +1286,17 @@ mod tests {
         rows.iter().map(|r| r.ordinal).collect()
     }
 
-    /// Gap kept above a snapped plain row: the row sits `SM` below the viewport
-    /// top, and the anchor math cancels all but `MD - SM` of the top padding.
-    const GAP: f32 = spacing::MD - spacing::SM; // 4
+    /// Gap kept above a snapped plain row: the row sits one cell gap below the
+    /// viewport top, and the anchor math cancels all but the rest of the `MD`
+    /// top padding.
+    const GAP: f32 = spacing::MD - CELL.gap; // 4
 
     #[test]
     fn ungrouped_row_offsets_step_by_pitch() {
         // 7 cards, 3 columns → 3 rows. First row anchors to the top (offset 0);
-        // later rows keep an SM gap so the previous row ends at the viewport
+        // later rows keep one cell gap so the previous row ends at the viewport
         // edge instead of bleeding its card bottoms in.
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0);
         assert_eq!(offsets(&rows), vec![0.0, PITCH + GAP, 2.0 * PITCH + GAP]);
         // Card tops sit a pitch apart below the content's MD top padding.
         assert_eq!(
@@ -1284,7 +1309,7 @@ mod tests {
     #[test]
     fn grouped_sections_add_header_and_section_gaps() {
         // Section 0: 4 cards / 3 cols = 2 rows. Section 1: 5 cards / 3 cols = 2 rows.
-        let rows = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true));
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CELL, header_block(true));
         let header_block = DATE_HEADER_HEIGHT + spacing::XS; // 30
 
         // Section 0, row 0 snaps to the header top (offset 0).
@@ -1292,7 +1317,7 @@ mod tests {
         // the SM gap kept above a snapped plain row.
         let s0_r1 = header_block + PITCH + GAP;
         // Section 1 header top, in content-y: MD + header_block + grid0 + LG.
-        let grid0_height = 2.0 * CW + spacing::SM; // 208
+        let grid0_height = 2.0 * CW + CELL.gap; // 208
         let s1_header_content_y = spacing::MD + header_block + grid0_height + spacing::LG;
         let s1_r0 = s1_header_content_y - spacing::MD; // header snap keeps the MD gap
         let s1_r1 = s1_r0 + header_block + PITCH + GAP;
@@ -1311,7 +1336,7 @@ mod tests {
 
     #[test]
     fn step_row_moves_one_row_per_step_from_aligned_offset() {
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0);
         let o = offsets(&rows);
         assert_eq!(step_row(&rows, o[0], 1), Some(1));
         assert_eq!(step_row(&rows, o[0], 2), Some(2));
@@ -1322,7 +1347,7 @@ mod tests {
 
     #[test]
     fn step_row_realigns_from_unaligned_offset() {
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0); // offsets 0, 116, 224
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0); // offsets 0, 116, 224
         // Mid-way between row 0 and row 1 after a free drag.
         assert_eq!(step_row(&rows, 50.0, 1), Some(1));
         assert_eq!(step_row(&rows, 50.0, -1), Some(0));
@@ -1333,7 +1358,7 @@ mod tests {
 
     #[test]
     fn step_row_clamps_within_rows_and_noops_past_the_ends() {
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0); // 3 rows
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0); // 3 rows
         let o = offsets(&rows);
         // A next/previous boundary exists: overshooting steps clamp to it.
         assert_eq!(step_row(&rows, o[1], 5), Some(2));
@@ -1369,7 +1394,7 @@ mod tests {
 
     #[test]
     fn anchor_row_finds_row_containing_offset() {
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0);
         let o = offsets(&rows);
         assert_eq!(anchor_row(&rows, o[0]), Some(0));
         assert_eq!(anchor_row(&rows, 50.0), Some(0));
@@ -1380,7 +1405,7 @@ mod tests {
 
     #[test]
     fn row_for_ordinal_maps_card_to_its_row() {
-        let rows = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true)); // ordinals 0, 3, 4, 7
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CELL, header_block(true)); // ordinals 0, 3, 4, 7
         assert_eq!(row_for_ordinal(&rows, 0), Some(0));
         assert_eq!(row_for_ordinal(&rows, 3), Some(1));
         assert_eq!(row_for_ordinal(&rows, 4), Some(2));
@@ -1401,33 +1426,33 @@ mod tests {
 
     #[test]
     fn item_at_hits_the_card_under_the_cursor() {
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0); // tops 12, 120, 228
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0); // tops 12, 120, 228
         let order = straight_order(7);
         // Center of row 1, column 2: ordinal 3 + 2.
         let point = hit_point(2.0 * PITCH + CW / 2.0, rows[1].top + CW / 2.0);
-        assert_eq!(item_at(point, &rows, CW, &order), Some(5));
+        assert_eq!(item_at(point, &rows, CELL, &order), Some(5));
     }
 
     #[test]
     fn item_at_misses_the_gap_between_columns() {
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0);
         let order = straight_order(7);
-        let point = hit_point(CW + spacing::SM / 2.0, rows[0].top + CW / 2.0);
-        assert_eq!(item_at(point, &rows, CW, &order), None);
+        let point = hit_point(CW + CELL.gap / 2.0, rows[0].top + CW / 2.0);
+        assert_eq!(item_at(point, &rows, CELL, &order), None);
     }
 
     #[test]
     fn item_at_misses_the_gap_between_rows() {
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0);
         let order = straight_order(7);
-        let point = hit_point(CW / 2.0, rows[0].top + CW + spacing::SM / 2.0);
-        assert_eq!(item_at(point, &rows, CW, &order), None);
+        let point = hit_point(CW / 2.0, rows[0].top + CW + CELL.gap / 2.0);
+        assert_eq!(item_at(point, &rows, CELL, &order), None);
     }
 
     #[test]
     fn item_at_misses_a_date_header_band() {
         // Two sections of 4 and 5 cards: tops 42, 150, 296, 404.
-        let rows = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true));
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CELL, header_block(true));
         let order = straight_order(9);
         let band = |row: usize| {
             hit_point(
@@ -1435,32 +1460,32 @@ mod tests {
                 rows[row].top - spacing::XS - DATE_HEADER_HEIGHT / 2.0,
             )
         };
-        assert_eq!(item_at(band(2), &rows, CW, &order), None);
+        assert_eq!(item_at(band(2), &rows, CELL, &order), None);
         // The leading section's own header sits above the first row.
-        assert_eq!(item_at(band(0), &rows, CW, &order), None);
+        assert_eq!(item_at(band(0), &rows, CELL, &order), None);
     }
 
     #[test]
     fn item_at_misses_an_empty_slot_in_a_partial_last_row() {
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0); // last row holds card 6 alone
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0); // last row holds card 6 alone
         let order = straight_order(7);
         let point = hit_point(PITCH + CW / 2.0, rows[2].top + CW / 2.0);
-        assert_eq!(item_at(point, &rows, CW, &order), None);
+        assert_eq!(item_at(point, &rows, CELL, &order), None);
     }
 
     #[test]
     fn item_at_reads_the_display_order() {
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0);
         let order: Vec<usize> = (0..7).rev().collect();
         let point = hit_point(PITCH + CW / 2.0, rows[0].top + CW / 2.0);
-        assert_eq!(item_at(point, &rows, CW, &order), Some(5));
+        assert_eq!(item_at(point, &rows, CELL, &order), Some(5));
     }
 
     #[test]
     fn reanchor_is_a_noop_at_unchanged_geometry() {
         // The resize-pinning invariant: anchoring an exact row offset and
         // re-resolving it under identical geometry returns the same offset.
-        let rows = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true));
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CELL, header_block(true));
         for row in &rows {
             let anchor = anchor_row(&rows, row.offset).expect("row exists");
             let ordinal = rows[anchor].ordinal;
@@ -1477,8 +1502,8 @@ mod tests {
     fn reanchor_keeps_top_card_visible_across_column_change() {
         // Grouped [4, 5]. At 3 columns the last row starts at card 7; after a
         // reflow to 2 columns that card must still sit in the row placed at top.
-        let old = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true));
-        let new = row_starts(&[(0, 4), (4, 5)], 2, CW, header_block(true));
+        let old = row_starts(&[(0, 4), (4, 5)], 3, CELL, header_block(true));
+        let new = row_starts(&[(0, 4), (4, 5)], 2, CELL, header_block(true));
 
         // Anchored at the section-1 second row (offset for card 7) under 3 cols.
         let old_idx = 3;
@@ -1502,7 +1527,7 @@ mod tests {
         // 5 cols → 9 at 3 cols → 8 at 2 cols), drifting toward the grid start.
         let anchor = 12;
         for cols in [5, 4, 3, 2, 3, 4, 5] {
-            let rows = row_starts(&[(0, 72)], cols, CW, 0.0);
+            let rows = row_starts(&[(0, 72)], cols, CELL, 0.0);
             let target = row_for_ordinal(&rows, anchor).expect("card maps to a row");
             let start = rows[target].ordinal;
             assert!(
@@ -1511,7 +1536,7 @@ mod tests {
             );
         }
         // Returning to the original geometry restores the original top card.
-        let rows = row_starts(&[(0, 72)], 2, CW, 0.0);
+        let rows = row_starts(&[(0, 72)], 2, CELL, 0.0);
         let target = row_for_ordinal(&rows, anchor).expect("card maps to a row");
         assert_eq!(rows[target].ordinal, 12);
     }
@@ -1599,7 +1624,7 @@ mod tests {
         (0..n)
             .map(|i| RowStart {
                 offset: i as f32 * step,
-                top: i as f32 * step + spacing::SM,
+                top: i as f32 * step + CELL.gap,
                 ordinal: i * 3,
             })
             .collect()
@@ -1642,12 +1667,11 @@ mod tests {
 
     #[test]
     fn row_run_spacers_sum_to_full_grid_height() {
-        let pitch = CW + spacing::SM;
-        let grid_height = 10.0 * CW + 9.0 * spacing::SM; // 10 rows
-        let (top, bottom) = row_run_spacers(10, CW, 3, 6);
-        let visible = 4.0 * CW + 3.0 * spacing::SM; // rows 3..=6
+        let grid_height = 10.0 * CW + 9.0 * CELL.gap; // 10 rows
+        let (top, bottom) = row_run_spacers(10, CELL, 3, 6);
+        let visible = 4.0 * CW + 3.0 * CELL.gap; // rows 3..=6
         assert!(
-            (top - 3.0 * pitch).abs() < 1e-3,
+            (top - 3.0 * PITCH).abs() < 1e-3,
             "top spacer offsets to row 3"
         );
         assert!(
@@ -1659,13 +1683,13 @@ mod tests {
 
     #[test]
     fn row_run_spacers_full_range_has_no_padding() {
-        let (top, bottom) = row_run_spacers(5, CW, 0, 4);
+        let (top, bottom) = row_run_spacers(5, CELL, 0, 4);
         assert!(top.abs() < 1e-3 && bottom.abs() < 1e-3);
     }
 
     #[test]
     fn row_run_spacers_last_row_visible_has_zero_bottom() {
-        let (_, bottom) = row_run_spacers(8, CW, 5, 7);
+        let (_, bottom) = row_run_spacers(8, CELL, 5, 7);
         assert!(
             bottom.abs() < 1e-3,
             "no bottom spacer when the last row shows"
@@ -1726,45 +1750,62 @@ mod tests {
     )]
     fn grid_cells_are_pixel_aligned() {
         for nominal in [THUMBNAIL_SIZE_MIN, 224, THUMBNAIL_SIZE_MAX] {
-            for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0] {
+            for scale in [1.0_f32, 1.1, 1.2, 1.25, 1.3, 1.5, 1.75, 2.0] {
                 for w in 200..=6000 {
                     let available = w as f32 / scale;
-                    let (cols, cell_width) = grid_metrics(available, nominal, scale);
+                    let (cols, cell) = grid_metrics(available, nominal, scale);
+                    let CellGeometry { width, gap } = cell;
 
                     assert!(cols >= 1, "width {available} ×{scale}: at least one column");
 
-                    // The cell width and the column stride (cell + spacing) must
-                    // both be whole physical pixels — column edges are
-                    // `k * stride`, so this puts every card edge on the pixel
-                    // grid. Tolerance covers f32 round-trips through the logical
-                    // representation; the GPU sees the same values.
-                    let cell_phys = cell_width * scale;
+                    // The cell width and the inter-cell gap must both be whole
+                    // physical pixels: column edges are `k * (width + gap)`, so
+                    // this puts every card edge on the pixel grid. Tolerance
+                    // covers f32 round-trips through the logical representation;
+                    // the GPU sees the same values.
+                    let cell_phys = width * scale;
                     assert!(
                         (cell_phys - cell_phys.round()).abs() < 1e-3,
-                        "width {available} ×{scale}: cell {cell_width} is {cell_phys} physical px"
+                        "width {available} ×{scale}: cell {width} is {cell_phys} physical px"
                     );
-                    let stride_phys = (cell_width + spacing::SM) * scale;
+                    let gap_phys = gap * scale;
+                    assert!(
+                        (gap_phys - gap_phys.round()).abs() < 1e-3,
+                        "width {available} ×{scale}: gap {gap} is {gap_phys} physical px"
+                    );
+                    let stride_phys = (width + gap) * scale;
                     assert!(
                         (stride_phys - stride_phys.round()).abs() < 1e-3,
                         "width {available} ×{scale}: stride is {stride_phys} physical px"
                     );
+                    // Column origins accumulate the stride, so they must land on
+                    // the pixel grid too: a stride whole to the tolerance still
+                    // drifts once summed across a wide row.
+                    for k in 0..cols {
+                        let origin = k as f32 * (width + gap) * scale;
+                        assert!(
+                            (origin - origin.round()).abs() < 1e-2,
+                            "width {available} ×{scale}: column {k} origin {origin} off the grid"
+                        );
+                    }
 
-                    let total = grid_width(cols, cell_width);
+                    let total = grid_width(cols, cell);
                     assert!(
                         total <= available + 1e-3,
                         "width {available} ×{scale}: grid {total} must fit"
                     );
-                    // Flooring drops less than one physical pixel per column, so
-                    // the trailing margin is bounded by the column count.
+                    // Each floor gives up under one physical pixel: one per
+                    // column from the width, one per gutter from the gap.
+                    let slack = cols as f32 / scale + (cols - 1) as f32 * (spacing::SM - gap);
                     assert!(
-                        available - total < cols as f32 / scale + 1e-3,
+                        available - total < slack + 1e-3,
                         "width {available} ×{scale}: leftover {} too large",
                         available - total
                     );
                     // Cells never exceed the intended maximum card width.
                     assert!(
-                        cell_width <= nominal as f32,
-                        "width {available} ×{scale}: cell {cell_width} exceeds max {nominal}"
+                        width <= nominal as f32,
+                        "width {available} ×{scale}: cell {width} exceeds max {nominal}"
                     );
                 }
             }
@@ -1917,57 +1958,57 @@ mod tests {
     #[test]
     fn row_bounds_span_to_the_next_row() {
         let rows = rows_every(3, PITCH);
-        assert_eq!(row_bounds(&rows, 0, CW), (0.0, PITCH));
-        assert_eq!(row_bounds(&rows, 1, CW), (PITCH, 2.0 * PITCH));
+        assert_eq!(row_bounds(&rows, 0, CELL), (0.0, PITCH));
+        assert_eq!(row_bounds(&rows, 1, CELL), (PITCH, 2.0 * PITCH));
     }
 
     #[test]
     fn row_bounds_of_the_last_row_end_at_the_content_bottom() {
         let rows = rows_every(3, PITCH);
         assert_eq!(
-            row_bounds(&rows, 2, CW),
+            row_bounds(&rows, 2, CELL),
             (2.0 * PITCH, rows[2].top + CW + spacing::MD)
         );
     }
 
     #[test]
     fn content_height_of_an_empty_grid_is_zero() {
-        assert_eq!(content_height(&[], CW), 0.0);
+        assert_eq!(content_height(&[], CELL), 0.0);
     }
 
     #[test]
     fn content_height_spans_the_padding_at_both_ends() {
         // 7 cards, 3 columns → 3 rows, no headers.
-        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
-        let expected = spacing::MD + 3.0 * CW + 2.0 * spacing::SM + spacing::MD;
-        assert_eq!(content_height(&rows, CW), expected);
+        let rows = row_starts(&[(0, 7)], 3, CELL, 0.0);
+        let expected = spacing::MD + 3.0 * CW + 2.0 * CELL.gap + spacing::MD;
+        assert_eq!(content_height(&rows, CELL), expected);
     }
 
     #[test]
     fn content_height_counts_every_section_header_and_gap() {
         // Section 0: 4 cards / 3 cols = 2 rows. Section 1: 5 cards = 2 rows.
-        let rows = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true));
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CELL, header_block(true));
         let hb = header_block(true);
-        let section = 2.0 * CW + spacing::SM;
+        let section = 2.0 * CW + CELL.gap;
         let expected = spacing::MD + hb + section + spacing::LG + hb + section + spacing::MD;
-        assert_eq!(content_height(&rows, CW), expected);
+        assert_eq!(content_height(&rows, CELL), expected);
     }
 
     #[test]
     fn row_bounds_of_a_section_first_last_row_clear_its_header() {
         // Section 0: 4 cards / 3 cols = 2 rows. Section 1: 2 cards = 1 row, so
         // the last row is the one carrying section 1's header.
-        let rows = row_starts(&[(0, 4), (4, 2)], 3, CW, header_block(true));
+        let rows = row_starts(&[(0, 4), (4, 2)], 3, CELL, header_block(true));
         let last = rows.len() - 1;
         assert_eq!(
             rows[last].top,
             rows[last].offset + spacing::MD + header_block(true)
         );
 
-        let (_, bottom) = row_bounds(&rows, last, CW);
+        let (_, bottom) = row_bounds(&rows, last, CELL);
         assert_eq!(bottom, rows[last].top + CW + spacing::MD);
         // Measuring from the anchor would stop short by the header it clears.
-        assert!(bottom > rows[last].offset + CW + spacing::SM);
+        assert!(bottom > rows[last].offset + CW + CELL.gap);
     }
 
     #[test]
@@ -1975,11 +2016,11 @@ mod tests {
         let rows = rows_every(3, PITCH);
         // A viewport holding row 0 whole and clipping into row 1.
         let (scroll_y, viewport) = (0.0, PITCH + 1.0);
-        assert!(row_in_view(&rows, 0, scroll_y, viewport, CW));
-        assert!(row_in_view(&rows, 1, scroll_y, viewport, CW));
-        assert!(!row_in_view(&rows, 2, scroll_y, viewport, CW));
+        assert!(row_in_view(&rows, 0, scroll_y, viewport, CELL));
+        assert!(row_in_view(&rows, 1, scroll_y, viewport, CELL));
+        assert!(!row_in_view(&rows, 2, scroll_y, viewport, CELL));
         // Scrolled past row 0 entirely.
-        assert!(!row_in_view(&rows, 0, 2.0 * PITCH, PITCH, CW));
+        assert!(!row_in_view(&rows, 0, 2.0 * PITCH, PITCH, CELL));
     }
 
     #[test]
