@@ -12,7 +12,7 @@ hex = "0.4"
 image = { workspace = true }
 kamadak-exif = { workspace = true }
 memchr = "2"
-quick-xml = "0.40"
+quick-xml = "0.42"
 rayon = "1.12"
 rusqlite = { workspace = true }
 serde = { workspace = true }

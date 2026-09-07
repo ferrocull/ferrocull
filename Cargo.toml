@@ -15,7 +15,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 chrono = "0.4"
-dirs = "6"
+dirs = "7"
 ferrocull-core = { path = "crates/ferrocull-core" }
 ferrocull-devices = { path = "crates/ferrocull-devices" }
 ferrocull-media = { path = "crates/ferrocull-media" }
@@ -108,6 +108,6 @@ all = "warn"
 
 [profile.release]
 strip = "symbols"
-# lto = true          # expensive to compile
+lto = true
 panic = "abort"
 # codegen-units = 1   # expensive to compile

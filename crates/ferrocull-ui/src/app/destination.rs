@@ -327,7 +327,7 @@ impl Ferrocull {
             bytes_copied: 0,
         });
 
-        let ingest_sipper = sipper(move |mut sender| async move {
+        let ingest_sipper = sipper(async move |mut sender| {
             let tracker = Arc::new(ingest::Tracker::default());
             let worker_tracker = Arc::clone(&tracker);
             let mut handle =

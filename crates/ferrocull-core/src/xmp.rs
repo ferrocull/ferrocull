@@ -108,20 +108,16 @@ pub fn parse_xmp(content: &[u8]) -> Option<Metadata> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e) | Event::Empty(ref e))
-                if e.name().local_name().as_ref() == b"Description" =>
+                if e.name().local_name().as_ref() == "Description" =>
             {
                 found_description = true;
                 for attr in e.attributes().flatten() {
                     match attr.key.local_name().as_ref() {
-                        b"Rating" => {
-                            rating_value = std::str::from_utf8(&attr.value)
-                                .ok()
-                                .and_then(|v| v.parse().ok());
+                        "Rating" => {
+                            rating_value = attr.value.parse().ok();
                         }
-                        b"Label" => {
-                            label = std::str::from_utf8(&attr.value)
-                                .ok()
-                                .and_then(ColorLabel::from_xmp_str);
+                        "Label" => {
+                            label = ColorLabel::from_xmp_str(&attr.value);
                         }
                         _ => {}
                     }
