@@ -169,13 +169,16 @@ pub(crate) fn column_range(width: f32, scale: f32) -> RangeInclusive<usize> {
     fewest..=most
 }
 
-/// The nominal size that lays a grid of `width` out in `cols` columns: the cell
-/// width that count renders at, rounded up to a whole logical pixel so the
-/// ceil-fit in [`grid_metrics`] cannot read it as one column more.
+/// The nominal size that lays a grid of `width` out in `cols` columns: the
+/// first whole logical pixel strictly above the cell width that count renders
+/// at, so the ceil-fit in [`grid_metrics`] cannot read it as one column more.
 ///
 /// The extra [`SCROLLBAR_GUTTER`] share per column keeps the count stable when
 /// the gutter appears or disappears, which it does at the exact-fit height where
-/// one more row of thumbnails starts or stops overflowing. The test
+/// one more row of thumbnails starts or stops overflowing. Strictly above
+/// matters there: a whole-number cell-plus-share sum sits exactly on the
+/// boundary, and the f32 remainder a fractional window scale leaves in `width`
+/// tips the ceil-fit over to one column more. The test
 /// `a_nominal_holds_its_column_count_across_the_scrollbar_gutter` sweeps the
 /// widths and scale factors a real window reports and checks the count holds on
 /// both sides of that flip.
@@ -193,7 +196,7 @@ pub(crate) fn column_range(width: f32, scale: f32) -> RangeInclusive<usize> {
 )]
 pub(crate) fn nominal_for_columns(width: f32, cols: usize) -> u32 {
     let exact = (width - spacing::SM * (cols - 1) as f32) / cols as f32;
-    clamp_thumbnail_size((exact + SCROLLBAR_GUTTER / cols as f32).ceil() as u32)
+    clamp_thumbnail_size((exact + SCROLLBAR_GUTTER / cols as f32).floor() as u32 + 1)
 }
 
 /// The nominal size `notches` column counts away from `current` on a grid of
@@ -1251,17 +1254,22 @@ mod tests {
     /// Logical grid widths and scale factors the column tests sweep. `w` is a
     /// physical width, so the logical widths handed to the layout are
     /// fractional at every scale above 1.0, exactly what a real window
-    /// reports.
+    /// reports. Scale 1.3 has no exact f32 value, so even a physical width it
+    /// divides evenly lands a hair off the whole logical width. That is the
+    /// remainder a real window reports; the other scales are exact and never
+    /// produce it.
     #[expect(
         clippy::cast_precision_loss,
         reason = "sweep bounds are far below f32's exact-integer range"
     )]
     fn width_sweep() -> impl Iterator<Item = (f32, f32)> {
-        [1.0_f32, 1.25, 1.5, 2.0].into_iter().flat_map(|scale| {
-            (300..=3000)
-                .step_by(7)
-                .map(move |w| (w as f32 / scale, scale))
-        })
+        [1.0_f32, 1.25, 1.3, 1.5, 2.0]
+            .into_iter()
+            .flat_map(|scale| {
+                (300..=3000)
+                    .step_by(7)
+                    .map(move |w| (w as f32 / scale, scale))
+            })
     }
 
     // A round cell width keeps the expected offsets easy to read. At scale 1.0
