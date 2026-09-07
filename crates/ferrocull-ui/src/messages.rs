@@ -83,7 +83,8 @@ pub(crate) mod grid {
         UntagAll,
         RejectFile(PathBuf),
         BurstToggled(DateTime<Utc>),
-        ThumbnailHover(usize, bool),
+        /// Item the cursor sits over in the grid, `None` over no card.
+        ThumbnailHover(Option<usize>),
         StarHover(Option<i8>),
         FocusNext,
         FocusPrev,

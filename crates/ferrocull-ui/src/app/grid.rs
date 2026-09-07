@@ -118,9 +118,12 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
             let target = state.media.burst_map()[&key][0];
             return state.toggle_burst(key, target);
         }
-        grid::Message::ThumbnailHover(idx, is_entering) => {
-            state.hovered_thumbnail = is_entering.then_some(idx);
-            if !is_entering {
+        grid::Message::ThumbnailHover(idx) => {
+            if idx != state.hovered_thumbnail {
+                state.hovered_thumbnail = idx;
+                // The star row lives in the hovered cell's overlay alone: when
+                // the overlay moves to another cell the old row goes away
+                // without ever reporting that the cursor left it.
                 state.hovered_star = None;
             }
         }
@@ -297,6 +300,11 @@ impl Ferrocull {
                 let rows = self.grid_rows(width);
                 self.pin_anchor(&rows, offset);
                 self.grid_scroll_y = offset;
+                // The star preview belongs to the star row under a resting
+                // cursor. A scroll carries that row away, and the slot it held
+                // in the virtualized grid can go to another cell, whose
+                // rebuilt widget state has no exit to report.
+                self.hovered_star = None;
                 Task::none()
             }
             views::thumbnails::ScrollReaction::Idle => {
