@@ -2123,8 +2123,8 @@ fn thumbnail_grid(state: &Ferrocull) -> Element<'_, Message> {
         views::thumbnails::Event::CellDoubleClicked(idx) => {
             Message::Grid(grid_msg::Message::OpenPreview(idx))
         }
-        views::thumbnails::Event::CellHover(idx, hovering) => {
-            Message::Grid(grid_msg::Message::ThumbnailHover(idx, hovering))
+        views::thumbnails::Event::Hover(idx) => {
+            Message::Grid(grid_msg::Message::ThumbnailHover(idx))
         }
         views::thumbnails::Event::Rated(path, rating) => {
             Message::Grid(grid_msg::Message::FileRated(path, rating))

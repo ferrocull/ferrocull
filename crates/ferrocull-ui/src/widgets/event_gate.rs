@@ -2,13 +2,17 @@
 //!
 //! A gate closure reads each incoming event and returns a [`Verdict`]: pass it
 //! to the wrapped widget, drop it (the child never sees it, and it stays
-//! uncaptured so subscriptions still receive it), or publish a message and
-//! capture it. Only an uncaptured event is ever published, so two gates over
-//! the same spot never both answer one notch; a dropped event is held back
-//! whether or not something else has already captured it.
+//! uncaptured so subscriptions still receive it), publish a message and
+//! capture it, or notify with a message and let the event travel on
+//! untouched. A message, published or notified, answers only an uncaptured
+//! event, so two gates over the same spot never both answer one notch; a
+//! dropped event is held back whether or not something else has already
+//! captured it. A notification reports the state the event leaves behind
+//! rather than acting on it, which is why it neither captures the event nor
+//! keeps it from the child.
 
 use iced::{
-    Element, Length, Rectangle, Size, Vector,
+    Element, Length, Point, Rectangle, Size, Vector,
     advanced::{
         Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer,
         widget::{Operation, tree},
@@ -26,6 +30,9 @@ pub(crate) enum Verdict<Message> {
     /// Publish `Message`, capture the event, and keep it from the wrapped
     /// widget.
     Publish(Message),
+    /// Publish `Message` and forward the event to the wrapped widget, leaving
+    /// it uncaptured.
+    Notify(Message),
 }
 
 /// The rule an [`EventGate`] applies to every event it sees.
@@ -88,6 +95,33 @@ pub(crate) fn keyboard_shield<'a, Message>(
     })
 }
 
+/// Report a change in what sits under the cursor over `content`.
+///
+/// `locate` maps the cursor position relative to `content`, `None` when the
+/// cursor is not over it, to the tracked value; every event re-evaluates it
+/// against `current`, the value the view was built with, and a difference is
+/// published through `on_change`. Re-evaluating on every event, not only on
+/// cursor motion, is what lets the value follow a scroll that moves the
+/// content under a resting cursor.
+pub(crate) fn hover_tracker<'a, Message, T>(
+    content: impl Into<Element<'a, Message>>,
+    current: T,
+    locate: impl Fn(Option<Point>) -> T + 'a,
+    on_change: impl Fn(T) -> Message + 'a,
+) -> EventGate<'a, Message>
+where
+    T: PartialEq + Copy + 'a,
+{
+    EventGate::new(content, move |_event, cursor, bounds| {
+        let now = locate(cursor.position_in(bounds));
+        if now == current {
+            Verdict::Pass
+        } else {
+            Verdict::Notify(on_change(now))
+        }
+    })
+}
+
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
     for EventGate<'_, Message, Theme, Renderer>
 where
@@ -146,7 +180,8 @@ where
                 shell.capture_event();
                 return;
             }
-            Verdict::Publish(_) | Verdict::Pass => {}
+            Verdict::Notify(message) if !shell.is_event_captured() => shell.publish(message),
+            Verdict::Publish(_) | Verdict::Notify(_) | Verdict::Pass => {}
         }
 
         self.content.as_widget_mut().update(

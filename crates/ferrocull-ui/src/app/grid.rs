@@ -118,9 +118,12 @@ pub(super) fn update(state: &mut Ferrocull, msg: grid::Message) -> Task<Message>
             let target = state.media.burst_map()[&key][0];
             return state.toggle_burst(key, target);
         }
-        grid::Message::ThumbnailHover(idx, is_entering) => {
-            state.hovered_thumbnail = is_entering.then_some(idx);
-            if !is_entering {
+        grid::Message::ThumbnailHover(idx) => {
+            if idx != state.hovered_thumbnail {
+                state.hovered_thumbnail = idx;
+                // The star row lives in the hovered cell's overlay alone: when
+                // the overlay moves to another cell the old row goes away
+                // without ever reporting that the cursor left it.
                 state.hovered_star = None;
             }
         }
@@ -531,9 +534,7 @@ impl Ferrocull {
             return HashSet::new();
         };
         let start = rows[first].ordinal;
-        let end = rows
-            .get(last + 1)
-            .map_or_else(|| self.media.visible_len(), |r| r.ordinal);
+        let end = views::thumbnails::row_end(&rows, last, self.media.visible_len());
         self.media
             .indices_in_ordinal_range(start, end - start, self.config.view.ascending)
             .into_iter()
@@ -695,9 +696,7 @@ impl Ferrocull {
         let (row, ordinal) = self.focused_row(&rows, current);
         let target = target_row(&rows, row)?;
         let col = ordinal - rows[row].ordinal;
-        let row_end = rows
-            .get(target + 1)
-            .map_or_else(|| self.media.visible_len(), |r| r.ordinal);
+        let row_end = views::thumbnails::row_end(&rows, target, self.media.visible_len());
         let target_ordinal = (rows[target].ordinal + col).min(row_end - 1);
         Some(
             self.media

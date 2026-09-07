@@ -11,7 +11,7 @@ use ferrocull_core::{
     media::{Item, SortKey, SortOrder},
 };
 use iced::{
-    Color, ContentFit, Element, Fill, Shrink,
+    Color, ContentFit, Element, Fill, Point, Shrink,
     widget::{
         Space, Stack, center, column, container, grid, image, mouse_area, responsive, row,
         scrollable, sensor, text,
@@ -24,7 +24,7 @@ use crate::{
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
     views::{burst, status},
-    widgets::wheel_area,
+    widgets::{hover_tracker, wheel_area},
 };
 
 /// What happened inside a thumbnail card (no idx, no path — parent enriches).
@@ -36,8 +36,6 @@ use crate::{
 enum CellEvent {
     Clicked,
     DoubleClicked,
-    HoverEnter,
-    HoverExit,
     Rated(i8),
     StarHover(Option<i8>),
     BurstToggle(DateTime<Utc>),
@@ -48,7 +46,8 @@ enum CellEvent {
 pub(crate) enum Event {
     CellClicked(PathBuf),
     CellDoubleClicked(usize),
-    CellHover(usize, bool),
+    /// Item the cursor sits over, or `None` when it is over no card.
+    Hover(Option<usize>),
     Rated(PathBuf, i8),
     StarHover(Option<i8>),
     BurstToggle(DateTime<Utc>),
@@ -248,8 +247,8 @@ pub(crate) struct RowStart {
 /// `sections` is the `(start, count)` run per section from [`sections`], and
 /// `header_block` the space each section's header takes above its grid. The
 /// first row of each section anchors to the section top so its header stays
-/// visible; later rows anchor to the row itself. Square cells make the row pitch
-/// `cell_width + spacing::SM`.
+/// visible; later rows anchor to the row itself. Rows step by one
+/// [`cell_pitch`].
 #[expect(
     clippy::cast_precision_loss,
     reason = "row and column counts are far below f32's exact-integer range"
@@ -260,7 +259,7 @@ pub(crate) fn row_starts(
     cell_width: f32,
     header_block: f32,
 ) -> Vec<RowStart> {
-    let pitch = cell_width + spacing::SM;
+    let pitch = cell_pitch(cell_width);
     let mut rows = Vec::new();
     // Content-y cursor; starts at the scrollable content's MD top padding.
     let mut y = spacing::MD;
@@ -299,6 +298,54 @@ pub(crate) fn row_bounds(rows: &[RowStart], row: usize, cell_width: f32) -> (f32
         .get(row + 1)
         .map_or(rows[row].top + cell_width + spacing::MD, |next| next.offset);
     (rows[row].offset, bottom)
+}
+
+/// Distance from one card's edge to the next, across and down alike: rows and
+/// columns share the `SM` gap, so square cells make one pitch serve both.
+fn cell_pitch(cell_width: f32) -> f32 {
+    cell_width + spacing::SM
+}
+
+/// Display-order item under `point`, or `None` where the cursor sits in a gap
+/// between cards or in a section header band.
+///
+/// `point` is relative to the section column, whose left edge is the left edge
+/// of the first card and whose top edge is the `MD` content padding
+/// [`row_starts`] opens its y cursor with, so content space is `point.y` plus
+/// that padding. `cell_width` is the geometry `rows` was built with, and
+/// `order` the display-order item indices that geometry lays out.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a point inside the section column has a non-negative x within its width"
+)]
+pub(crate) fn item_at(
+    point: Point,
+    rows: &[RowStart],
+    cell_width: f32,
+    order: &[usize],
+) -> Option<usize> {
+    let content_y = point.y + spacing::MD;
+
+    // Rows are square, so a row's cards span `cell_width` below its top; the
+    // rest of the span up to the next row is inter-row spacing, a section gap
+    // or a header block.
+    let row = rows
+        .partition_point(|r| r.top <= content_y)
+        .checked_sub(1)?;
+    if content_y - rows[row].top >= cell_width {
+        return None;
+    }
+
+    let pitch = cell_pitch(cell_width);
+    if point.x % pitch >= cell_width {
+        return None;
+    }
+
+    // The row end trims a partial last row to the cards it holds, and bounds a
+    // column past the last one, whose ordinal lands on the row below.
+    let ordinal = rows[row].ordinal + (point.x / pitch) as usize;
+    (ordinal < row_end(rows, row, order.len())).then(|| order[ordinal])
 }
 
 /// Height of the scrollable's content under the geometry `rows` was built for:
@@ -500,7 +547,7 @@ pub(crate) fn row_run_spacers(
     first: usize,
     last: usize,
 ) -> (f32, f32) {
-    let pitch = cell_width + spacing::SM;
+    let pitch = cell_pitch(cell_width);
     let grid_height =
         num_rows as f32 * cell_width + (num_rows.saturating_sub(1)) as f32 * spacing::SM;
     let top = first as f32 * pitch;
@@ -572,6 +619,12 @@ pub(crate) fn scroll_reaction(
 /// it. Used to re-anchor the same card after a column-count reflow.
 pub(crate) fn row_for_ordinal(rows: &[RowStart], ordinal: usize) -> Option<usize> {
     rows.iter().rposition(|r| r.ordinal <= ordinal)
+}
+
+/// Exclusive display-order ordinal that ends `row`: the first ordinal of the
+/// row below, or `total` for the last row.
+pub(crate) fn row_end(rows: &[RowStart], row: usize, total: usize) -> usize {
+    rows.get(row + 1).map_or(total, |next| next.ordinal)
 }
 
 /// The Local capture date a card is grouped under.
@@ -701,8 +754,6 @@ pub(crate) fn thumbnail_grid<'a>(
             cell.map(move |e| match e {
                 CellEvent::Clicked => Event::CellClicked(path.clone()),
                 CellEvent::DoubleClicked => Event::CellDoubleClicked(idx),
-                CellEvent::HoverEnter => Event::CellHover(idx, true),
-                CellEvent::HoverExit => Event::CellHover(idx, false),
                 CellEvent::Rated(r) => Event::Rated(path.clone(), r),
                 CellEvent::StarHover(s) => Event::StarHover(s),
                 CellEvent::BurstToggle(key) => Event::BurstToggle(key),
@@ -737,10 +788,20 @@ pub(crate) fn thumbnail_grid<'a>(
             &build_cell,
         );
 
-        container(cells)
-            .padding(iced::padding::horizontal(side_margin))
-            .width(Fill)
-            .into()
+        // Hover is derived from the cursor geometry: the virtualized row
+        // window reassigns widget state between cells on every scroll, so a
+        // position-based hit test is what stays correct. The tracker reports a
+        // change of card alone, so moving the cursor within one card costs no
+        // message and no rebuild.
+        container(hover_tracker(
+            cells,
+            hovered_thumbnail,
+            move |point| point.and_then(|p| item_at(p, &rows, cell_width, &order)),
+            Event::Hover,
+        ))
+        .padding(iced::padding::horizontal(side_margin))
+        .width(Fill)
+        .into()
     })
     .height(Shrink);
 
@@ -953,8 +1014,6 @@ fn thumbnail_card(
     mouse_area(card)
         .on_press(CellEvent::Clicked)
         .on_double_click(CellEvent::DoubleClicked)
-        .on_enter(CellEvent::HoverEnter)
-        .on_exit(CellEvent::HoverExit)
         .into()
 }
 
@@ -1163,11 +1222,11 @@ fn preview_icon() -> Element<'static, CellEvent> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DATE_HEADER_HEIGHT, RowStart, SCROLLBAR_GUTTER, THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN,
-        anchor_row, column_range, columns_for, content_height, grid_metrics, grid_width,
-        header_block, keep_row_in_view, nominal_for_columns, row_bounds, row_for_ordinal,
-        row_in_view, row_run_spacers, row_starts, step_columns, step_row, take_whole_notches,
-        visible_row_window,
+        DATE_HEADER_HEIGHT, Point, RowStart, SCROLLBAR_GUTTER, THUMBNAIL_SIZE_MAX,
+        THUMBNAIL_SIZE_MIN, anchor_row, column_range, columns_for, content_height, grid_metrics,
+        grid_width, header_block, item_at, keep_row_in_view, nominal_for_columns, row_bounds,
+        row_for_ordinal, row_in_view, row_run_spacers, row_starts, step_columns, step_row,
+        take_whole_notches, visible_row_window,
     };
     use crate::theme::spacing;
 
@@ -1327,6 +1386,74 @@ mod tests {
         assert_eq!(row_for_ordinal(&rows, 4), Some(2));
         assert_eq!(row_for_ordinal(&rows, 5), Some(2)); // card 5 shares row with 4
         assert_eq!(row_for_ordinal(&rows, 7), Some(3));
+    }
+
+    /// Point handed to `item_at` for a position given in card space: `x` from
+    /// the left edge of the first column, `y` in scrollable-content space.
+    fn hit_point(x: f32, content_y: f32) -> Point {
+        Point::new(x, content_y - spacing::MD)
+    }
+
+    /// Display order of a fixture holding `count` cards, unsorted.
+    fn straight_order(count: usize) -> Vec<usize> {
+        (0..count).collect()
+    }
+
+    #[test]
+    fn item_at_hits_the_card_under_the_cursor() {
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0); // tops 12, 120, 228
+        let order = straight_order(7);
+        // Center of row 1, column 2: ordinal 3 + 2.
+        let point = hit_point(2.0 * PITCH + CW / 2.0, rows[1].top + CW / 2.0);
+        assert_eq!(item_at(point, &rows, CW, &order), Some(5));
+    }
+
+    #[test]
+    fn item_at_misses_the_gap_between_columns() {
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
+        let order = straight_order(7);
+        let point = hit_point(CW + spacing::SM / 2.0, rows[0].top + CW / 2.0);
+        assert_eq!(item_at(point, &rows, CW, &order), None);
+    }
+
+    #[test]
+    fn item_at_misses_the_gap_between_rows() {
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
+        let order = straight_order(7);
+        let point = hit_point(CW / 2.0, rows[0].top + CW + spacing::SM / 2.0);
+        assert_eq!(item_at(point, &rows, CW, &order), None);
+    }
+
+    #[test]
+    fn item_at_misses_a_date_header_band() {
+        // Two sections of 4 and 5 cards: tops 42, 150, 296, 404.
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CW, header_block(true));
+        let order = straight_order(9);
+        let band = |row: usize| {
+            hit_point(
+                CW / 2.0,
+                rows[row].top - spacing::XS - DATE_HEADER_HEIGHT / 2.0,
+            )
+        };
+        assert_eq!(item_at(band(2), &rows, CW, &order), None);
+        // The leading section's own header sits above the first row.
+        assert_eq!(item_at(band(0), &rows, CW, &order), None);
+    }
+
+    #[test]
+    fn item_at_misses_an_empty_slot_in_a_partial_last_row() {
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0); // last row holds card 6 alone
+        let order = straight_order(7);
+        let point = hit_point(PITCH + CW / 2.0, rows[2].top + CW / 2.0);
+        assert_eq!(item_at(point, &rows, CW, &order), None);
+    }
+
+    #[test]
+    fn item_at_reads_the_display_order() {
+        let rows = row_starts(&[(0, 7)], 3, CW, 0.0);
+        let order: Vec<usize> = (0..7).rev().collect();
+        let point = hit_point(PITCH + CW / 2.0, rows[0].top + CW / 2.0);
+        assert_eq!(item_at(point, &rows, CW, &order), Some(5));
     }
 
     #[test]
