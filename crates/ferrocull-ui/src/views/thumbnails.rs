@@ -21,7 +21,6 @@ use iced::{
 use super::rating::{StarEvent, star_rating_row};
 use crate::{
     media_view::{BurstStatus, TagState},
-    messages::filters::SizeStep,
     styles,
     theme::{COLOR_LABELS, colors, radius, spacing},
     views::{burst, status},
@@ -65,10 +64,10 @@ pub(crate) enum Event {
         content_height: f32,
     },
     /// The grid's laid-out content width, exactly the width the `responsive`
-    /// closure lays the columns out against. Reported on the first layout and
-    /// on every layout whose size changed, so the width repeats whenever it is
-    /// the content height that moved; the scrollbar gutter appearing or
-    /// disappearing is one of the changes that does move it.
+    /// closure lays the columns out against. A zero-height sensor carries it,
+    /// so it arrives on the first layout and then only when the width itself
+    /// moved; the scrollbar gutter appearing or disappearing is one of the
+    /// changes that moves it.
     Resized(f32),
 }
 
@@ -121,12 +120,17 @@ pub(crate) fn grid_metrics(available: f32, nominal: u32, scale: f32) -> (usize, 
     (cols, cell_width)
 }
 
+/// Column count `nominal` lays a grid of `width` out in.
+pub(crate) fn columns_for(width: f32, nominal: u32, scale: f32) -> usize {
+    grid_metrics(width, nominal, scale).0
+}
+
 /// The column counts a grid of `width` can show, fewest first: the count at
 /// [`THUMBNAIL_SIZE_MAX`] through the count at [`THUMBNAIL_SIZE_MIN`]. Never
 /// empty: the two limits give the same count on a narrow grid.
 pub(crate) fn column_range(width: f32, scale: f32) -> RangeInclusive<usize> {
-    let fewest = grid_metrics(width, THUMBNAIL_SIZE_MAX, scale).0;
-    let most = grid_metrics(width, THUMBNAIL_SIZE_MIN, scale).0;
+    let fewest = columns_for(width, THUMBNAIL_SIZE_MAX, scale);
+    let most = columns_for(width, THUMBNAIL_SIZE_MIN, scale);
     fewest..=most
 }
 
@@ -136,12 +140,10 @@ pub(crate) fn column_range(width: f32, scale: f32) -> RangeInclusive<usize> {
 ///
 /// The extra [`SCROLLBAR_GUTTER`] share per column keeps the count stable when
 /// the gutter appears or disappears, which it does at the exact-fit height where
-/// one more row of thumbnails starts or stops overflowing. The count holds
-/// across `width ± SCROLLBAR_GUTTER` as long as
-/// `width + SM >= SCROLLBAR_GUTTER * (2 * cols - 1) + cols * (cols - 1)`, the
-/// margin plus the rounding slack staying inside the width one more column would
-/// need; with `cols` bounded by [`column_range`] that holds past 20000 logical
-/// pixels.
+/// one more row of thumbnails starts or stops overflowing. The test
+/// `a_nominal_holds_its_column_count_across_the_scrollbar_gutter` sweeps the
+/// widths and scale factors a real window reports and checks the count holds on
+/// both sides of that flip.
 ///
 /// The clamp only bites at the ends of [`column_range`], where the limit itself
 /// is the size that selects the count, so the result always selects `cols`.
@@ -159,23 +161,27 @@ pub(crate) fn nominal_for_columns(width: f32, cols: usize) -> u32 {
     clamp_thumbnail_size((exact + SCROLLBAR_GUTTER / cols as f32).ceil() as u32)
 }
 
-/// The nominal size one column count away from `current` on a grid of `width`.
+/// The nominal size `notches` column counts away from `current` on a grid of
+/// `width`: a positive `notches` takes columns off the row, growing the cards,
+/// a negative one adds columns. The target count is clamped to
+/// [`column_range`].
 ///
-/// `Larger` takes a column off the row, `Smaller` adds one, within
-/// [`column_range`]. At either end the target is the count `current` already
-/// selects, so stepping past the end is idempotent: it returns the canonical
-/// nominal for that count and stepping again returns it unchanged. A persisted
-/// `current` is any size in the preference range, not that canonical nominal,
-/// so callers compare column counts rather than nominals to tell a step that
-/// changed the grid from one that did not.
-pub(crate) fn step_columns(width: f32, scale: f32, current: u32, direction: SizeStep) -> u32 {
+/// `None` when the target is the count `current` already selects, which is
+/// what the ends of the range produce: the grid there has nowhere to move. A
+/// persisted `current` is any size in the preference range, not the canonical
+/// nominal for the count it selects, so at an end the nominal may differ while
+/// the grid does not; the count decides.
+pub(crate) fn step_columns(width: f32, scale: f32, current: u32, notches: i32) -> Option<u32> {
     let range = column_range(width, scale);
-    let cols = grid_metrics(width, current, scale).0;
-    let target = match direction {
-        SizeStep::Larger => cols.saturating_sub(1).max(*range.start()),
-        SizeStep::Smaller => (cols + 1).min(*range.end()),
-    };
-    nominal_for_columns(width, target)
+    let cols = columns_for(width, current, scale);
+    let steps = notches.unsigned_abs() as usize;
+    let target = if notches > 0 {
+        cols.saturating_sub(steps)
+    } else {
+        cols.saturating_add(steps)
+    }
+    .clamp(*range.start(), *range.end());
+    (target != cols).then(|| nominal_for_columns(width, target))
 }
 
 /// Bring a thumbnail size into the nominal range the preference allows.
@@ -302,6 +308,19 @@ pub(crate) fn content_height(rows: &[RowStart], cell_width: f32) -> f32 {
     rows.len()
         .checked_sub(1)
         .map_or(0.0, |last| row_bounds(rows, last, cell_width).1)
+}
+
+/// Largest scroll offset a grid of `rows` can reach: the content height minus
+/// the viewport, floored at zero when the content is shorter than the viewport.
+///
+/// A `viewport_height` of `0.0` marks the viewport as not yet reported. The
+/// scrollable reports one the first time its content overflows, so until then
+/// the content fits and the grid cannot scroll at all.
+pub(crate) fn max_offset(rows: &[RowStart], cell_width: f32, viewport_height: f32) -> f32 {
+    if viewport_height <= 0.0 {
+        return 0.0;
+    }
+    (content_height(rows, cell_width) - viewport_height).max(0.0)
 }
 
 /// Whether any part of row `row` shows in the viewport at `scroll_y`.
@@ -512,7 +531,7 @@ pub(crate) enum ScrollReaction {
 }
 
 /// Below this, a geometry delta is float noise, not a real change.
-pub(crate) const GEOM_EPS: f32 = 0.5;
+const GEOM_EPS: f32 = 0.5;
 
 /// Classify a viewport report against the previous one.
 ///
@@ -738,17 +757,25 @@ pub(crate) fn thumbnail_grid<'a>(
     // handling. Scrollbar drag and keyboard scrolling still reach the
     // scrollable and report back through `on_scroll`.
     //
-    // The `sensor` carries the grid width. `on_resize` without an `on_show` has
-    // no visibility gate, so it reports from every layout, including the ones
-    // the scrollable stays silent through because the content fits its
-    // viewport. The sensor lays out transparently around the `responsive` and
-    // sits inside the `MD` padding, so its bounds are the grid's available
-    // width to the pixel.
+    // The `sensor` carries the grid width, measured from a zero-height sibling
+    // that shares the grid's unspaced, unpadded column: its bounds track the
+    // width the `responsive` lays the columns out against, to the pixel,
+    // without moving when only the content height grows. `on_resize` without
+    // an `on_show` has no visibility gate, so it reports from every layout,
+    // including the ones the scrollable stays silent through because the
+    // content fits its viewport.
     wheel_area(
         scrollable(
-            container(sensor(grid).on_resize(|size| Event::Resized(size.width)))
-                .padding(spacing::MD)
+            container(
+                column![
+                    sensor(Space::new().width(Fill).height(0))
+                        .on_resize(|size| Event::Resized(size.width)),
+                    grid,
+                ]
                 .width(Fill),
+            )
+            .padding(spacing::MD)
+            .width(Fill),
         )
         .id(GRID_SCROLLABLE_ID)
         .on_scroll(|vp| Event::Scrolled {
@@ -1134,12 +1161,12 @@ fn preview_icon() -> Element<'static, CellEvent> {
 mod tests {
     use super::{
         DATE_HEADER_HEIGHT, RowStart, SCROLLBAR_GUTTER, THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN,
-        anchor_row, clamp_thumbnail_size, column_range, content_height, grid_metrics, grid_width,
+        anchor_row, column_range, columns_for, content_height, grid_metrics, grid_width,
         header_block, keep_row_in_view, nominal_for_columns, row_bounds, row_for_ordinal,
         row_in_view, row_run_spacers, row_starts, step_columns, step_row, take_whole_notches,
         visible_row_window,
     };
-    use crate::{messages::filters::SizeStep, theme::spacing};
+    use crate::theme::spacing;
 
     /// Logical grid widths and scale factors the column tests sweep. `w` is a
     /// physical width, so the logical widths handed to the layout are
@@ -1155,11 +1182,6 @@ mod tests {
                 .step_by(7)
                 .map(move |w| (w as f32 / scale, scale))
         })
-    }
-
-    /// Column count `nominal` lays a grid of `width` out in.
-    fn columns_at(width: f32, scale: f32, nominal: u32) -> usize {
-        grid_metrics(width, nominal, scale).0
     }
 
     // A round cell width keeps the expected offsets easy to read.
@@ -1628,7 +1650,7 @@ mod tests {
             for cols in column_range(width, scale) {
                 let nominal = nominal_for_columns(width, cols);
                 assert_eq!(
-                    columns_at(width, scale, nominal),
+                    columns_for(width, nominal, scale),
                     cols,
                     "width {width} ×{scale}: nominal {nominal} does not select {cols} columns"
                 );
@@ -1652,12 +1674,12 @@ mod tests {
             for cols in (*range.start() + 1)..*range.end() {
                 let nominal = nominal_for_columns(width, cols);
                 assert_eq!(
-                    columns_at(width + SCROLLBAR_GUTTER, scale, nominal),
+                    columns_for(width + SCROLLBAR_GUTTER, nominal, scale),
                     cols,
                     "width {width} ×{scale}: nominal {nominal} loses {cols} columns without the gutter"
                 );
                 assert_eq!(
-                    columns_at(width - SCROLLBAR_GUTTER, scale, nominal),
+                    columns_for(width - SCROLLBAR_GUTTER, nominal, scale),
                     cols,
                     "width {width} ×{scale}: nominal {nominal} loses {cols} columns with the gutter"
                 );
@@ -1673,8 +1695,11 @@ mod tests {
                 range.start() <= range.end(),
                 "width {width} ×{scale}: empty column range"
             );
-            assert_eq!(*range.start(), columns_at(width, scale, THUMBNAIL_SIZE_MAX));
-            assert_eq!(*range.end(), columns_at(width, scale, THUMBNAIL_SIZE_MIN));
+            assert_eq!(
+                *range.start(),
+                columns_for(width, THUMBNAIL_SIZE_MAX, scale)
+            );
+            assert_eq!(*range.end(), columns_for(width, THUMBNAIL_SIZE_MIN, scale));
         }
     }
 
@@ -1683,19 +1708,21 @@ mod tests {
         for (width, scale) in width_sweep() {
             let range = column_range(width, scale);
             for size in (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).step_by(13) {
-                let cols = columns_at(width, scale, size);
+                let cols = columns_for(width, size, scale);
                 if cols > *range.start() {
-                    let larger = step_columns(width, scale, size, SizeStep::Larger);
+                    let larger =
+                        step_columns(width, scale, size, 1).expect("no size one column fewer");
                     assert_eq!(
-                        columns_at(width, scale, larger),
+                        columns_for(width, larger, scale),
                         cols - 1,
                         "width {width} ×{scale}: growing from {size} ({cols} columns)"
                     );
                 }
                 if cols < *range.end() {
-                    let smaller = step_columns(width, scale, size, SizeStep::Smaller);
+                    let smaller =
+                        step_columns(width, scale, size, -1).expect("no size one column more");
                     assert_eq!(
-                        columns_at(width, scale, smaller),
+                        columns_for(width, smaller, scale),
                         cols + 1,
                         "width {width} ×{scale}: shrinking from {size} ({cols} columns)"
                     );
@@ -1704,70 +1731,69 @@ mod tests {
         }
     }
 
+    /// At the ends of the range a step has nowhere to go and reports no change.
+    /// Both kinds of starting size are swept: the canonical nominal for a count,
+    /// and the persisted sizes that select the same count without being it.
     #[test]
     fn step_columns_holds_at_both_ends() {
         for (width, scale) in width_sweep() {
             let range = column_range(width, scale);
-            let fewest = nominal_for_columns(width, *range.start());
-            let most = nominal_for_columns(width, *range.end());
-            assert_eq!(step_columns(width, scale, fewest, SizeStep::Larger), fewest);
-            assert_eq!(step_columns(width, scale, most, SizeStep::Smaller), most);
-        }
-    }
-
-    /// A persisted size is any value in the range, not the canonical nominal
-    /// for the count it selects. At an end the step still lands on that same
-    /// count, which is what the callers compare.
-    #[test]
-    fn step_columns_from_a_non_canonical_size_holds_at_the_ends() {
-        for (width, scale) in width_sweep() {
-            let range = column_range(width, scale);
-            for size in (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).step_by(13) {
-                let cols = columns_at(width, scale, size);
+            let canonical = [
+                nominal_for_columns(width, *range.start()),
+                nominal_for_columns(width, *range.end()),
+            ];
+            let persisted = (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).step_by(13);
+            for size in canonical.into_iter().chain(persisted) {
+                let cols = columns_for(width, size, scale);
                 if cols == *range.start() {
-                    let stepped = step_columns(width, scale, size, SizeStep::Larger);
-                    assert_eq!(columns_at(width, scale, stepped), cols);
+                    assert_eq!(
+                        step_columns(width, scale, size, 1),
+                        None,
+                        "width {width} ×{scale}: grew past the fewest columns from {size}"
+                    );
                 }
                 if cols == *range.end() {
-                    let stepped = step_columns(width, scale, size, SizeStep::Smaller);
-                    assert_eq!(columns_at(width, scale, stepped), cols);
+                    assert_eq!(
+                        step_columns(width, scale, size, -1),
+                        None,
+                        "width {width} ×{scale}: shrank past the most columns from {size}"
+                    );
                 }
             }
         }
     }
 
-    /// Three plain rows of the round-width grid, pitch 108 apart from a zero
-    /// anchor, each holding its cards the `SM` gap below its anchor.
-    fn three_rows() -> Vec<RowStart> {
-        vec![
-            RowStart {
-                offset: 0.0,
-                top: spacing::SM,
-                ordinal: 0,
-            },
-            RowStart {
-                offset: PITCH,
-                top: PITCH + spacing::SM,
-                ordinal: 3,
-            },
-            RowStart {
-                offset: 2.0 * PITCH,
-                top: 2.0 * PITCH + spacing::SM,
-                ordinal: 6,
-            },
-        ]
+    /// A fast wheel hands several notches over at once. Taking them together
+    /// must land where taking them one at a time does, clamping included.
+    #[test]
+    fn several_notches_land_where_repeated_single_ones_do() {
+        for (width, scale) in width_sweep() {
+            for size in (THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX).step_by(29) {
+                for notches in [-5_i32, -2, 2, 5] {
+                    let repeated = (0..notches.unsigned_abs()).fold(size, |current, _| {
+                        step_columns(width, scale, current, notches.signum()).unwrap_or(current)
+                    });
+                    let at_once = step_columns(width, scale, size, notches).unwrap_or(size);
+                    assert_eq!(
+                        columns_for(width, at_once, scale),
+                        columns_for(width, repeated, scale),
+                        "width {width} ×{scale}: {notches} notches from {size}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
     fn row_bounds_span_to_the_next_row() {
-        let rows = three_rows();
+        let rows = rows_every(3, PITCH);
         assert_eq!(row_bounds(&rows, 0, CW), (0.0, PITCH));
         assert_eq!(row_bounds(&rows, 1, CW), (PITCH, 2.0 * PITCH));
     }
 
     #[test]
     fn row_bounds_of_the_last_row_end_at_the_content_bottom() {
-        let rows = three_rows();
+        let rows = rows_every(3, PITCH);
         assert_eq!(
             row_bounds(&rows, 2, CW),
             (2.0 * PITCH, rows[2].top + CW + spacing::MD)
@@ -1816,7 +1842,7 @@ mod tests {
 
     #[test]
     fn row_in_view_covers_any_overlap_with_the_viewport() {
-        let rows = three_rows();
+        let rows = rows_every(3, PITCH);
         // A viewport holding row 0 whole and clipping into row 1.
         let (scroll_y, viewport) = (0.0, PITCH + 1.0);
         assert!(row_in_view(&rows, 0, scroll_y, viewport, CW));
@@ -1866,18 +1892,5 @@ mod tests {
         // The first notch of the new direction must not pay off the old carry.
         assert_eq!(take_whole_notches(&mut carry, -1.0), -1);
         assert!(carry.abs() < 1e-5, "carry discarded: {carry}");
-    }
-
-    #[test]
-    fn thumbnail_size_clamps_to_the_range() {
-        assert_eq!(
-            clamp_thumbnail_size(THUMBNAIL_SIZE_MIN - 1),
-            THUMBNAIL_SIZE_MIN
-        );
-        assert_eq!(clamp_thumbnail_size(224), 224);
-        assert_eq!(
-            clamp_thumbnail_size(THUMBNAIL_SIZE_MAX + 1),
-            THUMBNAIL_SIZE_MAX
-        );
     }
 }

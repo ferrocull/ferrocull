@@ -174,13 +174,6 @@ pub(crate) mod filters {
         media::{DateSelection, FilterMode, SortOrder},
     };
 
-    /// Which way a wheel notch moves the thumbnail size.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum SizeStep {
-        Larger,
-        Smaller,
-    }
-
     /// Messages for filter, sort, and grouping controls.
     #[derive(Debug, Clone, Copy)]
     pub(crate) enum Message {

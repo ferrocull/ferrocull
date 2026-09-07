@@ -10,7 +10,7 @@ use crate::{
     styles,
     theme::spacing,
     views::thumbnails::{
-        THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN, column_range, grid_metrics, nominal_for_columns,
+        THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN, column_range, columns_for, nominal_for_columns,
     },
     widgets::{keyboard_shield, wheel_area},
 };
@@ -20,13 +20,13 @@ const TRACK_WIDTH: f32 = 120.0;
 
 /// Thumbnail size slider, flanked by the grid densities its two ends produce.
 ///
-/// `geometry` is the measured grid width and the window scale factor, which
-/// together give the column counts the grid can show.
-pub(crate) fn control(size: u32, geometry: Option<(f32, f32)>) -> Element<'static, Message> {
-    let track = match geometry {
-        Some((width, scale)) => column_track(size, width, scale),
-        None => nominal_track(size),
-    };
+/// `grid_width` is the measured grid width, which with `scale` gives the column
+/// counts the grid can show; an empty grid has none measured yet.
+pub(crate) fn control(size: u32, grid_width: Option<f32>, scale: f32) -> Element<'static, Message> {
+    let track = grid_width.map_or_else(
+        || nominal_track(size),
+        |width| column_track(size, width, scale),
+    );
 
     // The slider claims the arrow keys whenever the pointer rests on its track;
     // the shield keeps them for the application's own focus movement.
@@ -70,16 +70,14 @@ fn column_track(size: u32, width: f32, scale: f32) -> Element<'static, Message> 
     let range = column_range(width, scale);
     let most = *range.end();
     let last_position = (most - *range.start()) as u32;
-    let position = (most - grid_metrics(width, size, scale).0) as u32;
+    let position = (most - columns_for(width, size, scale)) as u32;
 
-    slider(0..=last_position, position, move |position| {
-        Message::ThumbnailSizeChanged(nominal_for_columns(width, most - position as usize))
-    })
-    .step(1u32)
-    .on_release(Message::ThumbnailSizeReleased)
-    .width(TRACK_WIDTH)
-    .style(styles::thumbnail_size_slider)
-    .into()
+    track(
+        slider(0..=last_position, position, move |position| {
+            Message::ThumbnailSizeChanged(nominal_for_columns(width, most - position as usize))
+        })
+        .step(1u32),
+    )
 }
 
 /// The nominal size itself, offered while no grid width has been measured, as
@@ -87,13 +85,19 @@ fn column_track(size: u32, width: f32, scale: f32) -> Element<'static, Message> 
 /// so the handle runs over the size range instead and the preference can still
 /// be set; the column track takes over on the first layout.
 fn nominal_track(size: u32) -> Element<'static, Message> {
-    slider(
+    track(slider(
         THUMBNAIL_SIZE_MIN..=THUMBNAIL_SIZE_MAX,
         size,
         Message::ThumbnailSizeChanged,
-    )
-    .on_release(Message::ThumbnailSizeReleased)
-    .width(TRACK_WIDTH)
-    .style(styles::thumbnail_size_slider)
-    .into()
+    ))
+}
+
+/// The presentation both tracks share: the release that settles the size, the
+/// track width, and the slider styling.
+fn track(slider: slider::Slider<'static, u32, Message>) -> Element<'static, Message> {
+    slider
+        .on_release(Message::ThumbnailSizeReleased)
+        .width(TRACK_WIDTH)
+        .style(styles::thumbnail_size_slider)
+        .into()
 }

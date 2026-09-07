@@ -2412,7 +2412,8 @@ fn status_bar(state: &Ferrocull) -> Element<'_, Message> {
 
     let size_control = views::thumbnail_size::control(
         state.config.view.thumbnail_size,
-        state.grid_area_width.map(|w| (w, state.window_scale)),
+        state.grid_area_width,
+        state.window_scale,
     )
     .map(Message::Filters);
 
