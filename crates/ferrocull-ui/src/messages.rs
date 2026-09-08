@@ -119,7 +119,9 @@ pub(crate) mod grid {
             content_height: f32,
         },
         /// The width the grid laid its columns out against, from the first
-        /// layout on. A change re-anchors the top row.
+        /// layout on. A change re-anchors the top row, moving it the fewest
+        /// rows that keep a focused card the reflow would push off screen in
+        /// view.
         Resized(f32),
     }
 }

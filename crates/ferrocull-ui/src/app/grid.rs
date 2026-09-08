@@ -310,64 +310,98 @@ impl Ferrocull {
     }
 
     /// Adopt the width the grid just laid its columns out against and keep the
-    /// anchor card pinned to the viewport top across the reflow it implies.
-    /// The first report only records the width: there is no earlier layout to
-    /// have moved away from.
+    /// photographer's place across the reflow it implies: the anchor row stays
+    /// at the viewport top, and a focused card the reflow would push off screen
+    /// is brought back into view by the fewest rows. A focused card that was
+    /// already scrolled away stays away. The first report only records the
+    /// width: there is no earlier layout to have moved away from.
     fn handle_grid_resized(&mut self, width: f32) -> Task<Message> {
-        if self.grid_area_width.replace(width).is_none() {
+        let Some(previous) = self.grid_area_width else {
+            self.grid_area_width = Some(width);
             return Task::none();
-        }
-        self.reanchor_grid(width)
+        };
+        // Whether the card shows is judged against the layout on screen, which
+        // the previous width lays out.
+        let follow = self.focused_ordinal_in_view(previous);
+        self.grid_area_width = Some(width);
+        self.reflow_grid(width, follow)
     }
 
     /// Store `size` and scroll the reflowed grid so the photographer keeps their
-    /// place: the anchor row stays at the viewport top, and a focused card that
-    /// was on screen before the change is nudged back into view by the smallest
-    /// amount. A focused card that was already scrolled away stays away.
+    /// place: the anchor row stays at the viewport top, and a focused card the
+    /// reflow would push off screen is brought back into view by the fewest
+    /// rows. A focused card that was already scrolled away stays away.
     pub(super) fn reflow_thumbnail_size(&mut self, size: u32) -> Task<Message> {
         let Some(width) = self.grid_area_width else {
             self.config.view.thumbnail_size = size;
             return Task::none();
         };
 
-        // Whether the focused card shows is judged against the layout the
-        // photographer is looking at, before the new size reflows it. One that
-        // was already scrolled away has no claim on where the grid lands.
-        let follow = self.focused_index.filter(|&idx| {
-            let cell = self.grid_cell(width);
-            let rows = self.grid_rows(width);
-            let (row, _) = self.focused_row(&rows, idx);
-            views::thumbnails::row_in_view(
-                &rows,
-                row,
-                self.grid_scroll_y,
-                self.grid_viewport_height,
-                cell,
-            )
-        });
+        let follow = self.focused_ordinal_in_view(width);
 
         self.config.view.thumbnail_size = size;
         self.grid_wheel_lines = 0.0;
 
-        let Some(anchored) = self.anchor_offset(width) else {
-            return Task::none();
-        };
+        self.reflow_grid(width, follow)
+    }
+
+    /// The focused card's display ordinal, when its row shows under the
+    /// geometry `width` gives at the current scroll offset. Callers read this
+    /// before a reflow: whether the card shows is judged against the layout the
+    /// photographer is looking at, and one that was already scrolled away has
+    /// no claim on where the grid lands.
+    fn focused_ordinal_in_view(&mut self, width: f32) -> Option<usize> {
+        let idx = self.focused_index?;
         let cell = self.grid_cell(width);
         let rows = self.grid_rows(width);
-        let y = follow
-            .and_then(|idx| {
-                let (row, _) = self.focused_row(&rows, idx);
-                let (row_top, row_bottom) = views::thumbnails::row_bounds(&rows, row, cell);
-                views::thumbnails::keep_row_in_view(
-                    anchored,
-                    row_top,
-                    row_bottom,
-                    self.grid_viewport_height,
-                )
-            })
-            .unwrap_or(anchored);
+        let (row, ordinal) = self.focused_row(&rows, idx);
+        views::thumbnails::row_in_view(
+            &rows,
+            row,
+            self.grid_scroll_y,
+            self.grid_viewport_height,
+            cell,
+        )
+        .then_some(ordinal)
+    }
 
-        self.scroll_grid_to(width, y)
+    /// Scroll the reflowed grid so the anchor row tops the viewport under the
+    /// geometry `width` gives. When that would push the row holding ordinal
+    /// `follow` off screen, the anchor first moves down or up by the fewest
+    /// rows that show the row whole. A row that still shows in part is left
+    /// alone, so a drag that only stretches the cells does not step the grid.
+    ///
+    /// The follow moves the pinned anchor rather than the offset: every reflow
+    /// draws a viewport report that re-anchors, and a re-anchor can only
+    /// reproduce a row top, so an offset between two rows would be lost on the
+    /// next report.
+    fn reflow_grid(&mut self, width: f32, follow: Option<usize>) -> Task<Message> {
+        if let Some(ordinal) = follow {
+            let cell = self.grid_cell(width);
+            let rows = self.grid_rows(width);
+            let anchor = views::thumbnails::row_for_ordinal(&rows, self.grid_anchor)
+                .expect("grid anchor maps to no row");
+            let target = views::thumbnails::row_for_ordinal(&rows, ordinal)
+                .expect("no row for focused ordinal");
+            let lost = !views::thumbnails::row_in_view(
+                &rows,
+                target,
+                rows[anchor].offset,
+                self.grid_viewport_height,
+                cell,
+            );
+            if lost {
+                let landed = views::thumbnails::anchor_row_showing(
+                    &rows,
+                    anchor,
+                    target,
+                    self.grid_viewport_height,
+                    cell,
+                );
+                self.grid_anchor = rows[landed].ordinal;
+            }
+        }
+        self.reanchor_grid(width)
     }
 
     /// Scroll the grid to `y`, clamped to the range the content allows, and pin

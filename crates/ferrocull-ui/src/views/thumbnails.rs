@@ -430,6 +430,26 @@ pub(crate) fn keep_row_in_view(
     }
 }
 
+/// The row to sit at the viewport top so that row `target` shows whole, moving
+/// the fewest rows from `anchor`: [`keep_row_in_view`] rounded up to the first
+/// row starting at or after the offset it picks. Rounding down would clip the
+/// target's bottom again when the offset falls mid-row.
+///
+/// The counterpart to [`keep_row_in_view`] for a position that has to survive a
+/// later re-anchor: the result is a row, so re-anchoring to it reproduces the
+/// same offset, where a pixel-precise scroll target would be lost.
+pub(crate) fn anchor_row_showing(
+    rows: &[RowStart],
+    anchor: usize,
+    target: usize,
+    viewport_height: f32,
+    cell: CellGeometry,
+) -> usize {
+    let (top, bottom) = row_bounds(rows, target, cell);
+    keep_row_in_view(rows[anchor].offset, top, bottom, viewport_height)
+        .map_or(anchor, |y| rows.partition_point(|r| r.offset < y - ROW_EPS))
+}
+
 /// Whole wheel notches in `delta` plus whatever `carry` already held, leaving
 /// the fraction in `carry` for the next event.
 ///
@@ -1244,10 +1264,10 @@ fn preview_icon() -> Element<'static, CellEvent> {
 mod tests {
     use super::{
         CellGeometry, DATE_HEADER_HEIGHT, Point, RowStart, SCROLLBAR_GUTTER, THUMBNAIL_SIZE_MAX,
-        THUMBNAIL_SIZE_MIN, anchor_row, column_range, columns_for, content_height, grid_metrics,
-        grid_width, header_block, item_at, keep_row_in_view, nominal_for_columns, row_bounds,
-        row_for_ordinal, row_in_view, row_run_spacers, row_starts, step_columns, step_row,
-        take_whole_notches, visible_row_window,
+        THUMBNAIL_SIZE_MIN, anchor_row, anchor_row_showing, column_range, columns_for,
+        content_height, grid_metrics, grid_width, header_block, item_at, keep_row_in_view,
+        nominal_for_columns, row_bounds, row_for_ordinal, row_in_view, row_run_spacers, row_starts,
+        step_columns, step_row, take_whole_notches, visible_row_window,
     };
     use crate::theme::spacing;
 
@@ -2046,6 +2066,55 @@ mod tests {
         // A row taller than the viewport aligns to its top rather than its
         // bottom, which would push the row's start off screen.
         assert_eq!(keep_row_in_view(0.0, 400.0, 900.0, 300.0), Some(400.0));
+    }
+
+    #[test]
+    fn anchor_row_showing_keeps_an_anchor_that_already_shows_the_target() {
+        let rows = rows_every(20, 100.0);
+        // Rows are 100 apart and a viewport of 350 shows rows 5..=7 whole from
+        // anchor 5; nothing needs to move for any of them.
+        for target in 5..=7 {
+            assert_eq!(anchor_row_showing(&rows, 5, target, 350.0, CELL), 5);
+        }
+        // Row 8 ends at 900, one row past the viewport, so the anchor steps one
+        // row down.
+        assert_eq!(anchor_row_showing(&rows, 5, 8, 350.0, CELL), 6);
+    }
+
+    #[test]
+    fn anchor_row_showing_aligns_a_target_above_the_anchor() {
+        let rows = rows_every(20, 100.0);
+        assert_eq!(anchor_row_showing(&rows, 8, 3, 350.0, CELL), 3);
+    }
+
+    #[test]
+    fn anchor_row_showing_moves_down_the_fewest_rows() {
+        let rows = rows_every(20, 100.0);
+        let (viewport, anchor, target) = (350.0, 2, 9);
+        let landed = anchor_row_showing(&rows, anchor, target, viewport, CELL);
+        let (_, bottom) = row_bounds(&rows, target, CELL);
+        assert!(bottom <= rows[landed].offset + viewport);
+        // The row above it cannot show the target: that is what makes this the
+        // fewest rows of travel.
+        assert!(bottom > rows[landed - 1].offset + viewport);
+    }
+
+    /// A section's first row starts above its cards by the header block, so
+    /// the snap from the reveal offset has to land on that row, not the one
+    /// after it.
+    #[test]
+    fn anchor_row_showing_lands_on_a_section_first_row() {
+        let rows = row_starts(&[(0, 4), (4, 5)], 3, CELL, header_block(true));
+        assert_eq!(anchor_row_showing(&rows, 3, 2, 150.0, CELL), 2);
+        assert_eq!(anchor_row_showing(&rows, 0, 2, 150.0, CELL), 2);
+    }
+
+    #[test]
+    fn anchor_row_showing_never_scrolls_a_tall_target_past_its_top() {
+        // A viewport shorter than one row: aligning the target's bottom would
+        // push its top off screen, so the anchor stops at the target.
+        let rows = rows_every(20, 100.0);
+        assert_eq!(anchor_row_showing(&rows, 0, 6, 50.0, CELL), 6);
     }
 
     #[test]
