@@ -395,7 +395,8 @@ struct Ferrocull {
     /// next viewport report, which carries the post-resize heights. iced sends
     /// no report while the content fits its viewport, so the follow can outlive
     /// the resize: it stores the card rather than its ordinal, and applies only
-    /// while that card keeps the focus.
+    /// while that card keeps the focus. A scroll, anchor pin, or thumbnail
+    /// reflow the app makes itself drops it.
     grid_pending_follow: Option<usize>,
     /// Last seen scrollable viewport height, to tell user scrolls from clamps.
     grid_viewport_height: f32,
