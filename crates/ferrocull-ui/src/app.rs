@@ -391,6 +391,12 @@ struct Ferrocull {
     /// Updated when the user scrolls; reflows re-anchor to it unchanged, so a
     /// resize drag keeps pinning the same card (and resizing back restores it).
     grid_anchor: usize,
+    /// Media index of the focused card a width resize follows, held until the
+    /// next viewport report, which carries the post-resize heights. iced sends
+    /// no report while the content fits its viewport, so the follow can outlive
+    /// the resize: it stores the card rather than its ordinal, and applies only
+    /// while that card keeps the focus.
+    grid_pending_follow: Option<usize>,
     /// Last seen scrollable viewport height, to tell user scrolls from clamps.
     grid_viewport_height: f32,
     /// Last seen scrollable content height, to tell user scrolls from clamps.
@@ -534,6 +540,7 @@ impl Default for Ferrocull {
             grid_scroll_y: 0.0,
             grid_area_width: None,
             grid_anchor: 0,
+            grid_pending_follow: None,
             grid_viewport_height: 0.0,
             grid_content_height: 0.0,
             grid_wheel_lines: 0.0,

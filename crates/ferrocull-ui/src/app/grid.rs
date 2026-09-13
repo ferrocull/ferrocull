@@ -274,6 +274,12 @@ impl Ferrocull {
     /// disambiguates from the height deltas: a clamp re-pins the stored anchor;
     /// only a pure offset move at unchanged heights is a user scroll that moves
     /// the anchor.
+    ///
+    /// A focused-card follow pending from a width resize is applied here,
+    /// judged against the post-resize viewport height, unless the focus has
+    /// moved to another card since. A user scroll drops it instead: a follow
+    /// left over from a resize that drew no report would otherwise pull the
+    /// grid back to a card the photographer scrolled away from.
     fn handle_grid_scrolled(
         &mut self,
         offset: f32,
@@ -293,16 +299,30 @@ impl Ferrocull {
 
         self.grid_viewport_height = viewport_height;
         self.grid_content_height = content_height;
+        let follow = self
+            .grid_pending_follow
+            .take()
+            .filter(|&idx| self.focused_index == Some(idx))
+            .map(|idx| {
+                self.ordinal_position(idx)
+                    .expect("no ordinal for focused index")
+            });
 
-        match reaction {
-            views::thumbnails::ScrollReaction::Reanchor => self.reanchor_grid(width),
-            views::thumbnails::ScrollReaction::AdoptOffset => {
+        match (reaction, follow) {
+            (views::thumbnails::ScrollReaction::Reanchor, follow) => {
+                self.reflow_grid(width, follow)
+            }
+            (views::thumbnails::ScrollReaction::AdoptOffset, _) => {
                 let rows = self.grid_rows(width);
                 self.pin_anchor(&rows, offset);
                 self.grid_scroll_y = offset;
                 Task::none()
             }
-            views::thumbnails::ScrollReaction::Idle => {
+            (views::thumbnails::ScrollReaction::Idle, Some(ordinal)) => {
+                self.grid_scroll_y = offset;
+                self.reflow_grid(width, Some(ordinal))
+            }
+            (views::thumbnails::ScrollReaction::Idle, None) => {
                 self.grid_scroll_y = offset;
                 Task::none()
             }
@@ -315,6 +335,11 @@ impl Ferrocull {
     /// is brought back into view by the fewest rows. A focused card that was
     /// already scrolled away stays away. The first report only records the
     /// width: there is no earlier layout to have moved away from.
+    ///
+    /// The sensor sits inside the scrollable content, so this report arrives
+    /// before the viewport report that carries the post-resize heights. The
+    /// follow runs now against the old viewport height and is held for
+    /// [`Self::handle_grid_scrolled`] to re-apply once the new height is known.
     fn handle_grid_resized(&mut self, width: f32) -> Task<Message> {
         let Some(previous) = self.grid_area_width else {
             self.grid_area_width = Some(width);
@@ -324,6 +349,7 @@ impl Ferrocull {
         // the previous width lays out.
         let follow = self.focused_ordinal_in_view(previous);
         self.grid_area_width = Some(width);
+        self.grid_pending_follow = follow.and(self.focused_index);
         self.reflow_grid(width, follow)
     }
 
@@ -471,12 +497,15 @@ impl Ferrocull {
         self.reanchor_grid(width)
     }
 
-    /// Reset the grid to the top and drop the pinned anchor. Called whenever the
-    /// view model changes (sort, filter, grouping, ascending, ...): the anchor
-    /// is a display ordinal into the *old* order, so re-pinning it after the
-    /// reflow would scroll to an arbitrary row in the new order.
+    /// Reset the grid to the top and drop the pinned anchor and any pending
+    /// follow. Called whenever the view model changes (sort, filter, grouping,
+    /// ascending, ...): the anchor is a display ordinal into the *old* order, so
+    /// re-pinning it after the reflow would scroll to an arbitrary row in the
+    /// new order, and a follow judged against the old layout has no claim on
+    /// where the new one lands.
     pub(super) fn reset_grid_scroll(&mut self) -> Task<Message> {
         self.grid_anchor = 0;
+        self.grid_pending_follow = None;
         self.grid_scroll_y = 0.0;
         self.grid_wheel_lines = 0.0;
         iced::widget::operation::scroll_to(GRID_SCROLLABLE_ID, AbsoluteOffset { x: 0.0, y: 0.0 })
