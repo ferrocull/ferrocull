@@ -662,6 +662,14 @@ pub(crate) fn scroll_reaction(
     }
 }
 
+/// Whether a viewport report of `viewport_height` shortens the viewport `prev`
+/// recorded. Only a shorter viewport can lose a row that showed: a taller one
+/// keeps the offset or clamps it toward the start, and either way the rows that
+/// showed still do.
+pub(crate) fn viewport_shrank(prev: GridGeometry, viewport_height: f32) -> bool {
+    prev.viewport_height - viewport_height > GEOM_EPS
+}
+
 /// Row containing card `ordinal`: the last row whose first card is at or before
 /// it. Used to re-anchor the same card after a column-count reflow.
 pub(crate) fn row_for_ordinal(rows: &[RowStart], ordinal: usize) -> Option<usize> {
@@ -1569,7 +1577,7 @@ mod tests {
         assert_eq!(rows[target].ordinal, 12);
     }
 
-    use super::{GridGeometry, ScrollReaction, scroll_reaction};
+    use super::{GridGeometry, ScrollReaction, scroll_reaction, viewport_shrank};
 
     fn geom(vh: f32, ch: f32, scroll_y: f32) -> GridGeometry {
         GridGeometry {
@@ -1631,6 +1639,16 @@ mod tests {
             scroll_reaction(prev, 1500.0, 600.0, 2100.0),
             ScrollReaction::Reanchor
         );
+    }
+
+    #[test]
+    fn viewport_shrank_only_for_a_real_height_loss() {
+        let prev = geom(600.0, 3000.0, 500.0);
+        assert!(viewport_shrank(prev, 400.0));
+        assert!(!viewport_shrank(prev, 900.0));
+        assert!(!viewport_shrank(prev, 599.8));
+        // The first report grows the viewport out of the zero geometry.
+        assert!(!viewport_shrank(geom(0.0, 0.0, 0.0), 600.0));
     }
 
     #[test]
