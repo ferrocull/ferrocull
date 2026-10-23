@@ -112,7 +112,7 @@ The markdown in this repository is the shared understanding humans and coding ag
 | File                       | What it holds                                              |
 | -------------------------- | ---------------------------------------------------------- |
 | [`AGENTS.md`](AGENTS.md)   | the rules code in this repository follows                  |
-| [`CONTEXT.md`](CONTEXT.md) | the glossary: what burst, select, or paired file mean here |
+| [`GLOSSARY.md`](GLOSSARY.md) | the glossary: what burst, select, or paired file mean here |
 | [`PRODUCT.md`](PRODUCT.md) | who Ferrocull is for and what it refuses to become         |
 | [`DESIGN.md`](DESIGN.md)   | the visual system, down to the color tokens                |
 | [`docs/adr/`](docs/adr/)   | why the significant calls were made                        |
