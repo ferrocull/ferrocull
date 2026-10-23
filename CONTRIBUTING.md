@@ -76,7 +76,7 @@ Link the issue if there is one. If the change grew past what the issue described
 
 [`AGENTS.md`](AGENTS.md) is the contract that code in this repository follows: naming, error handling, when to `expect` and when to propagate, how the UI and the core are structured. It is written for coding agents, but the rules apply to everyone. Read it before writing code.
 
-[`CONTEXT.md`](CONTEXT.md) is the glossary. Use the words it defines, in code and in prose. A pull request that calls a burst a sequence, or tagging picking, creates work for whoever reads it next.
+[`GLOSSARY.md`](GLOSSARY.md) is the glossary. Use the words it defines, in code and in prose. A pull request that calls a burst a sequence, or tagging picking, creates work for whoever reads it next.
 
 ## AI-assisted contributions
 

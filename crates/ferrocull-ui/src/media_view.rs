@@ -912,7 +912,7 @@ impl MediaView {
     }
 
     /// Split a capture-time-ordered slice of passing indices into burst runs:
-    /// maximal ≤threshold chains of length ≥3 (per `CONTEXT.md`).
+    /// maximal ≤threshold chains of length ≥3 (per `GLOSSARY.md`).
     fn group_bursts_in(&self, ordered: &[usize]) -> Vec<Vec<usize>> {
         let mut bursts: Vec<Vec<usize>> = Vec::new();
         let mut run: Vec<usize> = Vec::new();

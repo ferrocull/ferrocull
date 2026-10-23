@@ -89,7 +89,7 @@ This deliberately inverts the common Rust advice to avoid `expect()`: a broken i
 
 ## Keyboard shortcuts and vocabulary
 
-Match Photo Mechanic for both shortcuts and user-facing terminology. Rationale: [ADR-0001](docs/adr/0001-photo-mechanic-vocabulary.md). Canonical terms: [`CONTEXT.md`](CONTEXT.md).
+Match Photo Mechanic for both shortcuts and user-facing terminology. Rationale: [ADR-0001](docs/adr/0001-photo-mechanic-vocabulary.md). Canonical terms: [`GLOSSARY.md`](GLOSSARY.md).
 
 ## Architecture
 
@@ -109,4 +109,4 @@ Canonical five-role triage vocabulary: `needs-triage`, `needs-info`, `ready-for-
 
 ### Domain docs
 
-Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
