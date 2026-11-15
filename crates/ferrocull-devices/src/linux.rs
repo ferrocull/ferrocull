@@ -12,8 +12,9 @@ use tokio::sync::{
     mpsc::{UnboundedSender, error::SendError},
 };
 use zbus::{
-    Connection, MatchRule, MessageStream, ObjectPath, OwnedObjectPath, OwnedVariant,
-    fdo::ObjectManagerProxy,
+    Connection, MatchRule, MessageStream, OwnedObjectPath, OwnedVariant,
+    fdo::{ObjectManagerProxy, PropertiesChanged},
+    message::Message,
 };
 
 use crate::{
@@ -32,39 +33,56 @@ async fn connection() -> zbus::Result<&'static Connection> {
     default_service = "org.freedesktop.UDisks2"
 )]
 trait Filesystem {
-    fn mount(&self, options: &MountOptions) -> zbus::Result<String>;
-    fn unmount(&self, options: &UnmountOptions) -> zbus::Result<()>;
-    #[zbus(property)]
-    fn mount_points(&self) -> zbus::Result<Vec<Vec<u8>>>;
+    fn mount(&self, options: &MountOptions) -> Result<String, Udisks2Error>;
+    fn unmount(&self, options: &UnmountOptions) -> Result<(), Udisks2Error>;
 }
 
-#[zbus::proxy(
-    interface = "org.freedesktop.UDisks2.Block",
-    default_service = "org.freedesktop.UDisks2"
-)]
-trait Block {
-    #[zbus(property)]
-    fn preferred_device(&self) -> zbus::Result<Vec<u8>>;
-    #[zbus(property)]
-    fn drive(&self) -> zbus::Result<OwnedObjectPath>;
-    #[zbus(property)]
-    fn id_label(&self) -> zbus::Result<String>;
+/// The `org.freedesktop.UDisks2.Error` replies the backend tells apart. Any
+/// other failure, on the bus or from `UDisks2`, is carried by `ZBus`.
+#[derive(Debug, zbus::DBusError)]
+#[zbus(prefix = "org.freedesktop.UDisks2.Error")]
+enum Udisks2Error {
+    #[zbus(error)]
+    ZBus(zbus::Error),
+    AlreadyMounted(String),
+    NotMounted(String),
+    DeviceBusy(String),
+    NotAuthorized(String),
+    NotAuthorizedCanObtain(String),
+    NotAuthorizedDismissed(String),
 }
 
-#[zbus::proxy(
-    interface = "org.freedesktop.UDisks2.Drive",
-    default_service = "org.freedesktop.UDisks2"
-)]
-trait Drive {
-    #[zbus(property)]
-    fn removable(&self) -> zbus::Result<bool>;
-    #[zbus(property)]
-    fn connection_bus(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn model(&self) -> zbus::Result<String>;
+impl From<Udisks2Error> for MountError {
+    fn from(error: Udisks2Error) -> Self {
+        match error {
+            Udisks2Error::AlreadyMounted(_) => Self::AlreadyMounted,
+            Udisks2Error::NotAuthorized(_)
+            | Udisks2Error::NotAuthorizedCanObtain(_)
+            | Udisks2Error::NotAuthorizedDismissed(_) => Self::PermissionDenied,
+            Udisks2Error::ZBus(error) => Self::Failed(error.to_string()),
+            Udisks2Error::NotMounted(_) | Udisks2Error::DeviceBusy(_) => {
+                Self::Failed(error.to_string())
+            }
+        }
+    }
+}
+
+impl From<Udisks2Error> for UnmountError {
+    fn from(error: Udisks2Error) -> Self {
+        match error {
+            Udisks2Error::NotMounted(_) => Self::NotMounted,
+            Udisks2Error::DeviceBusy(_) => Self::Busy,
+            Udisks2Error::NotAuthorized(_)
+            | Udisks2Error::NotAuthorizedCanObtain(_)
+            | Udisks2Error::NotAuthorizedDismissed(_) => Self::PermissionDenied,
+            Udisks2Error::ZBus(error) => Self::Failed(error.to_string()),
+            Udisks2Error::AlreadyMounted(_) => Self::Failed(error.to_string()),
+        }
+    }
 }
 
 const UDISKS2_SERVICE: &str = "org.freedesktop.UDisks2";
+const UDISKS2_PATH: &str = "/org/freedesktop/UDisks2";
 const BLOCK_IFACE: &str = "org.freedesktop.UDisks2.Block";
 const FS_IFACE: &str = "org.freedesktop.UDisks2.Filesystem";
 const DRIVE_IFACE: &str = "org.freedesktop.UDisks2.Drive";
@@ -174,15 +192,17 @@ impl From<zbus::fdo::Error> for ScanError {
     }
 }
 
+async fn object_manager(conn: &Connection) -> zbus::Result<ObjectManagerProxy<'_>> {
+    ObjectManagerProxy::builder(conn)
+        .destination(UDISKS2_SERVICE)
+        .path(UDISKS2_PATH)
+        .build()
+        .await
+}
+
 pub(crate) async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
     let conn = connection().await?;
-    let om = ObjectManagerProxy::builder(conn)
-        .destination(UDISKS2_SERVICE)
-        .path("/org/freedesktop/UDisks2")
-        .build()
-        .await?;
-
-    let objects = om.get_managed_objects().await?;
+    let objects = object_manager(conn).await?.get_managed_objects().await?;
 
     let (drive_entries, block_entries): (Vec<_>, Vec<_>) = objects
         .into_iter()
@@ -278,13 +298,9 @@ fn block_priority(mounted: bool, has_filesystem: bool) -> u8 {
     }
 }
 
-async fn filesystem_proxy(object_path: &str) -> Result<FilesystemProxy<'static>, zbus::Error> {
-    let conn = connection().await?;
-    // Own the path so the proxy isn't tied to the borrowed `object_path`.
-    let path = OwnedObjectPath::try_from(object_path)?;
-    FilesystemProxy::builder(conn)
-        .destination(UDISKS2_SERVICE)
-        .path(ObjectPath::from(path))
+async fn filesystem_proxy(object_path: &str) -> zbus::Result<FilesystemProxy<'static>> {
+    FilesystemProxy::builder(connection().await?)
+        .path(object_path.to_owned())
         .build()
         .await
 }
@@ -301,20 +317,7 @@ pub(crate) async fn mount(
         .mount(options)
         .await
         .map(PathBuf::from)
-        .map_err(|e| classify_mount_error(&e))
-}
-
-fn classify_mount_error(e: &zbus::Error) -> MountError {
-    if let zbus::Error::MethodError(name, _, _) = e {
-        let name = name.as_str();
-        if name.ends_with(".AlreadyMounted") {
-            return MountError::AlreadyMounted;
-        }
-        if is_not_authorized(name) {
-            return MountError::PermissionDenied;
-        }
-    }
-    MountError::Failed(e.to_string())
+        .map_err(MountError::from)
 }
 
 pub(crate) async fn unmount(
@@ -325,32 +328,7 @@ pub(crate) async fn unmount(
         .await
         .map_err(|e| UnmountError::Failed(e.to_string()))?;
 
-    proxy
-        .unmount(options)
-        .await
-        .map_err(|e| classify_unmount_error(&e))
-}
-
-fn classify_unmount_error(e: &zbus::Error) -> UnmountError {
-    if let zbus::Error::MethodError(name, _, _) = e {
-        let name = name.as_str();
-        if name.ends_with(".NotMounted") {
-            return UnmountError::NotMounted;
-        }
-        if name.ends_with(".DeviceBusy") {
-            return UnmountError::Busy;
-        }
-        if is_not_authorized(name) {
-            return UnmountError::PermissionDenied;
-        }
-    }
-    UnmountError::Failed(e.to_string())
-}
-
-fn is_not_authorized(error_name: &str) -> bool {
-    error_name.ends_with(".NotAuthorized")
-        || error_name.ends_with(".NotAuthorizedCanObtain")
-        || error_name.ends_with(".NotAuthorizedDismissed")
+    proxy.unmount(options).await.map_err(UnmountError::from)
 }
 
 #[must_use]
@@ -447,6 +425,27 @@ fn emit_unmounted(
     .map_err(Box::new)
 }
 
+/// Decodes the body of an `InterfacesAdded` signal into owned property maps.
+fn added_interfaces(message: &Message) -> zbus::Result<(OwnedObjectPath, HashMap<String, Props>)> {
+    message.body().deserialize()
+}
+
+/// The `MountPoints` a `PropertiesChanged` signal reports for a filesystem, or
+/// `None` when the signal is about another interface or property.
+fn changed_mount_points(message: Message) -> Option<Vec<Vec<u8>>> {
+    let signal = PropertiesChanged::from_message(message)?;
+    let args = signal.args().ok()?;
+    if args.interface_name() != FS_IFACE {
+        return None;
+    }
+    args.changed_properties()
+        .get("MountPoints")?
+        .try_clone()
+        .ok()?
+        .downcast()
+        .ok()
+}
+
 /// Streams device events from `UDisks2`.
 ///
 /// Emits one `Inserted`/`Removed` per `UDisks2` Block — the whole-disk node plus
@@ -462,11 +461,7 @@ pub(crate) async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchE
 
 async fn watch_inner(tx: UnboundedSender<DeviceEvent>) -> zbus::Result<()> {
     let conn = connection().await?;
-    let om = ObjectManagerProxy::builder(conn)
-        .destination(UDISKS2_SERVICE)
-        .path("/org/freedesktop/UDisks2")
-        .build()
-        .await?;
+    let om = object_manager(conn).await?;
 
     let mut added_stream = om.receive_interfaces_added().await?;
     let mut removed_stream = om.receive_interfaces_removed().await?;
@@ -521,9 +516,7 @@ async fn watch_inner(tx: UnboundedSender<DeviceEvent>) -> zbus::Result<()> {
     loop {
         tokio::select! {
             Some(signal) = added_stream.next() => {
-                let Ok((obj_path, mut interfaces)): Result<(OwnedObjectPath, HashMap<String, Props>), _> =
-                    signal.message().body().deserialize_ignore_signature()
-                else {
+                let Ok((obj_path, mut interfaces)) = added_interfaces(signal.message()) else {
                     continue;
                 };
 
@@ -564,13 +557,11 @@ async fn watch_inner(tx: UnboundedSender<DeviceEvent>) -> zbus::Result<()> {
                 }
             }
             Some(signal) = removed_stream.next() => {
-                let Ok((obj_path, removed_ifaces)): Result<(OwnedObjectPath, Vec<String>), _> =
-                    signal.message().body().deserialize_ignore_signature()
-                else {
+                let Ok(args) = signal.args() else {
                     continue;
                 };
-
-                let has = |target: &str| removed_ifaces.iter().any(|s| s == target);
+                let obj_path = OwnedObjectPath::from(args.object_path().clone());
+                let has = |target: &str| args.interfaces().iter().any(|name| name == target);
 
                 if has(DRIVE_IFACE) {
                     drives.remove(&obj_path);
@@ -606,24 +597,11 @@ async fn watch_inner(tx: UnboundedSender<DeviceEvent>) -> zbus::Result<()> {
                         continue;
                     }
                 };
-                let Ok((interface_name, mut changed_props, _invalidated)):
-                    Result<(String, Props, Vec<String>), _> =
-                    msg.body().deserialize_ignore_signature()
-                else {
-                    continue;
-                };
-                if interface_name != FS_IFACE {
-                    continue;
-                }
-
                 let Some(obj_path) = msg.header().path().map(|p| OwnedObjectPath::from(p.clone()))
                 else {
                     continue;
                 };
-
-                let Some(mount_points) =
-                    remove_as::<Vec<Vec<u8>>>(&mut changed_props, "MountPoints")
-                else {
+                let Some(mount_points) = changed_mount_points(msg) else {
                     continue;
                 };
                 let send_result = match mount_points.first() {
@@ -647,11 +625,128 @@ mod tests {
     use std::collections::HashMap;
 
     use zbus::{
-        OwnedVariant,
+        OwnedObjectPath, OwnedVariant, Variant,
+        message::Message,
         wire::{DynamicType, LE, serialized::Context, to_bytes},
     };
 
-    use crate::{FsType, MountOptions, UnmountOptions};
+    use super::{BLOCK_IFACE, FS_IFACE, Udisks2Error, added_interfaces, changed_mount_points};
+    use crate::{FsType, MountError, MountOptions, UnmountError, UnmountOptions};
+
+    const BLOCK_PATH: &str = "/org/freedesktop/UDisks2/block_devices/sdc1";
+
+    /// The error `UDisks2` would reply with to a `Filesystem` method call.
+    fn error_reply(name: &str) -> Udisks2Error {
+        let call = Message::method_call(BLOCK_PATH, "Mount")
+            .sender(":1.1")
+            .build(&())
+            .unwrap();
+        let reply = Message::error(&call.header(), name)
+            .build(&"refused")
+            .unwrap();
+        Udisks2Error::from(zbus::Error::from(reply))
+    }
+
+    fn properties_changed(interface: &str, property: &str) -> Message {
+        let changed =
+            HashMap::from([(property, Variant::from(vec![b"/run/media/card\0".to_vec()]))]);
+        Message::signal(
+            BLOCK_PATH,
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+        )
+        .build(&(interface, changed, Vec::<&str>::new()))
+        .unwrap()
+    }
+
+    #[test]
+    fn authorization_replies_are_permission_denied() {
+        for name in [
+            "NotAuthorized",
+            "NotAuthorizedCanObtain",
+            "NotAuthorizedDismissed",
+        ] {
+            let name = format!("org.freedesktop.UDisks2.Error.{name}");
+            assert!(matches!(
+                MountError::from(error_reply(&name)),
+                MountError::PermissionDenied
+            ));
+            assert!(matches!(
+                UnmountError::from(error_reply(&name)),
+                UnmountError::PermissionDenied
+            ));
+        }
+    }
+
+    #[test]
+    fn mount_state_replies_map_to_their_variants() {
+        assert!(matches!(
+            MountError::from(error_reply("org.freedesktop.UDisks2.Error.AlreadyMounted")),
+            MountError::AlreadyMounted
+        ));
+        assert!(matches!(
+            UnmountError::from(error_reply("org.freedesktop.UDisks2.Error.NotMounted")),
+            UnmountError::NotMounted
+        ));
+        assert!(matches!(
+            UnmountError::from(error_reply("org.freedesktop.UDisks2.Error.DeviceBusy")),
+            UnmountError::Busy
+        ));
+    }
+
+    #[test]
+    fn other_replies_fail_with_the_error_name_and_detail() {
+        for name in [
+            "org.freedesktop.UDisks2.Error.Failed",
+            "org.freedesktop.UDisks2.Error.DeviceBusy",
+        ] {
+            let MountError::Failed(message) = MountError::from(error_reply(name)) else {
+                panic!("{name} did not map to MountError::Failed");
+            };
+            assert_eq!(message, format!("{name}: refused"));
+        }
+    }
+
+    #[test]
+    fn interfaces_added_body_decodes_to_owned_properties() {
+        let block = HashMap::from([("IdLabel", Variant::from("EOS_DIGITAL"))]);
+        let signal = Message::signal(
+            "/org/freedesktop/UDisks2",
+            "org.freedesktop.DBus.ObjectManager",
+            "InterfacesAdded",
+        )
+        .build(&(
+            OwnedObjectPath::try_from(BLOCK_PATH).unwrap(),
+            HashMap::from([(BLOCK_IFACE, block)]),
+        ))
+        .unwrap();
+
+        let (path, mut interfaces) = added_interfaces(&signal).unwrap();
+
+        assert_eq!(path.as_str(), BLOCK_PATH);
+        let mut decoded = interfaces.remove(BLOCK_IFACE).unwrap();
+        let label = String::try_from(decoded.remove("IdLabel").unwrap()).unwrap();
+        assert_eq!(label, "EOS_DIGITAL");
+    }
+
+    #[test]
+    fn filesystem_mount_points_change_is_reported() {
+        let mount_points = changed_mount_points(properties_changed(FS_IFACE, "MountPoints"));
+
+        assert_eq!(mount_points, Some(vec![b"/run/media/card\0".to_vec()]));
+    }
+
+    #[test]
+    fn unrelated_property_changes_are_ignored() {
+        assert_eq!(
+            changed_mount_points(properties_changed(BLOCK_IFACE, "MountPoints")),
+            None
+        );
+        assert_eq!(
+            changed_mount_points(properties_changed(FS_IFACE, "Size")),
+            None
+        );
+    }
 
     fn encoded_options<T: serde::Serialize + DynamicType>(
         options: &T,
