@@ -160,33 +160,38 @@ pub enum MountError {
     Failed(String),
 }
 
-#[derive(Clone, Default, serde::Serialize)]
-#[cfg_attr(target_os = "linux", derive(zbus::Type))]
-#[cfg_attr(target_os = "linux", zbus(signature = "a{sv}"))]
+#[derive(Clone, Default)]
+#[cfg_attr(
+    target_os = "linux",
+    derive(zbus::SerializeDict, zbus::Type),
+    zbus(signature = "a{sv}")
+)]
 pub struct MountOptions {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub fstype: Option<FsType>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<String>,
 }
 
-#[derive(Clone, Default, serde::Serialize)]
-#[cfg_attr(target_os = "linux", derive(zbus::Type))]
-#[cfg_attr(target_os = "linux", zbus(signature = "a{sv}"))]
+#[derive(Clone, Default)]
+#[cfg_attr(
+    target_os = "linux",
+    derive(zbus::SerializeDict, zbus::Type),
+    zbus(signature = "a{sv}")
+)]
 pub struct UnmountOptions {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub force: Option<bool>,
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone)]
+#[cfg_attr(
+    target_os = "linux",
+    derive(serde::Serialize, zbus::Type),
+    serde(rename_all = "lowercase"),
+    zbus(signature = "s")
+)]
 pub enum FsType {
-    #[serde(rename = "vfat")]
     Vfat,
-    #[serde(rename = "exfat")]
     Exfat,
-    #[serde(rename = "ntfs")]
     Ntfs,
-    #[serde(rename = "ext4")]
     Ext4,
 }
 

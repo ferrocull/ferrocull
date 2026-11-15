@@ -651,7 +651,7 @@ mod tests {
         wire::{DynamicType, LE, serialized::Context, to_bytes},
     };
 
-    use crate::{MountOptions, UnmountOptions};
+    use crate::{FsType, MountOptions, UnmountOptions};
 
     fn encoded_options<T: serde::Serialize + DynamicType>(
         options: &T,
@@ -659,6 +659,28 @@ mod tests {
         let encoded = to_bytes(Context::new(LE, 0), options).unwrap();
         let (decoded, _) = encoded.deserialize().unwrap();
         decoded
+    }
+
+    #[test]
+    fn mount_options_encode_as_string_variants() {
+        let mut encoded = encoded_options(&MountOptions {
+            fstype: Some(FsType::Exfat),
+            options: Some("ro".to_owned()),
+        });
+
+        let fstype = String::try_from(encoded.remove("fstype").unwrap()).unwrap();
+        let options = String::try_from(encoded.remove("options").unwrap()).unwrap();
+        assert_eq!(fstype, "exfat");
+        assert_eq!(options, "ro");
+        assert!(encoded.is_empty());
+    }
+
+    #[test]
+    fn unmount_force_encodes_as_a_boolean_variant() {
+        let mut encoded = encoded_options(&UnmountOptions { force: Some(true) });
+
+        assert!(bool::try_from(encoded.remove("force").unwrap()).unwrap());
+        assert!(encoded.is_empty());
     }
 
     #[test]
