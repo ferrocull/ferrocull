@@ -12,9 +12,8 @@ use tokio::sync::{
     mpsc::{UnboundedSender, error::SendError},
 };
 use zbus::{
-    Connection, MatchRule, MessageStream,
+    Connection, MatchRule, MessageStream, ObjectPath, OwnedObjectPath, OwnedVariant,
     fdo::ObjectManagerProxy,
-    zvariant::{ObjectPath, OwnedObjectPath, OwnedValue},
 };
 
 use crate::{
@@ -88,14 +87,13 @@ fn device_name(label: Option<&str>, drive_model: Option<&str>, device_path: &Pat
     )
 }
 
-//
-// Each struct is parsed once from a HashMap<String, OwnedValue> removed
-// from the ManagedObjects response. Fields are plain Option<T> — no
-// hidden mutation, no string keys at access sites.
+// Each struct is parsed once from a HashMap<String, OwnedVariant> removed
+// from the ManagedObjects response. Fields are plain Option<T>, with no
+// hidden mutation and no string keys at access sites.
 
-type Props = HashMap<String, OwnedValue>;
+type Props = HashMap<String, OwnedVariant>;
 
-fn remove_as<T: TryFrom<OwnedValue>>(props: &mut Props, key: &str) -> Option<T> {
+fn remove_as<T: TryFrom<OwnedVariant>>(props: &mut Props, key: &str) -> Option<T> {
     T::try_from(props.remove(key)?).ok()
 }
 
@@ -179,8 +177,8 @@ impl From<zbus::fdo::Error> for ScanError {
 pub(crate) async fn scan_storage() -> Result<Vec<StorageDevice>, ScanError> {
     let conn = connection().await?;
     let om = ObjectManagerProxy::builder(conn)
-        .destination(UDISKS2_SERVICE)?
-        .path("/org/freedesktop/UDisks2")?
+        .destination(UDISKS2_SERVICE)
+        .path("/org/freedesktop/UDisks2")
         .build()
         .await?;
 
@@ -285,8 +283,8 @@ async fn filesystem_proxy(object_path: &str) -> Result<FilesystemProxy<'static>,
     // Own the path so the proxy isn't tied to the borrowed `object_path`.
     let path = OwnedObjectPath::try_from(object_path)?;
     FilesystemProxy::builder(conn)
-        .destination(UDISKS2_SERVICE)?
-        .path(ObjectPath::from(path))?
+        .destination(UDISKS2_SERVICE)
+        .path(ObjectPath::from(path))
         .build()
         .await
 }
@@ -465,8 +463,8 @@ pub(crate) async fn watch(tx: UnboundedSender<DeviceEvent>) -> Result<(), WatchE
 async fn watch_inner(tx: UnboundedSender<DeviceEvent>) -> zbus::Result<()> {
     let conn = connection().await?;
     let om = ObjectManagerProxy::builder(conn)
-        .destination(UDISKS2_SERVICE)?
-        .path("/org/freedesktop/UDisks2")?
+        .destination(UDISKS2_SERVICE)
+        .path("/org/freedesktop/UDisks2")
         .build()
         .await?;
 
@@ -477,11 +475,11 @@ async fn watch_inner(tx: UnboundedSender<DeviceEvent>) -> zbus::Result<()> {
     // mount/unmount signals are lost during the snapshot.
     let rule = MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
-        .sender(UDISKS2_SERVICE)?
-        .interface("org.freedesktop.DBus.Properties")?
-        .member("PropertiesChanged")?
-        .path_namespace("/org/freedesktop/UDisks2/block_devices")?
-        .build();
+        .sender(UDISKS2_SERVICE)
+        .interface("org.freedesktop.DBus.Properties")
+        .member("PropertiesChanged")
+        .path_namespace("/org/freedesktop/UDisks2/block_devices")
+        .build()?;
     let mut props_stream = MessageStream::for_match_rule(rule, conn, None).await?;
 
     // Seed drives and known devices from current state so events for
@@ -524,7 +522,7 @@ async fn watch_inner(tx: UnboundedSender<DeviceEvent>) -> zbus::Result<()> {
         tokio::select! {
             Some(signal) = added_stream.next() => {
                 let Ok((obj_path, mut interfaces)): Result<(OwnedObjectPath, HashMap<String, Props>), _> =
-                    signal.message().body().deserialize_unchecked()
+                    signal.message().body().deserialize_ignore_signature()
                 else {
                     continue;
                 };
@@ -567,7 +565,7 @@ async fn watch_inner(tx: UnboundedSender<DeviceEvent>) -> zbus::Result<()> {
             }
             Some(signal) = removed_stream.next() => {
                 let Ok((obj_path, removed_ifaces)): Result<(OwnedObjectPath, Vec<String>), _> =
-                    signal.message().body().deserialize_unchecked()
+                    signal.message().body().deserialize_ignore_signature()
                 else {
                     continue;
                 };
@@ -610,7 +608,7 @@ async fn watch_inner(tx: UnboundedSender<DeviceEvent>) -> zbus::Result<()> {
                 };
                 let Ok((interface_name, mut changed_props, _invalidated)):
                     Result<(String, Props, Vec<String>), _> =
-                    msg.body().deserialize_unchecked()
+                    msg.body().deserialize_ignore_signature()
                 else {
                     continue;
                 };
@@ -641,5 +639,31 @@ async fn watch_inner(tx: UnboundedSender<DeviceEvent>) -> zbus::Result<()> {
                 return Ok(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use zbus::{
+        OwnedVariant,
+        wire::{DynamicType, LE, serialized::Context, to_bytes},
+    };
+
+    use crate::{MountOptions, UnmountOptions};
+
+    fn encoded_options<T: serde::Serialize + DynamicType>(
+        options: &T,
+    ) -> HashMap<String, OwnedVariant> {
+        let encoded = to_bytes(Context::new(LE, 0), options).unwrap();
+        let (decoded, _) = encoded.deserialize().unwrap();
+        decoded
+    }
+
+    #[test]
+    fn default_options_encode_as_an_empty_vardict() {
+        assert!(encoded_options(&MountOptions::default()).is_empty());
+        assert!(encoded_options(&UnmountOptions::default()).is_empty());
     }
 }
