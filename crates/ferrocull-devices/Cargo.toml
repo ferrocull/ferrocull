@@ -16,7 +16,7 @@ gphoto2 = "3"
 nix = { version = "0.32", features = ["fs"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
-zbus = { version = "6", default-features = false, features = ["proxy", "tokio"] }
+zbus = { version = "6", default-features = false, features = ["proxy", "tokio", "tracing"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
