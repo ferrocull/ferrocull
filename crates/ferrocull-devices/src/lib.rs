@@ -161,8 +161,8 @@ pub enum MountError {
 }
 
 #[derive(Clone, Default, serde::Serialize)]
-#[cfg_attr(target_os = "linux", derive(zbus::zvariant::Type))]
-#[cfg_attr(target_os = "linux", zvariant(signature = "a{sv}"))]
+#[cfg_attr(target_os = "linux", derive(zbus::Type))]
+#[cfg_attr(target_os = "linux", zbus(signature = "a{sv}"))]
 pub struct MountOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fstype: Option<FsType>,
@@ -171,8 +171,8 @@ pub struct MountOptions {
 }
 
 #[derive(Clone, Default, serde::Serialize)]
-#[cfg_attr(target_os = "linux", derive(zbus::zvariant::Type))]
-#[cfg_attr(target_os = "linux", zvariant(signature = "a{sv}"))]
+#[cfg_attr(target_os = "linux", derive(zbus::Type))]
+#[cfg_attr(target_os = "linux", zbus(signature = "a{sv}"))]
 pub struct UnmountOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force: Option<bool>,

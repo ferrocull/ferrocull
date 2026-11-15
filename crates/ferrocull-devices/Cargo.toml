@@ -14,13 +14,13 @@ walkdir = "2"
 [target.'cfg(target_os = "linux")'.dependencies]
 futures-util = { version = "0.3", default-features = false }
 gphoto2 = "3"
-nix = { version = "0.31", features = ["fs"] }
+nix = { version = "0.32", features = ["fs"] }
 tokio = { workspace = true, features = ["macros"] }
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "6", default-features = false, features = ["proxy", "tokio"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
-nix = { version = "0.31", features = ["fs"] }
+nix = { version = "0.32", features = ["fs"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
   "std",
   "CFArray",
